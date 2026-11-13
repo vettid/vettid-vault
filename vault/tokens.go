@@ -73,7 +73,11 @@ func (m *Manager) mint(p *Peer, kind string, ttl time.Duration, quota *relayauth
 	}
 	// relayclient backdates iat by 60 s (RELAY-PROTOCOL §5.2); exp = iat + ttl.
 	exp := now.UTC().Truncate(time.Second).Add(-tokenBackdate).Add(ttl)
-	return tok, append(acc, IssuedToken{JTI: jti, Kind: kind, Sub: relayauth.EncodeKey(p.Relay.PK), PeerID: p.ID, Exp: exp}), nil
+	it := IssuedToken{JTI: jti, Kind: kind, Sub: relayauth.EncodeKey(p.Relay.PK), PeerID: p.ID, Exp: exp}
+	if m.relayRotation() {
+		it.Iss = m.st.Relay.Mailbox
+	}
+	return tok, append(acc, it), nil
 }
 
 // heldToken validates a token another principal issued to the vault: its

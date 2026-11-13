@@ -97,7 +97,7 @@ func (h managerHost) DeferBlob(s *Session, id string, key, sum []byte, size int,
 	var want [32]byte
 	copy(want[:], sum)
 	maxBlob := m.attMaxBlob()
-	go m.runBlobCall(r, p.ID, req, rkey, id, key, want, size, maxBlob, call)
+	go m.runBlobCall(r, p.ID, req, rkey, id, m.blobMailbox(), key, want, size, maxBlob, call)
 	return nil
 }
 
@@ -105,7 +105,8 @@ func (h managerHost) DeferBlob(s *Session, id string, key, sum []byte, size int,
 // takes it to run the call and answer. The fetch is a transfer: the
 // instance's admission at the owner-fetch priority first, memory returned
 // afterwards when it was large.
-func (m *Manager) runBlobCall(r *attRunner, deviceID string, req envelope.Inner, rkey, blobID string, key []byte, sum [32]byte, size, maxBlob int, call BlobCall) {
+func (m *Manager) runBlobCall(r *attRunner, deviceID string, req envelope.Inner, rkey, blobID, mailbox string, key []byte, sum [32]byte, size, maxBlob int,
+	call BlobCall) {
 	var plain []byte
 	var code string
 	fetch := func(ctx context.Context) int {
@@ -115,7 +116,7 @@ func (m *Manager) runBlobCall(r *attRunner, deviceID string, req envelope.Inner,
 		}
 		ctx, cancel := context.WithTimeout(ctx, blobCallBound)
 		defer cancel()
-		data, err := m.relay.GetBlob(ctx, blobID)
+		data, err := m.getBlobAny(ctx, mailbox, blobID)
 		switch {
 		case err != nil && (transient(err) || ctx.Err() != nil):
 			code = "relay_error"
@@ -156,7 +157,7 @@ func (m *Manager) runBlobCall(r *attRunner, deviceID string, req envelope.Inner,
 	// The blob is deleted on every path (§5.5): after a failed or timed out
 	// fetch too, with a context of its own.
 	dctx, dcancel := context.WithTimeout(context.Background(), 15*time.Second)
-	_ = m.relay.DeleteBlob(dctx, blobID)
+	m.deleteBlobIn(dctx, mailbox, blobID)
 	dcancel()
 	wipe(key)
 	m.mu.Lock()

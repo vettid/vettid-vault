@@ -423,6 +423,13 @@ func (m *Manager) deleteMailbox(ctx context.Context) {
 	if err := m.relay.DeleteMailbox(ctx); err != nil {
 		return // the revocations and claim deletions remain the fallback
 	}
+	if m.relayRotation() && m.keys != nil && m.keys.pendingRelay != nil {
+		// A pending key's mailbox, which a rotate may have made (§3.4);
+		// best effort: a mailbox never made answers not_found.
+		if r := m.pendingRelayClient(); r != nil {
+			_ = r.DeleteMailbox(ctx)
+		}
+	}
 	for _, e := range m.st.Outbox {
 		if e.Op == OpRevoke || e.Op == OpDeleteClaim {
 			e.Done = true

@@ -48,11 +48,13 @@ import (
 //     for the new key, the queued deposits move, and RK6 runs after the
 //     establishment.
 //
-// An earlier key past its cut-off cannot move the ik here: unlike an
-// update's, a reconnect's identity links are authenticated by sig_I or
-// sig_R under the ik they lead to, which an old copy of the peer does not
-// hold, so the exception rule U makes for an update's identity links
-// (earlierAfterRotations) has no counterpart.
+// An earlier key past its cut-off cannot move the ik here: before any of
+// a reconnect's identity links is applied, at its hs.init, its hs.fin or
+// an hs.resp, the identity-link gate (idLinksAllowed, relayidlinks.go)
+// judges them as Table A's row "Earlier, after its cut-off" judges an
+// identity.rotate, as it does for an update's. Their signatures (sig_I,
+// sig_R under the ik they lead to) are a second bar an old copy of the
+// peer would also have to pass.
 
 // rk8Applies reports whether a reconnect message from p carries relay
 // links RK8 judges.
@@ -99,6 +101,13 @@ func (m *Manager) rk8Checks(p *Peer, links []*handshake.RelayLink, announced []b
 // or the key sig_R verifies under) is ik and whose identity links are
 // rots, judged before the links are applied: ik is p's current ik, or the
 // links lead from it (after those already followed) to ik.
+//
+// Defence in depth at an hs.fin and an hs.resp: by then the handshake
+// library has resolved the message's identity links from the ik on record
+// to the key sig_I or sig_R verifies under (KnownInitiatorChain,
+// KnownResponderChain), so no message reaching it fails it; no test can
+// make it refuse (a mutant that always passes it survives). It stays so
+// that RK5's requirement is stated where RK8 checks it.
 func rk8IKOK(p *Peer, ik []byte, rots []*handshake.Rotation) bool {
 	if len(ik) != ed25519.PublicKeySize {
 		return false

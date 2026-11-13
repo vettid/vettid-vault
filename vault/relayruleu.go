@@ -317,9 +317,9 @@ func (m *Manager) rk5(s *Session, rots []*handshake.Rotation) bool {
 	}
 	if !updateIKOK(post, signer, rots) {
 		// The ik requirement failed: no link is followed and no token
-		// taken. The spec names no reason; Table B's for the update's ik,
-		// as it would stand once the links were applied, is used (a reading
-		// of this release; the spec should confirm).
+		// taken. 0.90.6 (§3.4.2 RK5) names the reason: Table B's for the
+		// update's ik, ancestor_ik, rejected_ik, or unknown_ik for any
+		// other.
 		switch {
 		case p.ancestor(signer) || len(signer) > 0 && bytes.Equal(signer, p.IK) && !bytes.Equal(post, p.IK):
 			m.refusePeerKey(p, "ancestor_ik", now)

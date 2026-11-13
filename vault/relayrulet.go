@@ -63,7 +63,7 @@ func relayOf(a handshake.RelayAddr) PeerRelay {
 // The vault does not read the relay's visibility_timeout_seconds; 60 s is
 // the value §11.14.10 takes when it is absent. A relay with a longer one
 // redelivers less often than this assumes, and the message is then
-// refused sooner: fail closed (decided 2026-11-12; the spec should
+// refused sooner: fail closed (a reading of this release; the spec should
 // confirm).
 const RuleTVisibility = 60 * time.Second
 

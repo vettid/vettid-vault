@@ -139,7 +139,7 @@ func (m *Manager) ruleU(s *Session, in *envelope.Inner) error {
 		return nil
 	}
 	// rule T: a reconnect_token that does not pass is ignored, no reason to
-	// refuse (rule U names the update's `token` only; decided 2026-11-12,
+	// refuse (rule U names the update's `token` only; a reading of this release,
 	// the spec should confirm); only a connection holds one.
 	var rt HeldToken
 	if u.ReconnectToken != "" && p.Kind == KindConnection {
@@ -198,7 +198,7 @@ func (m *Manager) followedRelayPrefix(p *Peer, links []*handshake.RelayLink) int
 // too); if Table B refused one, or the ik requirement failed, nothing is
 // answered (conservative: the spec says only that no link is followed and
 // no token taken). The hourly bound is §7.2's for a refresh near a token's
-// end, on the same clock as relay.token.refresh (decided 2026-11-12; the
+// end, on the same clock as relay.token.refresh (a reading of this release; the
 // spec should confirm which of §7.2's limits applies).
 func (m *Manager) ruleUDuplicate(p *Peer, now time.Time) {
 	if p.Kind == KindConnection {
@@ -257,7 +257,7 @@ func (m *Manager) rk5(s *Session, rots []*handshake.Rotation) bool {
 	}
 	// The ik requirement failed: no relay link is followed and no token
 	// taken. The spec names no reason; Table B's for the update's ik is
-	// used (decided 2026-11-12; the spec should confirm).
+	// used (a reading of this release; the spec should confirm).
 	switch {
 	case p.ancestor(signer):
 		m.refusePeerKey(p, "ancestor_ik", now)
@@ -295,7 +295,7 @@ func updateIKOK(p *Peer, signer []byte, rots []*handshake.Rotation) bool {
 // own (a handshake's carried or answer token) keep their mailbox, and a
 // handshake message already sealed keeps the tokens it carries, minted
 // for the passed key. Rule U says only that relay.pk becomes current; the
-// re-addressing and the sealed messages' tokens are decided 2026-11-12
+// re-addressing and the sealed messages' tokens are this release's reading
 // and the spec should confirm them.
 func (m *Manager) readdressQueued(p *Peer, old PeerRelay, now time.Time) {
 	for _, e := range m.st.Outbox {
@@ -318,7 +318,7 @@ func (m *Manager) readdressQueued(p *Peer, old PeerRelay, now time.Time) {
 // pending epoch's, an answer's). The standing tokens are left to expire.
 // The own open reconnects' tokens are revoked by RK6's abandonment. That
 // the in-flight ones are revoked too (the peer meets that as §3.4.2 RK9
-// says) is decided 2026-11-12; the spec should confirm it.
+// says) is a reading of this release; the spec should confirm it.
 func (m *Manager) revokePassedReconnect(p *Peer, passed []ed25519.PublicKey, now time.Time) {
 	subs := map[string]bool{}
 	for _, k := range passed {

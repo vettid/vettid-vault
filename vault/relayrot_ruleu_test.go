@@ -517,7 +517,7 @@ func TestRuleUQueuedDepositsFollow(t *testing.T) {
 	}
 }
 
-// RK5 "Links first" (decided 2026-11-12): the update's identity links are
+// RK5 "Links first" (this release's reading): the update's identity links are
 // applied before rule U's checks, so they are followed even when rule U
 // then refuses the update (here for its token); its relay links are not.
 func TestRK5IdentityLinksFollowedWhenUpdateRefused(t *testing.T) {

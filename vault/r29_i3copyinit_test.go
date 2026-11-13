@@ -205,3 +205,25 @@ func TestR29CopyInitiatorAfterLinkViaRekeyOldRecord(t *testing.T) {
 		t.Fatal("an old record's behaviour changed")
 	}
 }
+
+// The epoch a rekey's hs.init traveled under is kept with Q's answer
+// across a restart: Q locks and unlocks between its answer and P's hs.fin,
+// and strict F1 at the hs.fin still demotes E1.
+func TestR29CopyInitiatorAfterLinkViaRekeyRestart(t *testing.T) {
+	x := i3CopyBesideRekey(t, false, false)
+	f := x.f
+	f.restart(1)
+	if f.deliver(0, 1, kHSFin) != 1 || !bytes.Equal(f.cur(1), x.e2) {
+		t.Fatalf("Q did not establish E2 at P's hs.fin after its restart; Q's audits %v", auditEvents(f.m(1)))
+	}
+	if e := f.p(1).epochMeta(x.e1); e == nil || !e.Demoted || !f.audited(1, "epoch_demoted_f1") {
+		f.dump()
+		t.Fatal("E1 was not demoted by strict F1 after Q's restart")
+	}
+	n := len(f.got[1])
+	f.note(2, "copy-under-e1-after-the-link")
+	f.deliver(2, 1, kNote)
+	if len(f.got[1]) != n || f.p(1).suspended() {
+		t.Fatal("Q took the copy's note under E1 deposited after the link")
+	}
+}

@@ -632,15 +632,29 @@ func (m *Manager) hTokenRefresh(_ context.Context, s *Session, _ *envelope.Inner
 
 // --- rotation (§3.4) ---
 
-// hAddressUpdate refuses relay.address.update from every peer
-// (connection, service, device). Release 29 rotates no relay key (§3.4.1
-// A5) and builds no receiving side for it (rule U, rule C, the relay
-// links): an update would change the peer's address and tokens on session
-// authentication alone. It is acked, dropped and audited drop.peer_key
-// with ref relay_unlinked (§3.4.1 rule U: links that do not verify); the
-// peer's relay address, tokens and denylist are left as they are. The type
-// stays registered so that it is refused here, not answered as unknown.
-func (m *Manager) hAddressUpdate(_ context.Context, s *Session, _ *envelope.Inner) (json.RawMessage, error) {
+// hAddressUpdate refuses relay.address.update from every principal kind:
+// a connection, a service, the member's app, a desktop and an agent (a
+// desktop or agent also without an access session: the type is
+// accessExempt). Release 29 rotates no relay key (§3.4.1 A5) and rule U is
+// not built: an update would change the peer's address and tokens on
+// session authentication alone. It is acked, dropped and audited
+// drop.peer_key with ref relay_unlinked (§3.4.1 rule U: links that do not
+// verify), whatever its body (a malformed one included); the peer's relay
+// address, tokens and denylist are left as they are, and no token is
+// issued in answer. A resend with the same inner id is a duplicate (§8.2)
+// and is not audited again. The type stays registered so that it is
+// refused here, not answered as unknown. With Options.RelayKeyRotation,
+// dispatch first checks the update's relay links by rule C (acceptFrom
+// step 3, or step 1 with §3.4.2 RK12), which can record a relay fork or
+// refuse a device's second successor (conflict); the update itself is
+// still refused here.
+//
+// With Options.RelayKeyRotation the update is handled by §3.4.1 rule U
+// (ruleU) instead.
+func (m *Manager) hAddressUpdate(_ context.Context, s *Session, in *envelope.Inner) (json.RawMessage, error) {
+	if m.opt.RelayKeyRotation {
+		return nil, m.ruleU(s, in)
+	}
 	m.refusePeerKey(s.peer, "relay_unlinked", s.now)
 	return nil, nil
 }

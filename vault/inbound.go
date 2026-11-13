@@ -419,11 +419,33 @@ func (m *Manager) peerByRelayKey(pk ed25519.PublicKey) *Peer {
 			return p
 		}
 	}
+	if m.opt.RelayKeyRotation {
+		// §3.4.1 "Relay-key states": a key the vault followed a peer away
+		// from is still that peer's (earlier), judged by Table A.
+		for _, p := range m.allPeers() {
+			if p.earlierRelay(pk) != nil {
+				return p
+			}
+		}
+	}
 	return nil
 }
 
 // dispatch handles a decrypted session-mode message from principal p.
 func (m *Manager) dispatch(ctx context.Context, p *Peer, in *envelope.Inner, ep *handshake.Epoch, raw []byte, sender ed25519.PublicKey, now time.Time) disposition {
+	m.msgSender = sender
+	defer func() { m.msgSender = nil }()
+	if m.opt.RelayKeyRotation && in.Type == peerwire.TypeRelayAddressUpdate && m.updateParseRefuses(p, in, now) {
+		// §3.4.1 rule U, "When it is refused": a link's form or the
+		// chain's count, at parse time, before acceptFrom step 1.
+		return ackAfterFlush
+	}
+	if m.opt.RelayKeyRotation && in.Type == peerwire.TypeRelayAddressUpdate && m.updateRelayEvidence(p, in, sender, now) {
+		// §3.4.1 acceptFrom step 3 for relay links, and step 1 for a
+		// suspended record (§3.4.2 RK12): rule C first. A device's second
+		// successor is refused here (conflict).
+		return ackAfterFlush
+	}
 	if p.Kind == KindConnection && p.Fork != nil {
 		// §6.6 (0.72.0): a connection suspended on fork evidence accepts
 		// nothing, identity.rotate included.
@@ -445,7 +467,39 @@ func (m *Manager) dispatch(ctx context.Context, p *Peer, in *envelope.Inner, ep 
 	}
 	// 0.86.0 (§6.3.1): a confirmation takes effect before anything else is
 	// done with the message (dedupe, the ts window, its handler).
-	if m.evidenceFirst(p, in, now) || m.beforeAccept(p, ep, in, now) {
+	if m.evidenceFirst(p, in, now) {
+		return ackAfterFlush
+	}
+	if m.opt.RelayKeyRotation && m.tableARefuses(p, in, sender, now) {
+		return ackAfterFlush // §3.4.1 acceptFrom step 4, Table A: an earlier key after its cut-off
+	}
+	if m.ruleTDefers(p, in, now) {
+		return noAck // §3.4.1 rule T: a relay.token.issued from a mailbox not yet known, deferred
+	}
+	if m.beforeAccept(p, ep, in, now) {
+		return ackAfterFlush
+	}
+	if m.opt.RelayKeyRotation && in.Type == tokenIssuedType && m.relayStateOf(p, sender) == relayEarlierAfter {
+		// §3.4.1 Table A, "Earlier, after its cut-off": relay.token.issued
+		// gives its tokens only (heldToken checks each), after the epoch's
+		// checks above; nothing else of it counts (features, S5's
+		// resend, dedupe, an answer).
+		m.storeIssuedTo(p, in.Body, now)
+		return ackAfterFlush
+	}
+	if m.opt.RelayKeyRotation && in.Type == "identity.rotate" && m.relayStateOf(p, sender) == relayEarlierAfter {
+		// Table A let it through only because every link is already
+		// followed: it is ignored, and only R29-K9 is still judged
+		// (rule C ran at step 3). Nothing else of it counts (features,
+		// S5's resend, the ts window, the rate limit, dedupe).
+		if links, err := rotateLinks(in.Body); err == nil {
+			var epID []byte
+			if ep != nil {
+				id := ep.ID()
+				epID = id[:]
+			}
+			m.k9(p, links, epID, now)
+		}
 		return ackAfterFlush
 	}
 	// §10.8: counted once the message is not refused for its epoch
@@ -758,7 +812,7 @@ func (m *Manager) sendResponse(p *Peer, req *envelope.Inner, key string, out *en
 	}
 	if key == volatileKey {
 		kr := m.sessions[p.ID]
-		if kr == nil || kr.Current() == nil {
+		if kr == nil || kr.Current() == nil || p.RelayConflict != nil {
 			return
 		}
 		raw, err := m.sealFor(p, kr.Current(), out)

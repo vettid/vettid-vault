@@ -46,6 +46,9 @@ func (m *Manager) queueDeleteClaim(id string, now time.Time) {
 // that fails leaves it unstored; the in-memory state it belongs to is
 // stored by the next write that succeeds, or never (a lock or crash first).
 func (m *Manager) queue(e *OutboxEntry) {
+	if e.Op == OpDeposit && m.relayBlocked(e.PeerID) {
+		return // §3.4.1 rule C: nothing more is sent to a device with two relay successors
+	}
 	m.st.Outbox = append(m.st.Outbox, e)
 	m.markUnstored(e)
 }
@@ -110,6 +113,9 @@ func (m *Manager) sendTo(p *Peer, typ string, body json.RawMessage, now time.Tim
 func (m *Manager) sendWith(p *Peer, typ string, body json.RawMessage, o SendOptions, now time.Time) string {
 	if p.suspended() {
 		return "" // suspended by a rotation conflict (release R, §3.4) or by fork evidence (§6.6, 0.72.0)
+	}
+	if p.RelayConflict != nil {
+		return "" // §3.4.1 rule C: a device with two relay successors is sent nothing more
 	}
 	if !serviceMayReceive(p, typ) {
 		return "" // §6.4: a service connection is sent upkeep, the profile, authentication answers and votes only
@@ -1036,7 +1042,12 @@ func (m *Manager) housekeeping(now time.Time) {
 	m.remintIssued(now)
 	m.pruneHistories(now)
 	m.pruneIssued(now)
+	m.pruneEarlierRelays(now) // §3.4.1: an earlier relay key ends with the last token issued to it
 	m.pruneRetiredKEMs(now)
+	if m.opt.RelayKeyRotation {
+		m.pruneDeferred(now) // §3.4.1 rule T's deferrals whose message is gone
+		m.rk6Ticks(now)      // §3.4.2 RK6: owed restarts
+	}
 	for id, fr := range m.featureReqs {
 		if now.Sub(fr.at) > featureReqTTL {
 			delete(m.featureReqs, id)

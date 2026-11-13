@@ -9,7 +9,6 @@ import (
 
 	"github.com/vettid/vettid-relay/relayauth"
 
-	"github.com/vettid/vettid-vault/vms/envelope"
 	"github.com/vettid/vettid-vault/vms/handshake"
 	"github.com/vettid/vettid-vault/vms/peerwire"
 )
@@ -88,33 +87,10 @@ func (m *Manager) mint(p *Peer, kind string, ttl time.Duration, quota *relayauth
 // plus the clock skew a message's ts may have (envelope.MaxClockSkewFuture). Without the cap, a
 // token with a far exp (an old copy holding the peer's relay key can mint
 // one) would win every "later exp" comparison and pin the held token to
-// one the relay refuses.
+// one the relay refuses. With relay-key rotation also rule T's "has not
+// expired" (heldTokenFrom).
 func (m *Manager) heldToken(tok string, p *Peer, kind string) (HeldToken, error) {
-	c, err := peerwire.VerifyHeldToken(tok, p.Relay.PK, p.Relay.Mailbox, p.Relay.URL, m.keys.relay.Public().(ed25519.PublicKey))
-	if err != nil {
-		return HeldToken{}, err
-	}
-	life := StandingMax
-	if kind == TokReconnect {
-		life = handshake.ReconnectTokenMaxLifetime
-	}
-	// The own relay's limit is the one read when the vault registered with
-	// it, so a raise of the relay's policy is seen only from the next unlock.
-	if lim := time.Duration(m.limits.MaxTokenLifetimeSeconds) * time.Second; lim > 0 && lim < life && p.Relay.URL == m.st.Relay.URL {
-		// The peer's relay is this vault's own: its advertised
-		// max_token_lifetime_seconds is known, and the relay refuses a
-		// token over it (token_invalid).
-		life = lim
-	}
-	if c.Exp.Sub(c.Iat) > life || !c.Exp.After(c.Iat) || c.Iat.After(m.now().Add(envelope.MaxClockSkewFuture)) {
-		return HeldToken{}, errHeldLifetime
-	}
-	for _, r := range p.RevokedHeld {
-		if r.JTI == c.Jti {
-			return HeldToken{}, errRevokedHeld // 0.88.2 §8.6: never used again
-		}
-	}
-	return HeldToken{Token: tok, Exp: c.Exp}, nil
+	return m.heldTokenFrom(tok, p, p.Relay, kind)
 }
 
 // tokenBackdate is how far relayclient backdates iat (RELAY-PROTOCOL §5.2,
@@ -285,8 +261,12 @@ func (m *Manager) storeIssuedTo(p *Peer, body json.RawMessage, now time.Time) {
 				return
 			}
 			p.Reconnect = ht
+			p.RelayAwaitRC = time.Time{} // §3.4.2 RK6: the token it waited for
 			if h := m.opt.Hooks.Adopt; h != nil {
 				h(p.ID, TokReconnect, ht.Token, "issued")
+			}
+			if m.opt.RelayKeyRotation {
+				m.rk6Tick(p, now) // §3.4.2 RK6: a restart owed for want of this token
 			}
 		}
 		return

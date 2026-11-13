@@ -331,6 +331,14 @@ func (r *Responder) Kids() (recipient, sender suite.Kid) {
 	return r.sched.KidI2R, r.sched.KidR2I
 }
 
+// CollectSender is the relay key the hs.init was deposited with, which
+// HandleFin expects hs.fin to be deposited with too.
+func (r *Responder) CollectSender() ed25519.PublicKey {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append(ed25519.PublicKey(nil), r.sender...)
+}
+
 // Abort destroys the pending state.
 func (r *Responder) Abort() {
 	r.mu.Lock()

@@ -123,7 +123,8 @@ func (m *Manager) serviceDeviceRefused(typ string, body []byte) bool {
 // serviceOut are the types the vault sends a service connection (§6.4):
 // upkeep, the reduced profile, the member-authentication answers and, with
 // the vote feature, vote.cast and vote.status. Anything else is not sent,
-// whatever triggers it.
+// whatever triggers it. relay.address.update is one the vault sends (its
+// own relay-key rotation, §3.4); an incoming one is refused (hAddressUpdate).
 var serviceOut = map[string]bool{
 	"hs.init": true, "hs.resp": true, "hs.fin": true,
 	connectionApprovedType: true, peerwire.TypeConnectionDeclined: true, peerwire.TypeConnectionRemoved: true,

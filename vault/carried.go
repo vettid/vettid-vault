@@ -20,9 +20,22 @@ import (
 
 // adoptHeld replaces the held token of a kind with a carried one only if the
 // carried one's exp is later.
+//
+// With relay-key rotation a carried token is adopted only if it passes
+// rule T (§3.4.1) as a held token now: minted by the peer's current mailbox
+// and unexpired. A reconnect hs.init's tokens from an earlier relay key
+// were kept only to deposit its answer, and are never held.
 func (m *Manager) adoptHeld(p *Peer, kind string, held *HeldToken, c HeldToken) {
+	if m.opt.RelayKeyRotation && c.Token != "" {
+		if _, err := m.heldToken(c.Token, p, kind); err != nil {
+			return
+		}
+	}
 	if c.Token != "" && c.Exp.After(held.Exp) {
 		*held = c
+		if kind == TokReconnect {
+			p.RelayAwaitRC = time.Time{} // §3.4.2 RK6: the token it waited for
+		}
 		if h := m.opt.Hooks.Adopt; h != nil {
 			h(p.ID, kind, c.Token, "carried")
 		}
@@ -38,6 +51,9 @@ func (m *Manager) adoptCarried(p *Peer, c *CarriedTokens) {
 	m.adoptHeld(p, TokStanding, &p.Standing, c.Standing)
 	if p.Kind == KindConnection {
 		m.adoptHeld(p, TokReconnect, &p.Reconnect, c.Reconnect)
+		if m.opt.RelayKeyRotation {
+			m.rk6Tick(p, m.now()) // §3.4.2 RK6: a token adopted at a confirmation
+		}
 	}
 	m.retryPeer(p.ID)
 	m.dirty = true

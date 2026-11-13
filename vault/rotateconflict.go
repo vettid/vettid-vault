@@ -142,7 +142,9 @@ func (m *Manager) hRotationResolve(_ context.Context, s *Session, in *envelope.I
 		return nil, errBadRequest
 	}
 	p := m.st.Connections[id]
-	if p == nil || p.Conflict == nil {
+	if p == nil || p.Conflict == nil || p.RelayFork != nil {
+		// §3.4.1 rule C: while a relay fork is recorded there is nothing
+		// to resolve, also with an identity conflict recorded too.
 		return nil, errNotFound
 	}
 	for _, raw := range p.Conflict.Statements {

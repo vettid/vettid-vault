@@ -574,7 +574,9 @@ func (m *Manager) holdAllows(p *Peer, typ string, body []byte, state string) boo
 
 // holdDelivers reports whether a message to owner device p goes out while
 // the vault is due or held (§3.6.3 "What the vault still sends its
-// owner's devices"). Responses are not filtered.
+// owner's devices"). Responses are not filtered. relay.address.update is
+// listed as one the vault sends (its own relay-key rotation, §3.4); an
+// incoming one is refused whatever the hold (hAddressUpdate).
 func (m *Manager) holdDelivers(p *Peer, typ string, body json.RawMessage, now time.Time) bool {
 	if p.Kind == KindConnection || p.Recovering {
 		return true

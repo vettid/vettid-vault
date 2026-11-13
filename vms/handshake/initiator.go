@@ -215,6 +215,13 @@ func (i *Initiator) EphKid() suite.Kid { return i.body.Eph.Kid() }
 // Body returns the hs.init body.
 func (i *Initiator) Body() *Init { return i.body }
 
+// ResponderRelayKey is the relay key the handshake expects hs.resp to be
+// deposited with (InitiatorConfig.ResponderRelayKey): the responder's relay
+// key on record when the handshake began.
+func (i *Initiator) ResponderRelayKey() ed25519.PublicKey {
+	return append(ed25519.PublicKey(nil), i.cfg.ResponderRelayKey...)
+}
+
 // Abort destroys the handshake state. Any later HandleResp fails.
 func (i *Initiator) Abort() {
 	i.mu.Lock()

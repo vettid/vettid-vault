@@ -64,6 +64,10 @@ type State struct {
 	// handshake is complete and which await approval (§6.4, §6.7,
 	// 0.10.3), by pending_id (incoming) or connection_id (outgoing).
 	Requests map[string]*Request `json:"requests,omitempty"`
+	// Deferred are the messages left unacked under §3.4.1 rule T's
+	// "defer", by relay msg_id, so that a restart does not reset their
+	// time (only with Options.RelayKeyRotation; ruleTDefers).
+	Deferred map[string]*DeferredMsg `json:"deferred,omitempty"`
 
 	SeenMsgIDs map[string]time.Time `json:"seen_msg_ids"` // relay msg_id dedupe (16 d)
 	SeenInner  map[string]time.Time `json:"seen_inner"`   // principal|inner id (16 d)
@@ -366,6 +370,42 @@ type Peer struct {
 	// IDResend counts S5's identity.rotate resends to the peer for the
 	// vault's latest rotation (0.86.0).
 	IDResend *IDResend `json:"id_resend,omitempty"`
+
+	// Relay-key rotation, receiving side (0.90.3 §3.4.1, §3.4.2; only with
+	// Options.RelayKeyRotation; a state without these members has no
+	// earlier relay key, no seen relay link and no relay fork).
+	//
+	// EarlierRelays are the peer's relay keys the vault followed it away
+	// from, oldest first, each with its followed relay link and its
+	// cut-off, kept until no token the vault issued to it can still
+	// deposit (§3.4.1 "Relay-key states"). Note for rule U: there is no
+	// per-peer cap of its own here; each follow adds at most 32 keys
+	// (handshake.MaxRelayLinks), and keys leave only by pruneEarlierRelays.
+	EarlierRelays []EarlierRelay `json:"earlier_relays,omitempty"`
+	// RelaySeen are the peer's valid relay links that passed rule C and
+	// were not followed, at most one per old key and MaxRelaySeen in all
+	// (§3.4.1 rule C, RK12).
+	RelaySeen []json.RawMessage `json:"relay_seen,omitempty"`
+	// RelayFork is set when two successors of one relay key of a
+	// connection were seen (rule C, "Relay links"): the connection is
+	// suspended (Fork), connection.rotation.resolve answers not_found and
+	// only a new invitation ends it.
+	RelayFork *ForkSuspension `json:"relay_fork,omitempty"`
+	// RelayConflict is the same for an owner device or agent (rule C,
+	// "Between a vault and its own device or agent"): nothing suspends,
+	// the first successor stays, the other is refused (conflict), and the
+	// vault sends that device nothing more.
+	RelayConflict *RelayConflict `json:"relay_conflict,omitempty"`
+	// RelayRestart is §3.4.2 RK6's owed restart: an own reconnect the
+	// vault abandoned when it followed the peer's relay link, started
+	// again once it holds a reconnect token for the peer's current
+	// mailbox (rk6Tick).
+	RelayRestart *RelayRestart `json:"relay_restart,omitempty"`
+	// RelayAwaitRC is when the vault followed the peer's relay link with
+	// no reconnect token for its new mailbox (the one held for the passed
+	// mailbox was dropped); until one arrives, a reconnect it wants waits
+	// (relayAwaitsRC). Zero otherwise.
+	RelayAwaitRC time.Time `json:"relay_await_rc,omitzero"`
 }
 
 // RevokedToken is a revoked standing token's jti and exp.

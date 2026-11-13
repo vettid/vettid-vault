@@ -48,7 +48,7 @@ func newInheritedOpenAnchored(t *testing.T, anchor time.Time, script func(rw *ro
 			t.Fatal(err)
 		}
 	})
-	io.f.opts.RelayKeyRotation = true
+	io.f.opts.RelayKeyRotation, io.f.opts.RelayKeyRotationUnfinished = true, true
 	io.f.opts.Relay = func(base string, key ed25519.PrivateKey) Relay {
 		return &rotRelay{stubRelay: &stubRelay{base: base, key: key}, key: key, w: io.rw}
 	}

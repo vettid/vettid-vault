@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -81,6 +82,10 @@ func TestRelayRotHoldsWhatIsDepositedAfterCollectedTo(t *testing.T) {
 	if n := fx.step(); n != 0 {
 		t.Fatalf("processed %d inside the freshness window", n)
 	}
+	// Held back, it still counts as given: last_msg_id waits for it.
+	if u := fx.old(0).Collect.Unprocessed; len(u) != 1 || u[0] != "01A" {
+		t.Fatalf("held message not recorded as given: %v", u)
+	}
 	fx.setClk(fx.clk.Add(2 * time.Minute))
 	if n := fx.step(); n != 1 {
 		t.Fatalf("processed %d once collected past it", n)
@@ -98,12 +103,12 @@ func TestRelayRotOldMailboxStopsThirteenDaysAfterItsAnchor(t *testing.T) {
 	if o := fx.old(0); o.Collect.LastMsgID != "01A" || !o.Collect.Stopped.IsZero() {
 		t.Fatalf("before the stop %+v", o.Collect)
 	}
-	fx.setClk(anchor.Add(OldMailboxStop - time.Second))
+	fx.setClk(anchor.Add(13*24*time.Hour - time.Second)) // 13 days, not the relay's 14
 	fx.step()
 	if !fx.old(0).Collect.Stopped.IsZero() {
 		t.Fatal("stopped before 13 days")
 	}
-	fx.setClk(anchor.Add(OldMailboxStop))
+	fx.setClk(anchor.Add(13 * 24 * time.Hour))
 	fx.w.mu.Lock()
 	fx.w.collects = nil
 	fx.w.mu.Unlock()
@@ -214,24 +219,70 @@ func TestRelayRotCurrentMailboxUnknownWhilePending(t *testing.T) {
 }
 
 // last_msg_id: the largest msg_id up to which every message given was
-// processed and flushed; one left for redelivery holds it until it is
-// processed.
+// processed and flushed. Every message left for redelivery holds it, not
+// only the lowest (batch 1 leaves 03 and 04; 03 comes back and is
+// processed, then 07: last_msg_id stays below 04 until 04 is processed);
+// a message the order of processing holds back holds it too; the order a
+// batch has them in does not matter.
 func TestRelayRotLastMsgIDKeptPerMailbox(t *testing.T) {
 	fx, _, _ := rotated(t)
 	fx.do(func(m *Manager) {
 		var c Collector = &fakeCollector{}
 		rec := &m.st.Relay.Collect
-		m.noteCollected(c, []Message{{MsgID: "03"}, {MsgID: "01"}, {MsgID: "02"}}, []bool{true, true, false})
-		if rec.LastMsgID != "01" || rec.NoAckFloor != "02" {
-			t.Fatalf("after a left message %+v", *rec)
+		m.noteCollected(c, []Message{{MsgID: "02"}, {MsgID: "01"}, {MsgID: "03"}, {MsgID: "04"}}, []bool{true, true, false, false})
+		if rec.LastMsgID != "02" {
+			t.Fatalf("after two left %+v", *rec)
+		}
+		m.noteCollected(c, []Message{{MsgID: "03"}}, []bool{true})
+		m.noteCollected(c, []Message{{MsgID: "07"}}, []bool{true})
+		if rec.LastMsgID != "03" {
+			t.Fatalf("passed 04, still unprocessed: %+v", *rec)
 		}
 		m.noteCollected(c, []Message{{MsgID: "04"}}, []bool{true})
-		if rec.LastMsgID != "01" {
-			t.Fatalf("passed the floor %+v", *rec)
+		if rec.LastMsgID != "07" || len(rec.Unprocessed) != 0 || len(rec.Done) != 0 {
+			t.Fatalf("after 04 %+v", *rec)
 		}
-		m.noteCollected(c, []Message{{MsgID: "02"}, {MsgID: "05"}}, []bool{true, true})
-		if rec.LastMsgID != "05" || rec.NoAckFloor != "" {
-			t.Fatalf("after the redelivery %+v", *rec)
+		// Held back by the order of processing (given, not in a batch).
+		m.noteGiven(m.st.Relay.Mailbox, []string{"08"})
+		m.noteCollected(c, []Message{{MsgID: "09"}}, []bool{true})
+		if rec.LastMsgID != "07" {
+			t.Fatalf("passed a held message %+v", *rec)
+		}
+		m.noteCollected(c, []Message{{MsgID: "08"}}, []bool{true})
+		if rec.LastMsgID != "09" {
+			t.Fatalf("after the held one %+v", *rec)
+		}
+		// A redelivery of a message already counted holds nothing back.
+		m.noteGiven(m.st.Relay.Mailbox, []string{"02"})
+		m.noteCollected(c, []Message{{MsgID: "10"}}, []bool{true})
+		if rec.LastMsgID != "10" {
+			t.Fatalf("held back by a redelivery %+v", *rec)
+		}
+	})
+}
+
+// The tracking is bounded: past collectTrack unprocessed messages,
+// last_msg_id stops below the first one not kept, for good.
+func TestRelayRotLastMsgIDBounded(t *testing.T) {
+	fx, _, _ := rotated(t)
+	fx.do(func(m *Manager) {
+		rec := &m.st.Relay.Collect
+		var ids []string
+		for i := range collectTrack + 1 {
+			ids = append(ids, fmt.Sprintf("%04d", i+1))
+		}
+		m.noteGiven(m.st.Relay.Mailbox, ids)
+		if len(rec.Unprocessed) != collectTrack || rec.Ceiling != ids[collectTrack] {
+			t.Fatalf("kept %d, ceiling %q", len(rec.Unprocessed), rec.Ceiling)
+		}
+		var msgs []Message
+		var done []bool
+		for _, id := range ids {
+			msgs, done = append(msgs, Message{MsgID: id}), append(done, true)
+		}
+		m.noteCollected(&fakeCollector{}, msgs, done)
+		if rec.LastMsgID != ids[collectTrack-1] {
+			t.Fatalf("last %q, want below the ceiling", rec.LastMsgID)
 		}
 	})
 }

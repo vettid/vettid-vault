@@ -276,7 +276,7 @@ func TestRelayRotUnlockWithAKeyPendingRegistersNoKey(t *testing.T) {
 func TestRelayRotTransferPath(t *testing.T) {
 	w := newTRWorld(t)
 	rw := newRotWorld()
-	w.fixture.opts.RelayKeyRotation = true
+	w.fixture.opts.RelayKeyRotation, w.fixture.opts.RelayKeyRotationUnfinished = true, true
 	w.fixture.opts.Relay = func(base string, key ed25519.PrivateKey) Relay {
 		w.fixture.relay = &stubRelay{base: base, key: key}
 		rw.live[mailboxOf(key)] = true
@@ -307,7 +307,7 @@ func TestRelayRotTransferPath(t *testing.T) {
 func TestRelayRotRecoveryPath(t *testing.T) {
 	f := newOpenFixture(t)
 	rw := newRotWorld()
-	f.opts.RelayKeyRotation = true
+	f.opts.RelayKeyRotation, f.opts.RelayKeyRotationUnfinished = true, true
 	f.opts.Relay = func(base string, key ed25519.PrivateKey) Relay {
 		rw.live[mailboxOf(key)] = true
 		return &rotRelay{stubRelay: &stubRelay{base: base, key: key}, key: key, w: rw}

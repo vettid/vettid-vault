@@ -256,6 +256,11 @@ func TestRelayRotAfterTheGraceRegisters(t *testing.T) {
 		if fx.mailbox() != pmb || regs[len(regs)-1] != pmb {
 			t.Fatalf("fresh %v: mailbox %s, registers %v", fresh, fx.mailbox(), regs)
 		}
+		// RK14 step 1: the rotate's mailbox_unknown ended the old
+		// mailbox's collects, with its telling owed at the second write.
+		if o := fx.old(0); o.Collect.Stopped.IsZero() || !o.Collect.TellingDue {
+			t.Fatalf("fresh %v: old %+v", fresh, o.Collect)
+		}
 		fx.do(func(m *Manager) {
 			tok := m.st.Relay.Recipients["c1"].Standing
 			if (tok != held) != fresh {

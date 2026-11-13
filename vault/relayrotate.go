@@ -74,6 +74,10 @@ type relayKeyRun struct {
 	// relay key stored as pending meanwhile is that recovery's own
 	// (PendingRelay.Recovery).
 	openRecovery string
+	// oldFail is, per old mailbox, the start of its collects failing in a
+	// row and whether that left it unbound (oldFailBound): kept across the
+	// collectors of this run, so that rebuilding one does not restart it.
+	oldFail map[string]oldFailRec
 	// pending and old are the Relays of the pending key and the old keys
 	// (keys.oldRelay, by index), built when first used.
 	pending Relay

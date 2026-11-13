@@ -319,6 +319,12 @@ func collectMailbox(c Collector, msgID, current string) string {
 
 // --- the collector of several mailboxes ---
 
+// oldFailRec is an old mailbox's failure record (relayKeyRun.oldFail).
+type oldFailRec struct {
+	since   time.Time
+	unbound bool
+}
+
 // collectPart is one mailbox of a multiCollector.
 type collectPart struct {
 	mailbox string
@@ -366,6 +372,15 @@ type multiCollector struct {
 	// drained reports a full drain of a mailbox (pruneUnhanded): what it
 	// gave and what is still held here from it. It takes the vault's lock.
 	drained func(mailbox string, got, held map[string]bool, at time.Time)
+	// failed keeps an old mailbox's failure record on the vault, for the
+	// next collector; it takes the vault's lock.
+	failed func(mailbox string, rec oldFailRec)
+}
+
+func (c *multiCollector) keepFail(p *collectPart) {
+	if c.failed != nil {
+		c.failed(p.mailbox, oldFailRec{since: p.failSince, unbound: p.unbound})
+	}
 }
 
 func (c *multiCollector) mailboxOf(id string) string {
@@ -416,12 +431,16 @@ func (c *multiCollector) Next(ctx context.Context) ([]Message, error) {
 			if !start.Before(p.failSince.Add(oldFailBound)) {
 				p.unbound = true
 			}
+			c.keepFail(p)
 			continue
 		}
 		p.failSince = time.Time{}
 		if len(msgs) < MaxBatch && !p.stream {
 			p.to = start.Add(-collectedToWindow)
 			p.unbound = false
+		}
+		if !p.main {
+			c.keepFail(p)
 		}
 		ids := make([]string, 0, len(msgs))
 		for _, msg := range msgs {
@@ -587,7 +606,8 @@ func (m *Manager) rotationCollector(ctx context.Context, main Collector) Collect
 		} else {
 			continue
 		}
-		parts = append(parts, &collectPart{mailbox: o.Mailbox, c: c})
+		f := m.rk.oldFail[o.Mailbox] // a failure that began under an earlier collector
+		parts = append(parts, &collectPart{mailbox: o.Mailbox, c: c, failSince: f.since, unbound: f.unbound})
 	}
 	switch {
 	case len(parts) == 0:
@@ -610,6 +630,18 @@ func (m *Manager) rotationCollector(ctx context.Context, main Collector) Collect
 			m.mu.Lock()
 			defer m.mu.Unlock()
 			m.noteDrained(mb, got, held, at)
+		},
+		failed: func(mb string, rec oldFailRec) {
+			m.mu.Lock()
+			defer m.mu.Unlock()
+			if rec == (oldFailRec{}) {
+				delete(m.rk.oldFail, mb)
+				return
+			}
+			if m.rk.oldFail == nil {
+				m.rk.oldFail = map[string]oldFailRec{}
+			}
+			m.rk.oldFail[mb] = rec
 		},
 		given: func(mb string, ids []string) {
 			m.mu.Lock()

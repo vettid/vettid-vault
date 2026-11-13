@@ -59,3 +59,41 @@ func TestRelayRotFailingOldMailboxHoldsBackForABoundedTime(t *testing.T) {
 		t.Fatalf("old %+v", old)
 	}
 }
+
+// The bound runs across collectors: one rebuilt meanwhile (a lock of the
+// collect session, a current mailbox's error, a second write) takes the
+// old mailbox's failure start with it, and a success clears it.
+func TestRelayRotFailingOldMailboxBoundSurvivesARebuild(t *testing.T) {
+	fx, old, cur := rotated(t)
+	fx.w.mu.Lock()
+	fx.w.collectErr[old] = relayErr(403, "forbidden")
+	fx.w.mu.Unlock()
+	t0 := fx.clk
+	// (The test relay does not hand back a message a dropped collector
+	// held, so each round's message is put just before it.)
+	fx.w.put(cur, "01A", t0.Add(-time.Hour), []byte("x"))
+	if n := fx.step(); n != 0 {
+		t.Fatalf("released %d at once", n)
+	}
+	fx.setClk(t0.Add(oldFailBound / 2))
+	fx.do(func(m *Manager) { m.resetCollector() })
+	fx.w.put(cur, "01B", t0.Add(-time.Hour), []byte("x"))
+	if n := fx.step(); n != 0 {
+		t.Fatalf("released %d before the bound", n)
+	}
+	fx.setClk(t0.Add(oldFailBound))
+	fx.do(func(m *Manager) { m.resetCollector() })
+	fx.w.put(cur, "01C", t0.Add(-time.Hour), []byte("x"))
+	if n := fx.step(); n != 1 {
+		t.Fatalf("released %d at the bound across rebuilt collectors", n)
+	}
+	fx.w.mu.Lock()
+	delete(fx.w.collectErr, old)
+	fx.w.mu.Unlock()
+	fx.step()
+	fx.do(func(m *Manager) {
+		if _, ok := m.rk.oldFail[old]; ok {
+			t.Fatal("a successful collect left the failure record")
+		}
+	})
+}

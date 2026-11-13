@@ -59,6 +59,10 @@
 //     relay.mailbox.closed; identity.rotate and relay.token.issued are
 //     not kept.
 //
+// Next round: the spec head adds RK14 step 1's stop (P stops collecting
+// an old mailbox 13 days after its anchor); the model ends P's collects
+// at the grace's end.
+//
 // With a switch off, the rule's earlier behaviour applies; HOLD off is
 // 0.88's: mailbox_unknown between vaults ends the entry and makes the
 // peer stale.

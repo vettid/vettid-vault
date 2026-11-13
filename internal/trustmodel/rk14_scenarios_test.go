@@ -2,6 +2,7 @@ package trustmodel
 
 import (
 	"os"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -72,8 +73,10 @@ func rk14Hold(t *testing.T, off ...string) (delivered bool, s *scen, P, Q *Party
 	s.online(15, P)
 	s.do(Q, func() { Q.unlock() })
 	s.online(3, P, Q)
+	delivered = s.w.probes[probe]
+	s.w.checkEnd(true)
 	s.traceIf()
-	return s.w.probes[probe], s, P, Q
+	return delivered, s, P, Q
 }
 
 func TestRK14HoldReaddressedAtFollow(t *testing.T) {
@@ -83,6 +86,9 @@ func TestRK14HoldReaddressedAtFollow(t *testing.T) {
 	}
 	if s.w.stats["HOLD: held entry re-addressed at a follow"] == 0 {
 		t.Errorf("the message arrived without being held and re-addressed")
+	}
+	if len(s.w.viol) > 0 {
+		t.Errorf("violations with HOLD: %v", s.w.viol)
 	}
 	ok, _, P, Q = rk14Hold(t, "HOLD")
 	if ok || Q.st.peer(P.ID).Status != stStale {
@@ -109,8 +115,10 @@ func rk14Tell(t *testing.T, off ...string) (delivered bool, s *scen) {
 	s.online(15, Q)
 	s.do(P, func() { P.unlock() })
 	s.online(5, P, Q)
+	delivered = s.w.probes[probe]
+	s.w.checkEnd(true)
 	s.traceIf()
-	return s.w.probes[probe], s
+	return delivered, s
 }
 
 func TestRK14TellingRedeposits(t *testing.T) {
@@ -121,7 +129,43 @@ func TestRK14TellingRedeposits(t *testing.T) {
 	if s.w.stats["TELL: re-deposited after the telling"] == 0 {
 		t.Errorf("the message arrived without the telling")
 	}
-	if ok, _ = rk14Tell(t, "TELL"); ok {
+	if len(s.w.viol) > 0 {
+		t.Errorf("violations with TELL: %v", s.w.viol)
+	}
+	ok, s = rk14Tell(t, "TELL")
+	if ok {
 		t.Errorf("without TELL the message deleted with the old mailbox should be lost")
+	}
+	if !slices.ContainsFunc(s.w.viol, func(v Violation) bool {
+		return v.Inv == "I1-loss" && strings.Contains(v.Detail, "deleted with an old mailbox")
+	}) {
+		t.Errorf("without TELL, I1-loss should report the message deleted with the old mailbox; violations %v", s.w.viol)
+	}
+}
+
+// TestRK5OffI3: with RK5's ik requirement off, the I3 check from ground
+// truth (checkRK5Copy) fires on runs where Q follows an old copy's relay
+// link, the copy taken before Q's current ik for P; with RK5 on it does
+// not. The run seeds are from TRUSTMODEL_ROTBURST at master seed 1.
+func TestRK5OffI3(t *testing.T) {
+	t.Setenv("TRUSTMODEL_RELAYROT", "1")
+	t.Setenv("TRUSTMODEL_CHOSEN", "1")
+	t.Setenv("TRUSTMODEL_ROTBURST", "1")
+	for _, rs := range []uint64{2079705939960222102, 5465547818700648244} {
+		i3 := func() bool {
+			cfg, acts := genRun(rs, 40)
+			w := runActions(cfg, rs, acts, false)
+			return slices.ContainsFunc(w.viol, func(v Violation) bool {
+				return v.Inv == "I3" && strings.Contains(v.Detail, "of old copy")
+			})
+		}
+		t.Setenv("TRUSTMODEL_CH", "-RK5")
+		if !i3() {
+			t.Errorf("run seed %d: with RK5 off, the I3 check should fire", rs)
+		}
+		t.Setenv("TRUSTMODEL_CH", "")
+		if i3() {
+			t.Errorf("run seed %d: with RK5 on, the I3 check fired", rs)
+		}
 	}
 }

@@ -533,6 +533,9 @@ func (m *Manager) completeRecoveryR(ctx context.Context, p RecoveryOpenParams, r
 	if t := m.st.RotationOwed.Transfer; t != "" {
 		ref = t
 	}
+	// §3.4 "A recovery's inherited key": a relay key left pending is
+	// completed in one attempt first, before the step-2 write.
+	m.inheritedKeyAtOpen(ctx, p, now)
 	if err := m.rotateIdentity(now); err != nil {
 		m.record(Activity{Kind: "identity.rotation_failed", Ref: ref, Audit: true, Feed: true, Priority: "high"}, now)
 	}
@@ -566,7 +569,12 @@ func (m *Manager) finishOpen(ctx context.Context, p RecoveryOpenParams, mv *Mani
 	now time.Time) (*Manager, *RecoveryOpenOutcome) {
 	var err error
 	m.relay = p.Relay(m.st.Relay.URL, m.keys.relay)
-	if m.limits, err = m.relay.Register(ctx); err != nil {
+	m.rk.pending, m.rk.old = nil, nil // built again on this Relay
+	if !m.openRegisters() {
+		if pr := m.st.Relay.Pending; pr != nil && pr.Limits != nil && m.limits == (Limits{}) {
+			m.limits = *pr.Limits
+		}
+	} else if m.limits, err = m.relay.Register(ctx); err != nil {
 		m.zeroize()
 		return nil, out.fail(OpenRetry)
 	}

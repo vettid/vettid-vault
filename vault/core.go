@@ -768,7 +768,8 @@ func (m *Manager) rotateKeys(now time.Time, byCredential bool) error {
 		return err
 	}
 	var relaySeed []byte
-	if m.relayRotation() && m.relaySeedNeeded(byCredential) {
+	relayMet := m.relayRotation() && m.relayMetAtOpen()
+	if m.relayRotation() && !relayMet && m.relaySeedNeeded(byCredential) {
 		if relaySeed, err = draw(32); err != nil {
 			return err
 		}
@@ -822,7 +823,9 @@ func (m *Manager) rotateKeys(now time.Time, byCredential bool) error {
 	m.rotateWakeKey(now)
 	m.dirty = true
 	if m.relayRotation() {
-		m.startRelayRotation(relaySeed, byCredential, now)
+		if !relayMet { // a recovery's fresh key is its relay key (§3.4 "A recovery's inherited key")
+			m.startRelayRotation(relaySeed, byCredential, now)
+		}
 		m.profileCoreChanged(now)
 		return nil
 	}

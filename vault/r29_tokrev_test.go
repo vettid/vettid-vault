@@ -91,7 +91,9 @@ func TestR29TokenRevokedEndsTheTokenOnly(t *testing.T) {
 }
 
 // A reconnect's own hs.init answered token_revoked is a failed try
-// (§3.4.1 "The reconnect bound"): three make the connection stale.
+// (§3.4.1 "The reconnect bound"), and the reconnect token is dropped (its
+// jti recorded, so it is never adopted again): the next reconnect finds no
+// reconnect token, and the connection is stale.
 func TestR29ReconnectTokenRevokedCountsAsTry(t *testing.T) {
 	f := newR29Fx(t)
 	f.longTokens()
@@ -105,14 +107,21 @@ func TestR29ReconnectTokenRevokedCountsAsTry(t *testing.T) {
 	r.mu.Lock()
 	r.revoked = append(r.revoked, "jti:"+c.Jti) // P revoked Q's reconnect token
 	r.mu.Unlock()
-	for i := 1; i <= ReconnectTries; i++ {
-		f.do(0, func(m *Manager, p *Peer) { m.startReconnect(p, f.clk) })
-		if i < ReconnectTries && f.p(0).State == PeerStale {
-			t.Fatalf("stale after %d refused tries", i)
-		}
-	}
-	if f.p(0).State != PeerStale || !f.audited(0, "reconnect_token_revoked") {
+	f.do(0, func(m *Manager, p *Peer) { m.startReconnect(p, f.clk) })
+	p := f.p(0)
+	if p.State == PeerStale || !f.audited(0, "reconnect_token_revoked") || p.RC == nil || p.RC.Tries != 1 {
 		f.dump()
-		t.Fatal("three reconnect hs.inits answered token_revoked did not make it stale")
+		t.Fatal("a reconnect hs.init answered token_revoked is not one failed try")
+	}
+	if p.Reconnect.Token != "" {
+		t.Fatal("the revoked reconnect token is still held")
+	}
+	if _, err := f.m(0).heldToken(rt, p, TokReconnect); err != errRevokedHeld {
+		t.Fatalf("the revoked reconnect token offered again: %v, want errRevokedHeld", err)
+	}
+	f.do(0, func(m *Manager, p *Peer) { m.startReconnect(p, f.clk) })
+	if f.p(0).State != PeerStale {
+		f.dump()
+		t.Fatal("a reconnect with no reconnect token left did not make it stale")
 	}
 }

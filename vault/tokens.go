@@ -83,8 +83,8 @@ func (m *Manager) mint(p *Peer, kind string, ttl time.Duration, quota *relayauth
 // (peerwire.VerifyHeldToken); and, as the relay refuses a deposit under it
 // otherwise (RELAY-PROTOCOL §5.3), a lifetime exp - iat within §7.1's cap
 // for its kind (a reconnect token 365 days, any other token the vault
-// holds 30 days) and an iat not later than now plus the clock skew a
-// message's ts may have (envelope.MaxClockSkewFuture). Without the cap, a
+// holds 30 days), an exp later than its iat, and an iat not later than now
+// plus the clock skew a message's ts may have (envelope.MaxClockSkewFuture). Without the cap, a
 // token with a far exp (an old copy holding the peer's relay key can mint
 // one) would win every "later exp" comparison and pin the held token to
 // one the relay refuses.
@@ -97,7 +97,7 @@ func (m *Manager) heldToken(tok string, p *Peer, kind string) (HeldToken, error)
 	if kind == TokReconnect {
 		life = handshake.ReconnectTokenMaxLifetime
 	}
-	if c.Exp.Sub(c.Iat) > life || c.Iat.After(m.now().Add(envelope.MaxClockSkewFuture)) {
+	if c.Exp.Sub(c.Iat) > life || !c.Exp.After(c.Iat) || c.Iat.After(m.now().Add(envelope.MaxClockSkewFuture)) {
 		return HeldToken{}, errHeldLifetime
 	}
 	for _, r := range p.RevokedHeld {
@@ -264,6 +264,9 @@ func (m *Manager) storeIssuedTo(p *Peer, body json.RawMessage, now time.Time) {
 	}
 	if kind == TokReconnect {
 		if p.Kind == KindConnection {
+			if sameJTI(ht.Token, p.Reconnect.Token, p) {
+				return // the held one offered again: nothing to adopt or refuse
+			}
 			if !ht.Exp.After(p.Reconnect.Exp) {
 				// As §6.3.1 adopts a carried token: it replaces the held
 				// token of its kind only if its exp is later. An older or
@@ -417,6 +420,20 @@ func (m *Manager) markDeviceTokens(now time.Time) {
 // offered again (0.88.2 §8.6).
 var errRevokedHeld = errors.New("vault: a revoked standing token")
 
+// sameJTI reports whether tokens a and b, both issued by p's mailbox,
+// carry the same jti.
+func sameJTI(a, b string, p *Peer) bool {
+	if a == "" || b == "" {
+		return false
+	}
+	ca, err := relayauth.ParseToken(a, p.Relay.PK)
+	if err != nil {
+		return false
+	}
+	cb, err := relayauth.ParseToken(b, p.Relay.PK)
+	return err == nil && ca.Jti == cb.Jti
+}
+
 // errHeldLifetime is a held token whose exp - iat is over §7.1's cap for
-// its kind, or whose iat is in the future.
+// its kind or not positive, or whose iat is in the future.
 var errHeldLifetime = errors.New("vault: a held token's lifetime or iat is out of bounds")

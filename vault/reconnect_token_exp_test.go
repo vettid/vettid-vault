@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/vettid/vettid-relay/relayauth"
+	"github.com/vettid/vettid-relay/relayclient"
 
 	"github.com/vettid/vettid-vault/vms/peerwire"
 )
@@ -192,4 +193,135 @@ func TestHeldTokenLifetimeAndIat(t *testing.T) {
 			t.Fatal("a reconnect token with an iat a minute ahead was refused")
 		}
 	})
+}
+
+func TestIssuedTokenNits(t *testing.T) {
+	t.Run("the held token offered again is not audited", func(t *testing.T) {
+		f := newR29Fx(t)
+		held := f.p(0).Reconnect
+		f.sendIssued(1, TokReconnect, held.Token)
+		if f.p(0).Reconnect != held || f.audited(0, "issued_token_not_newer") || f.audited(0, "bad_issued_token") {
+			t.Fatal("the held reconnect token offered again was audited or changed the held one")
+		}
+	})
+	t.Run("its jti offered again is not audited", func(t *testing.T) {
+		f := newR29Fx(t)
+		iat := f.clk.Add(4 * time.Minute)
+		tok := f.tokenFrom(1, iat, iat.Add(365*24*time.Hour), "rc-jti")
+		f.sendIssued(1, TokReconnect, tok)
+		if f.p(0).Reconnect.Token != tok {
+			t.Fatal("setup: not adopted")
+		}
+		f.sendIssued(1, TokReconnect, f.tokenFrom(1, iat, iat.Add(200*24*time.Hour), "rc-jti"))
+		if f.p(0).Reconnect.Token != tok || f.audited(0, "issued_token_not_newer") {
+			t.Fatal("a token with the held one's jti was audited or adopted")
+		}
+	})
+	for _, c := range []struct {
+		name string
+		life time.Duration
+	}{{"exp equal to iat is refused", 0}, {"exp before iat is refused", -time.Second}} {
+		t.Run(c.name, func(t *testing.T) {
+			f := newR29Fx(t)
+			f.do(0, func(_ *Manager, p *Peer) { p.Reconnect = HeldToken{} })
+			iat := f.clk.Add(4 * time.Minute)
+			f.sendIssued(1, TokReconnect, f.tokenFrom(1, iat, iat.Add(c.life), "rc-empty"))
+			if f.p(0).Reconnect.Token != "" || f.auditedCount(0, "bad_issued_token") != 1 {
+				t.Fatal("a token with exp <= iat was not refused as bad_issued_token")
+			}
+		})
+	}
+}
+
+// A reconnect's hs.init refused token_invalid or token_revoked drops the
+// held reconnect token (a revoked one's jti recorded): otherwise a token
+// with a later exp than any honest one (an old copy's) would stay held,
+// refused by the relay, until its exp.
+func TestRefusedReconnectTokenIsDropped(t *testing.T) {
+	for _, code := range []string{CodeTokenInvalid, CodeTokenRevoked} {
+		t.Run(code, func(t *testing.T) {
+			f := newR29Fx(t)
+			f.startCopy(1, f.snapshot(1))
+			// The copy's reconnect token: valid in form, an exp later than
+			// any honest reissue's, and refused by the relay.
+			iat := f.clk.Add(4 * time.Minute)
+			pin := f.tokenFrom(2, iat, iat.Add(365*24*time.Hour), "rc-pin")
+			f.sendIssued(2, TokReconnect, pin)
+			if f.p(0).Reconnect.Token != pin {
+				t.Fatal("setup: the copy's reconnect token was not adopted")
+			}
+			status := 401
+			if code == CodeTokenRevoked {
+				status = 403
+			}
+			r := f.d[0].relay
+			r.mu.Lock()
+			r.check = func(mailbox, token string) error {
+				if token == pin {
+					return &relayclient.Error{Status: status, Code: code}
+				}
+				return nil
+			}
+			r.mu.Unlock()
+			f.reissue(TokReconnect)
+			if f.p(0).Reconnect.Token != pin {
+				t.Fatal("setup: an honest reissue replaced the pinned token")
+			}
+			f.do(0, func(m *Manager, p *Peer) { m.startReconnect(p, f.clk) })
+			p := f.p(0)
+			if p.Reconnect.Token != "" {
+				t.Fatalf("the reconnect token refused %s is still held", code)
+			}
+			if !f.audited(0, "reconnect_"+code) || p.RC == nil || p.RC.Tries != 1 || p.State == PeerStale {
+				f.dump()
+				t.Fatalf("the hs.init refused %s is not one failed try", code)
+			}
+			_, err := f.m(0).heldToken(pin, p, TokReconnect)
+			if code == CodeTokenRevoked && err != errRevokedHeld {
+				t.Fatalf("the revoked token offered again: %v, want errRevokedHeld", err)
+			}
+			if code == CodeTokenInvalid && err != nil {
+				t.Fatalf("token_invalid recorded the token as revoked: %v", err)
+			}
+			f.advance(time.Minute)
+			f.reissue(TokReconnect)
+			if f.p(0).Reconnect.Token == "" || f.p(0).Reconnect.Token == pin {
+				t.Fatal("the next honest reconnect token was not adopted")
+			}
+			if code == CodeTokenRevoked {
+				f.sendIssued(2, TokReconnect, pin)
+				if f.p(0).Reconnect.Token == pin {
+					t.Fatal("the revoked token was adopted again")
+				}
+			}
+		})
+	}
+}
+
+// A reconnect token adopted after the refused one was used (a newer one,
+// adopted while the hs.init waited) is kept: only the refused token is
+// dropped.
+func TestRefusedReconnectTokenKeepsANewerOne(t *testing.T) {
+	f := newR29Fx(t)
+	old := f.p(0).Reconnect.Token
+	iat := f.clk.Add(4 * time.Minute)
+	newer := HeldToken{Token: f.tokenFrom(1, iat, iat.Add(365*24*time.Hour), "rc-newer"), Exp: iat.Add(365 * 24 * time.Hour)}
+	r := f.d[0].relay
+	r.mu.Lock()
+	r.check = func(mailbox, token string) error {
+		if token == old {
+			f.p(0).Reconnect = newer // adopted while the hs.init waited
+			return &relayclient.Error{Status: 401, Code: CodeTokenInvalid}
+		}
+		return nil
+	}
+	r.mu.Unlock()
+	f.do(0, func(m *Manager, p *Peer) { m.startReconnect(p, f.clk) })
+	if !f.audited(0, "reconnect_token_invalid") {
+		f.dump()
+		t.Fatal("setup: the hs.init was not refused token_invalid")
+	}
+	if f.p(0).Reconnect != newer {
+		t.Fatal("the refusal of an older reconnect token dropped the newer one")
+	}
 }

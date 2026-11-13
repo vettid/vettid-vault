@@ -9,7 +9,7 @@ import (
 	"github.com/vettid/vettid-vault/vms/peerwire"
 )
 
-// Table A, relay key (VAULT-MESSAGING 0.90.3 §3.4.1, acceptFrom step 4):
+// Table A, relay key (VAULT-MESSAGING 0.90.4 §3.4.1, acceptFrom step 4):
 // the rows for a message deposited with an earlier relay key of the
 // peer's. The rows "Record suspended" (step 1), "Foreign" (step 2: no peer
 // is found for the sender) and "Current" are as before. Only with

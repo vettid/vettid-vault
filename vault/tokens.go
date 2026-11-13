@@ -261,6 +261,7 @@ func (m *Manager) storeIssuedTo(p *Peer, body json.RawMessage, now time.Time) {
 				return
 			}
 			p.Reconnect = ht
+			p.RelayAwaitRC = time.Time{} // §3.4.2 RK6: the token it waited for
 			if h := m.opt.Hooks.Adopt; h != nil {
 				h(p.ID, TokReconnect, ht.Token, "issued")
 			}

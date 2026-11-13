@@ -11,7 +11,7 @@ import (
 	"github.com/vettid/vettid-vault/vms/suite"
 )
 
-// Rule C for relay links (VAULT-MESSAGING 0.90.3 §3.4.1 rule C, "Relay
+// Rule C for relay links (VAULT-MESSAGING 0.90.4 §3.4.1 rule C, "Relay
 // links"; acceptFrom steps 1 and 3; §3.4.2 RK12). Only with
 // Options.RelayKeyRotation.
 

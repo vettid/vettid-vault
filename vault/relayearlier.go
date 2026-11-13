@@ -12,7 +12,7 @@ import (
 	"github.com/vettid/vettid-vault/vms/suite"
 )
 
-// Relay-key rotation, the receiving side's state (VAULT-MESSAGING 0.90.3
+// Relay-key rotation, the receiving side's state (VAULT-MESSAGING 0.90.4
 // §3.4.1 "Terms": relay-key states and cut-offs). Everything here acts only
 // with Options.RelayKeyRotation; without it a peer has no earlier relay
 // key and every sender other than the relay key on record is foreign.

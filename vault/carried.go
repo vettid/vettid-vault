@@ -33,6 +33,9 @@ func (m *Manager) adoptHeld(p *Peer, kind string, held *HeldToken, c HeldToken) 
 	}
 	if c.Token != "" && c.Exp.After(held.Exp) {
 		*held = c
+		if kind == TokReconnect {
+			p.RelayAwaitRC = time.Time{} // §3.4.2 RK6: the token it waited for
+		}
 		if h := m.opt.Hooks.Adopt; h != nil {
 			h(p.ID, kind, c.Token, "carried")
 		}

@@ -166,7 +166,7 @@ type Options struct {
 	// AppKeyRetry overrides the confirmation's retry schedule (tests).
 	AppKeyRetry *AppKeyRetry
 	// RelayKeyRotation turns on the receiving side of relay-key rotation
-	// between vaults that is built so far (VAULT-MESSAGING 0.90.3 §3.4.1,
+	// between vaults that is built so far (VAULT-MESSAGING 0.90.4 §3.4.1,
 	// §3.4.2): a peer's earlier relay keys and their cut-offs, Table A's
 	// rows for them, rule C for relay links with the relay fork, RK12,
 	// rule U and rule T, RK2, RK5 and RK6. Off (the default) the vault behaves exactly as without it. No

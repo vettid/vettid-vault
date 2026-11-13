@@ -307,3 +307,39 @@ func TestRelayRotMailboxUnknownStartsTheRotate(t *testing.T) {
 		t.Fatal("mailbox_unknown did not complete the pending key")
 	}
 }
+
+// The refused state's attempt is one per unlock, and its refusal is
+// audited once in that unlock (not again as a key left pending).
+func TestRelayRotRefusedOneAttemptAndOneAuditPerUnlock(t *testing.T) {
+	fx := newRotFx(t)
+	fx.w.rotate = []error{relayErr(403, "forbidden"), relayErr(403, "forbidden")}
+	if err := fx.credRotate(); err != nil {
+		t.Fatal(err)
+	}
+	fx.restart()
+	if rot, _ := fx.w.log(); len(rot) != 2 || len(fx.acts("identity.rotation_failed")) != 2 {
+		t.Fatalf("rotates %v, audits %d", rot, len(fx.acts("identity.rotation_failed")))
+	}
+	fx.do(func(m *Manager) { m.relayKeyStep(context.Background(), true) })
+	if rot, _ := fx.w.log(); len(rot) != 2 {
+		t.Fatalf("a second attempt in one unlock: %v", rot)
+	}
+}
+
+// Only the key left pending is audited: when the unlock completes it and
+// the next key it stored gets no answer, nothing is audited.
+func TestRelayRotNextKeyNotAuditedAsLeftPending(t *testing.T) {
+	fx := newRotFx(t)
+	fx.w.rotate = []error{relayErr(503, "")}
+	if err := fx.credRotate(); err != nil {
+		t.Fatal(err)
+	}
+	if err := fx.m.RotateIdentity(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	fx.w.rotate = []error{nil, relayErr(503, "")}
+	fx.restart()
+	if fx.pending() == nil || len(fx.m.RelayKeyStatus().OldMailboxes) != 1 || len(fx.acts("identity.rotation_failed")) != 0 {
+		t.Fatalf("status %+v, audits %d", fx.m.RelayKeyStatus(), len(fx.acts("identity.rotation_failed")))
+	}
+}

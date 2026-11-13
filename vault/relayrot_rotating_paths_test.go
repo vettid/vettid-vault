@@ -334,3 +334,46 @@ func TestRelayRotRecoveryPath(t *testing.T) {
 		t.Fatalf("rotates %v, pending %v, owed %+v", rot, pr != nil, owed)
 	}
 }
+
+// A recipient removed since an earlier rotation leaves the recipients at
+// the next second write.
+func TestRelayRotRemovedRecipientLeavesTheRecord(t *testing.T) {
+	fx := newRotFx(t)
+	if err := fx.credRotate(); err != nil {
+		t.Fatal(err)
+	}
+	fx.do(func(m *Manager) {
+		if m.st.Relay.Recipients["c1"] == nil {
+			t.Fatal("no record")
+		}
+		delete(m.st.Connections, "c1")
+		m.dirty = true
+	})
+	if err := fx.credRotate(); err != nil {
+		t.Fatal(err)
+	}
+	fx.do(func(m *Manager) {
+		if m.st.Relay.Recipients["c1"] != nil || m.st.Relay.Recipients["dev1"] == nil {
+			t.Fatalf("recipients %v", m.st.Relay.Recipients)
+		}
+	})
+}
+
+// §12.5 with a key pending: the deletion also deletes the pending key's
+// mailbox, which a rotate may have made.
+func TestRelayRotDeleteWithAKeyPending(t *testing.T) {
+	fx := newRotFx(t)
+	fx.w.rotate = []error{relayErr(503, "")}
+	if err := fx.credRotate(); err != nil {
+		t.Fatal(err)
+	}
+	cur, pmb := fx.mailbox(), fx.pendingMailbox()
+	if err := fx.m.Delete(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	fx.w.mu.Lock()
+	defer fx.w.mu.Unlock()
+	if len(fx.w.deleted) != 2 || fx.w.deleted[0] != cur || fx.w.deleted[1] != pmb {
+		t.Fatalf("deleted %v", fx.w.deleted)
+	}
+}

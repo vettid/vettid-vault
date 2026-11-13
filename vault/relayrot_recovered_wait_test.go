@@ -15,12 +15,11 @@ import (
 // (§3.4 "A recovery's inherited key", "Retrying with the same key":
 // mailbox_unknown while a key is pending starts the same path).
 
-// phoneUnlock is the recovered phone's own unlock (a lost ok before its
+// phoneUnlockOut is the recovered phone's own unlock (a lost ok before its
 // first handshake carries the vault's bundle again, resumeLostOK).
-func (f *openFixture) phoneUnlock(t *testing.T) (*Manager, *AltUnlockOutcome) {
-	t.Helper()
+func (f *openFixture) phoneUnlockOut() (*Manager, *AltUnlockOutcome) {
 	own := ReleaseEntry{PCR0: testRelease.PCR0, Number: testRelease.Number, Status: "active"}
-	m, out := UnlockAlt(context.Background(), AltUnlockParams{Options: f.opts, VaultID: f.vid, UserGUID: "u1",
+	return UnlockAlt(context.Background(), AltUnlockParams{Options: f.opts, VaultID: f.vid, UserGUID: "u1",
 		DeviceIK: f.phone.Public().(ed25519.PublicKey), PIN: testPIN, UnlockSecret: f.phoneUS,
 		VerifyDevice: func(k *UnlockKey) (json.RawMessage, error) { return k.Attestation, nil },
 		Manifest: func(seen uint64) (*ManifestView, error) {
@@ -29,6 +28,12 @@ func (f *openFixture) phoneUnlock(t *testing.T) (*Manager, *AltUnlockOutcome) {
 		OwnKeyCheck: func(context.Context, ReleaseEntry) (*SealKeyRecord, error) {
 			return &SealKeyRecord{VerifiedBy: testRelease.PCR0}, nil
 		}})
+}
+
+// phoneUnlock is phoneUnlockOut, which must succeed.
+func (f *openFixture) phoneUnlock(t *testing.T) (*Manager, *AltUnlockOutcome) {
+	t.Helper()
+	m, out := f.phoneUnlockOut()
 	if m == nil || !out.OK {
 		t.Fatalf("phone unlock %+v", out)
 	}
@@ -57,10 +62,12 @@ func bundleNames(b []byte, mb string) bool { return mb != "" && bytes.Contains(b
 
 // The inherited key's attempt at the open gets no definite answer after
 // the old mailbox answered mailbox_unknown (the registration 503): the
-// open goes on, its vault_bundle naming the gone mailbox. The phone cannot
-// pair there; the inherited key does not wait for it: the next unlock's
-// attempt completes it (and the next key owed), and the phone's own unlock
-// then carries the new address.
+// open goes on, its vault_bundle naming the gone mailbox, and the phone
+// cannot pair there. Its lost-ok unlock makes the vault's one attempt of
+// that unlock before the bundle: still no answer, the unlock is answered
+// retry (no recovery attempt spent); once the relay answers, the next
+// unlock completes the key (and the next key owed) and its bundle names
+// the new mailbox, which the phone pairs with: within its two tries.
 func TestRelayRotInheritedUnansweredAtTheOpenIsNotHeldByThePhone(t *testing.T) {
 	io := newInheritedOpen(t, func(rw *rotWorld, k, _ string) {
 		delete(rw.live, k)
@@ -70,40 +77,50 @@ func TestRelayRotInheritedUnansweredAtTheOpenIsNotHeldByThePhone(t *testing.T) {
 	if io.m.pendingMailbox() != io.p || rs.Collect.Stopped.IsZero() || rs.Pending.Recovery != "" {
 		t.Fatalf("after the open: pending %s, relay %+v", io.m.pendingMailbox(), rs)
 	}
+	if !bundleNames(io.out.VaultBundle, io.k) {
+		t.Fatal("the open's bundle does not name the mailbox it had")
+	}
 	if err := io.m.Lock(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	rot0, reg0 := io.rw.log()
+	used := io.f.used()
 
-	// The phone's lost-ok unlock: the vault's attempt at it completes the
-	// inherited key although the phone has not paired.
-	sink := &recSink{}
-	io.f.opts.Features = append(io.f.opts.Features, sink)
-	m, uo := io.f.phoneUnlock(t)
-	if !bundleNames(uo.VaultBundle, io.k) {
-		t.Fatal("the unlock's bundle does not name the vault's current (gone) mailbox")
+	// First try: the relay still fails; the unlock is answered retry.
+	io.rw.mu.Lock()
+	io.rw.register = []error{relayErr(503, "")}
+	io.rw.mu.Unlock()
+	if m, uo := io.f.phoneUnlockOut(); m != nil || uo.OK || uo.Code != CodeRetry || len(uo.VaultBundle) != 0 {
+		t.Fatalf("unlock with the relay failing: %+v", uo)
 	}
+	// Second try: the relay answers the inherited key (its registration);
+	// the next key owed, stored by its second write, gets a 503. The
+	// attempt is made before the bundle, which names the new current
+	// mailbox.
+	io.rw.mu.Lock()
+	io.rw.rotate = []error{nil, relayErr(503, "")}
+	io.rw.mu.Unlock()
+	io.f.clock = io.f.clock.Add(time.Hour)
+	m, uo := io.f.phoneUnlock(t)
+	defer m.Crash()
+	rs = ownRelayState(m)
+	if rs.Mailbox != io.p || rs.Pending == nil || !io.registered(io.p) {
+		t.Fatalf("not completed at the unlock: %+v", rs)
+	}
+	if !bundleNames(uo.VaultBundle, rs.Mailbox) || bundleNames(uo.VaultBundle, io.k) {
+		t.Fatal("the unlock's bundle does not carry the current address")
+	}
+	// One attempt per unlock: Start makes no second one.
+	rot0, reg0 := io.rw.log()
 	if err := m.Start(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	rot, reg := io.rw.log()
-	if len(rot) <= len(rot0) || len(reg) <= len(reg0) || !io.registered(io.p) {
-		t.Fatalf("no attempt after the open: rotates %v, registrations %v", rot, reg)
+	if rot, reg := io.rw.log(); len(rot) != len(rot0) || len(reg) != len(reg0) {
+		t.Fatalf("a second attempt at the same unlock: %v %v", rot[len(rot0):], reg[len(reg0):])
 	}
-	rs = ownRelayState(m)
-	if rs.Pending != nil || rs.Mailbox == io.k || rs.Mailbox == io.p || !recoveryInvitePending(m) {
-		t.Fatalf("not recovered: %+v (invite pending %v)", rs, recoveryInvitePending(m))
+	if io.f.used() != used {
+		t.Fatalf("the unlocks spent recovery attempts: %d, before %d", io.f.used(), used)
 	}
-	cur := rs.Mailbox
-	if err := m.Lock(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	// The phone's next unlock carries the current address.
-	m, uo = io.f.phoneUnlock(t)
-	defer m.Crash()
-	if !bundleNames(uo.VaultBundle, cur) || bundleNames(uo.VaultBundle, io.k) {
-		t.Fatal("the phone's unlock does not carry the current address")
-	}
+	pairRecoveredPhone(t, m, io.f.phone)
 }
 
 // The same at the open's own run: its sooner retries complete the

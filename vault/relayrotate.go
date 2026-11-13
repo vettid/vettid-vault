@@ -74,6 +74,9 @@ type relayKeyRun struct {
 	// relay key stored as pending meanwhile is that recovery's own
 	// (PendingRelay.Recovery).
 	openRecovery string
+	// unlockTried: this unlock's attempt was made before the recovered
+	// phone's bundle (relayKeyBeforeBundle).
+	unlockTried bool
 	// pending and old are the Relays of the pending key and the old keys
 	// (keys.oldRelay, by index), built when first used.
 	pending Relay
@@ -737,7 +740,8 @@ func (m *Manager) relayKeyStep(ctx context.Context, atUnlock bool) {
 // mailbox as the open's vault_bundle gave them, as retryOwedRotation waits
 // for the ik. Once that mailbox answered mailbox_unknown the phone cannot
 // reach it, and the key is completed as any other (§3.4 "Retrying with the
-// same key"); the phone's own unlock before its first handshake then
+// same key"); the phone's own unlock before its first handshake makes
+// that attempt before its bundle (relayKeyBeforeBundle), which then
 // carries the new address (resumeLostOK).
 func (m *Manager) recoveryWaits(pr *PendingRelay) bool {
 	if pr == nil || pr.Recovery == "" || !m.st.Relay.Collect.Stopped.IsZero() {
@@ -856,11 +860,45 @@ func (m *Manager) relayKeyAtUnlock(ctx context.Context) {
 	if !m.relayRotation() {
 		return
 	}
-	m.relayKeyStep(ctx, true)
+	if !m.rk.unlockTried { // made before the recovered phone's bundle
+		m.relayKeyStep(ctx, true)
+	}
 	if m.st == nil || m.rk.left == "" || m.st.Relay.Pending == nil || m.pendingMailbox() != m.rk.left || m.recoveryWaits(m.st.Relay.Pending) {
 		return
 	}
 	m.relayKeyFailed(m.now())
+}
+
+// errRelayKeyUnanswered answers a recovered phone's unlock whose relay-key
+// attempt got no definite answer (relayKeyBeforeBundle).
+var errRelayKeyUnanswered = errors.New("vault: the relay key's attempt got no definite answer")
+
+// relayKeyBeforeBundle is the unlock's one relay-key attempt, made before
+// the recovered phone's bundle is built when the current mailbox is gone
+// (its collects ended on mailbox_unknown) and a key is pending: the
+// bundle (§11.14.6 "A lost ok") then names the mailbox the attempt made
+// current, not the gone one. relayKeyAtUnlock makes no second attempt.
+// A key that stays pending, not refused, after it (no definite answer, a
+// retry_after still running) answers the unlock "retry" (code): the phone
+// unlocks again later, which spends no recovery attempt. A refused key
+// goes on as before (the refused state). Called in the unlock, with the
+// state read and the relay set, before the unlock's own write; the
+// attempt's writes are those of any attempt (the anchor's own write, the
+// second write), under the DEK the unlock opened (persist).
+func (m *Manager) relayKeyBeforeBundle(ctx context.Context) (string, error) {
+	pr := m.st.Relay.Pending
+	if !m.relayRotation() || pr == nil || m.st.Relay.Collect.Stopped.IsZero() {
+		return "", nil
+	}
+	m.relayKeyStep(ctx, true)
+	m.rk.unlockTried = true
+	if m.st == nil || m.locked {
+		return CodeRetry, ErrSplitBrain
+	}
+	if pr := m.st.Relay.Pending; pr != nil && pr.Refused == "" && !m.st.Relay.Collect.Stopped.IsZero() {
+		return CodeRetry, errRelayKeyUnanswered
+	}
+	return "", nil
 }
 
 // relayMailboxUnknown is the collect loop's mailbox_unknown on the current

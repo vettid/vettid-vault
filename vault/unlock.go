@@ -782,6 +782,14 @@ func (m *Manager) resume(ctx context.Context, p AltUnlockParams, out *AltUnlockO
 	} else if m.limits, err = m.relay.Register(ctx); err != nil {
 		return fail(CodeRetry, err)
 	}
+	if !p.pinOnly && m.recoveredInvite(p.DeviceIK) != nil {
+		if code, err := m.relayKeyBeforeBundle(ctx); code != "" {
+			if m.st == nil {
+				return nil, out.fail(code, err) // zeroized (a split brain)
+			}
+			return fail(code, err)
+		}
+	}
 	if !p.pinOnly {
 		m.unlockedBy = m.unlockDevice(p.DeviceIK)
 		m.syncUnlockKeysWith(findUnlockKey(m.hdr, p.DeviceIK))

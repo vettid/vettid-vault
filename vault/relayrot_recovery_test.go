@@ -18,6 +18,7 @@ type inheritedOpen struct {
 	rw   *rotWorld
 	k, p string
 	m    *Manager
+	out  *RecoveryOpenOutcome
 }
 
 func newInheritedOpen(t *testing.T, script func(rw *rotWorld, k, p string)) *inheritedOpen {
@@ -60,7 +61,7 @@ func newInheritedOpenAnchored(t *testing.T, anchor time.Time, script func(rw *ro
 	if m == nil || !out.OK {
 		t.Fatalf("open %+v", out)
 	}
-	io.m = m
+	io.m, io.out = m, out
 	t.Cleanup(m.Crash)
 	return io
 }

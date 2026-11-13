@@ -98,6 +98,8 @@ func (m *Manager) heldToken(tok string, p *Peer, kind string) (HeldToken, error)
 	if kind == TokReconnect {
 		life = handshake.ReconnectTokenMaxLifetime
 	}
+	// The own relay's limit is the one read when the vault registered with
+	// it, so a raise of the relay's policy is seen only from the next unlock.
 	if lim := time.Duration(m.limits.MaxTokenLifetimeSeconds) * time.Second; lim > 0 && lim < life && p.Relay.URL == m.st.Relay.URL {
 		// The peer's relay is this vault's own: its advertised
 		// max_token_lifetime_seconds is known, and the relay refuses a

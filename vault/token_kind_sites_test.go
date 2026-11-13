@@ -112,7 +112,7 @@ func TestTokenKindFirstContact(t *testing.T) {
 			b.request(t, "connection.approve", `{"connection_id":"`+cid+`"}`)
 			pump(t, b, a)
 			for _, p := range b.m.st.Connections {
-				if p.State != PeerActive || p.Reconnect.Token == "" || p.Reconnect.Exp.Sub(time.Now()) < 364*tokDay {
+				if p.State != PeerActive || p.Reconnect.Token == "" || time.Until(p.Reconnect.Exp) < 364*tokDay {
 					t.Fatalf("the honest 365-day reconnect token was not held: %+v", p.Reconnect)
 				}
 			}

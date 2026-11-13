@@ -10,6 +10,7 @@ import (
 
 	"github.com/vettid/vettid-relay/relayauth"
 
+	"github.com/vettid/vettid-vault/vms/envelope"
 	"github.com/vettid/vettid-vault/vms/handshake"
 	"github.com/vettid/vettid-vault/vms/peerwire"
 	"github.com/vettid/vettid-vault/vms/suite"
@@ -127,6 +128,12 @@ func TestRuleCRelayForkFromTwoUpdates(t *testing.T) {
 	}
 	if len(p.RelaySeen) != 1 {
 		t.Fatal("the second successor was kept as seen")
+	}
+	// Another successor once the fork is recorded: recorded once, one
+	// audit entry and one feed item.
+	sendC(d, td, "relay.address.update", rkUpdate(t, rkKey(0x63), rkLink(t, k, rkKey(0x63))))
+	if got := d.audits("connection.fork_suspected"); len(got) != 1 {
+		t.Fatalf("the relay fork was audited again: %d", len(got))
 	}
 	if id := d.m.sendTo(p, "test.note", []byte(`{}`), time.Now()); id != "" {
 		t.Fatal("a connection suspended as a relay fork was sent to")
@@ -266,8 +273,15 @@ func TestRuleCRelayOwnDeviceConflict(t *testing.T) {
 	if len(p.RelaySeen) != 1 || p.RelayConflict != nil {
 		t.Fatal("setup: the first successor was not seen")
 	}
-	if err := d.send("relay.address.update", []byte(rkUpdate(t, kb, rkLink(t, k, kb)))); err != nil {
-		t.Fatal(err)
+	// A deposit to the device queued before the conflict, not yet out.
+	d.m.mu.Lock()
+	d.m.queueDeposit(&OutboxEntry{PeerID: p.ID, RelayURL: p.Relay.URL, Mailbox: p.Relay.Mailbox, Payload: []byte("queued")}, time.Now())
+	d.m.mu.Unlock()
+	deposits := d.depositsTo(p.Relay.Mailbox)
+	conflictID, _ := envelope.NewULID(time.Now())
+	d.sendID(d.self(), conflictID, "relay.address.update", rkUpdate(t, kb, rkLink(t, k, kb)))
+	if got := d.depositsTo(p.Relay.Mailbox); got != deposits {
+		t.Fatalf("a deposit queued before the conflict went out (%d -> %d)", deposits, got)
 	}
 	c := p.RelayConflict
 	if c == nil || !suite.EqualPublic(c.Kept, rkPub(ka)) || !suite.EqualPublic(c.Refused, rkPub(kb)) || p.suspended() {
@@ -286,6 +300,20 @@ func TestRuleCRelayOwnDeviceConflict(t *testing.T) {
 	d.m.mu.Unlock()
 	if id != "" || len(d.m.st.Outbox) != n {
 		t.Fatal("something more was queued for the device")
+	}
+	// A resend of the conflicting update (the same inner id) is refused
+	// again but audited once.
+	d.sendID(d.self(), conflictID, "relay.address.update", rkUpdate(t, kb, rkLink(t, k, kb)))
+	if got := d.audits("drop.peer_key"); len(got) != 2 {
+		t.Fatalf("the resend was audited again: %+v", got)
+	}
+	// A volatile request's answer (pending.list) is not sent either.
+	deposits = d.depositsTo(p.Relay.Mailbox)
+	if err := d.send("pending.list", []byte(`{}`)); err != nil {
+		t.Fatal(err)
+	}
+	if got := d.depositsTo(p.Relay.Mailbox); got != deposits {
+		t.Fatal("a volatile answer was sent to the device")
 	}
 	// Its other messages are still taken (nothing suspends).
 	if err := d.send("vault.status", []byte(`{}`)); err != nil {

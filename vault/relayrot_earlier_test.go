@@ -244,3 +244,29 @@ func TestRelayEarlierStateBackwardCompatible(t *testing.T) {
 		t.Fatalf("does not round-trip:\n%s\n%s", b, b2)
 	}
 }
+
+// A link the vault follows is no longer only seen: the follow takes it out
+// of the seen links (rule C keeps it as followed instead).
+func TestRelayFollowedLinkLeavesTheSeenLinks(t *testing.T) {
+	f := newFixture(t)
+	m := f.m
+	m.opt.RelayKeyRotation = true
+	k0, k1, k2 := rkKey(0x41), rkKey(0x42), rkKey(0x43)
+	p := rkPeer(m, "c1", k0)
+	l01 := rkLink(t, k0, k1)
+	if m.relayRuleC(p, l01, testNow()) != relayEvNone || len(p.RelaySeen) != 1 {
+		t.Fatal("setup: not seen")
+	}
+	m.relayAt, m.msgID = testNow(), "m-1"
+	if err := m.followRelayLinks(p, []*handshake.RelayLink{l01}, rkAddr(k1)); err != nil {
+		t.Fatal(err)
+	}
+	if len(p.RelaySeen) != 0 {
+		t.Fatal("the followed link is still kept as seen")
+	}
+	// And a later different successor of k0 is still a second successor
+	// (against the followed link).
+	if m.relayRuleC(p, rkLink(t, k0, k2), testNow()) != relayEvFork {
+		t.Fatal("no fork against the followed link")
+	}
+}

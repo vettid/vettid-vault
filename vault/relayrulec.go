@@ -201,6 +201,14 @@ func (m *Manager) updateRelayEvidence(p *Peer, in *envelope.Inner, sender ed2551
 	}
 	_, ev := m.relayLinksEvidence(p, sender, u.Relay.PK, u.Links, now)
 	if ev == relayEvConflict {
+		// Refused and audited once per inner id: a resend (§8.2) is a
+		// duplicate, acked without a second audit entry. Rule C still ran
+		// on it above (it finds the same conflict and records nothing new).
+		key := p.ID + "|" + in.ID
+		if _, dup := m.st.SeenInner[key]; dup {
+			return true
+		}
+		m.st.SeenInner[key] = now
 		m.refusePeerKey(p, "conflict", now)
 		return true
 	}

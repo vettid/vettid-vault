@@ -159,7 +159,7 @@ func (m *Manager) newRequest(aw *AwaitingHS, fr *handshake.FinResult, now time.T
 func (m *Manager) outgoingEstablished(og *OutgoingHS, res *handshake.Result, now time.Time) {
 	p := og.New
 	m.noteFeatures(p, res.Inner.Features) // 0.86.0, §10.8
-	held, err := m.heldToken(res.Resp.Token, p)
+	held, err := m.heldToken(res.Resp.Token, p, TokStanding)
 	if err != nil {
 		res.Epoch.Destroy()
 		m.audit(now, "hs_resp_bad_token", p.ID)
@@ -242,8 +242,8 @@ func (m *Manager) peerApproved(r *Request, in *envelope.Inner, now time.Time) {
 		m.audit(now, "bad_connection_approved", "")
 		return
 	}
-	st, err1 := m.heldToken(tok, r.Peer)
-	rt, err2 := m.heldToken(rtok, r.Peer)
+	st, err1 := m.heldToken(tok, r.Peer, TokStanding)
+	rt, err2 := m.heldToken(rtok, r.Peer, TokReconnect)
 	if err1 != nil || err2 != nil {
 		m.audit(now, "bad_connection_approved", "")
 		return

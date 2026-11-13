@@ -222,7 +222,7 @@ func (m *Manager) respondFirst(pi *handshake.PendingInit, inv *Invite, sender ed
 		// the holder when it completes (§11.14.6).
 		p.Recovering = true
 	}
-	held, err := m.heldToken(body.Token, p)
+	held, err := m.heldToken(body.Token, p, TokStanding)
 	if err != nil {
 		m.audit(now, "hs_init_bad_token", "")
 		pi.Discard()
@@ -396,8 +396,8 @@ func (m *Manager) respondReconnect(pi *handshake.PendingInit, p *Peer, sender ed
 	default:
 		named = append(named, p.LastEpochID...)
 	}
-	st, err1 := m.heldToken(body.Token, p)
-	rt, err2 := m.heldToken(body.ReconnectToken, p)
+	st, err1 := m.heldToken(body.Token, p, TokStanding)
+	rt, err2 := m.heldToken(body.ReconnectToken, p, TokReconnect)
 	if err1 != nil || err2 != nil {
 		m.audit(now, "reconnect_bad_token", p.ID)
 		pi.Discard()
@@ -784,7 +784,7 @@ func (m *Manager) handleRekeyInit(ctx context.Context, p *Peer, in *envelope.Inn
 	}
 	id := m.newID(now)
 	aw := &AwaitingHS{ID: id, PeerID: p.ID, Purpose: handshake.PurposeRekey, Created: now, Resp: rs, OwnChain: m.ownChainNow(),
-		NamedConfirmed: namedConf, InitTS: in.TS,
+		NamedConfirmed: namedConf, InitTS: in.TS, InitEpoch: append([]byte(nil), epID[:]...),
 		Signer: append([]byte(nil), body.From.IK...), Th1: func() []byte { t := pi.Th1(); return t[:] }()}
 	for _, r := range body.Rotations {
 		aw.Links = append(aw.Links, r.Marshal())
@@ -914,10 +914,17 @@ func (m *Manager) responderEstablish(p *Peer, aw *AwaitingHS, fr *handshake.FinR
 			return
 		}
 		// Nothing is restarted beside the epoch this hs.fin establishes
-		// (the vault's own open handshakes are abandoned below).
+		// (the vault's own open handshakes are abandoned below). Strict F1
+		// runs with E the epoch the hs.init traveled under (§3.4.1
+		// invariant I3, owner decision 2026-11-12): an epoch of P after E
+		// signed by the link's old_ik, established at Q before this hs.fin
+		// (so not demoted by position), was a copy's, as P sent the rekey
+		// under E holding the link. This hs.fin's own epoch is not yet
+		// recorded and is not judged. A record without InitEpoch (written
+		// before it) runs none, as before.
 		prev := m.noLinkRestart
 		m.noLinkRestart = true
-		m.followLinks(p, all[n:], nil, now)
+		m.followLinksF1(p, all[n:], nil, aw.InitEpoch, now)
 		m.noLinkRestart = prev
 		if p.suspended() {
 			// Following them suspended the connection (as finishReconnect
@@ -1017,9 +1024,15 @@ func (m *Manager) finishReconnect(p *Peer, aw *AwaitingHS, fr *handshake.FinResu
 		// Table B "Reached": the links are applied, then H5 (answers
 		// pinned to an ik no longer current are dropped), with "Epochs
 		// after an ik link" and "Pending epochs at a link"; nothing is
-		// restarted beside the epoch this reconnect establishes.
+		// restarted beside the epoch this reconnect establishes. Strict F1
+		// runs with E the epoch the hs.init named (§3.4.1 invariant I3,
+		// owner decision 2026-11-12), as for a refused reconnect's links
+		// (refusedReconnectLinks), the ctx now authenticated by sig_I: an
+		// epoch of P after it signed by the link's old_ik, established at Q
+		// before this hs.fin, was a copy's. An answer recorded without
+		// Named runs none, as before.
 		m.noLinkRestart = true
-		m.followLinks(p, fresh, nil, now)
+		m.followLinksF1(p, fresh, nil, pend.Named, now)
 		m.noLinkRestart = false
 		if p.suspended() {
 			fr.Epoch.Destroy()
@@ -1317,10 +1330,10 @@ func (m *Manager) handleResp(ctx context.Context, id string, raw []byte, sender 
 	var carried *CarriedTokens
 	if res.Resp.Token != "" || res.Resp.ReconnectToken != "" {
 		carried = &CarriedTokens{}
-		if t, err := m.heldToken(res.Resp.Token, p); err == nil && res.Resp.Token != "" {
+		if t, err := m.heldToken(res.Resp.Token, p, TokStanding); err == nil && res.Resp.Token != "" {
 			carried.Standing = t
 		}
-		if t, err := m.heldToken(res.Resp.ReconnectToken, p); err == nil && res.Resp.ReconnectToken != "" {
+		if t, err := m.heldToken(res.Resp.ReconnectToken, p, TokReconnect); err == nil && res.Resp.ReconnectToken != "" {
 			carried.Reconnect = t
 		}
 	}

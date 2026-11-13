@@ -3,6 +3,8 @@ package handshake
 import (
 	"bytes"
 	"testing"
+
+	"github.com/vettid/vettid-vault/vms/strictjson"
 )
 
 // §13.6: envelope and inner parsers MUST be fuzzed. These cover the
@@ -119,6 +121,40 @@ func FuzzHandshakeOpen(f *testing.F) {
 	f.Fuzz(func(t *testing.T, b []byte) {
 		if p, err := OpenInit(b, r.lookup, t0); err == nil && p.Init() == nil {
 			t.Fatal("nil body")
+		}
+	})
+}
+
+// The relay link chain verifier (0.90.0 rule U, §6.2): any input either
+// parses and verifies as a chain from its first old to its last new, or is
+// refused; nothing panics.
+func FuzzRelayChain(f *testing.F) {
+	a, b, c := relayKey(0x61), relayKey(0x62), relayKey(0x63)
+	ch := relayChain(f, a, b, c)
+	f.Add(append(append(append([]byte{'['}, ch[0].Marshal()...), ','), append(ch[1].Marshal(), ']')...))
+	f.Add([]byte(`[]`))
+	f.Add([]byte(`[{"old":"","new":"","sig_old":"","sig_new":""}]`))
+	f.Fuzz(func(t *testing.T, raw []byte) {
+		arr, err := strictjson.AsArray(raw)
+		if err != nil {
+			return
+		}
+		ls, err := ParseRelayLinks(arr)
+		if err != nil {
+			return
+		}
+		first, last := ls[0].Old, ls[len(ls)-1].New
+		if VerifyRelayChain(first, last, ls) != nil {
+			return
+		}
+		for i, l := range ls {
+			if l.Verify() != nil || i > 0 && !bytes.Equal(l.Old, ls[i-1].New) {
+				t.Fatal("a chain that does not hold verified")
+			}
+		}
+		again, err := ParseRelayLinks(arr)
+		if err != nil || !bytes.Equal(MarshalRelayLinks(again), MarshalRelayLinks(ls)) {
+			t.Fatal("re-parse differs")
 		}
 	})
 }

@@ -10,8 +10,9 @@ V2 and now live in the spec; vettid.org is the source of truth.
 ## Not in V2
 
 - Outgoing relay-key rotation (§3.4: dual-mailbox collect during the grace
-  period). Incoming `relay.address.update` and both directions of
-  `identity.rotate` are implemented.
+  period). Both directions of `identity.rotate` are implemented. An
+  incoming `relay.address.update` is refused (`relay_unlinked`) until
+  rule U (§3.4.1) is built: release 29 rotates no relay key (A5).
   So the rotation of the vault's keys at a completed recovery (§11.14.6
   step 6), after a transfer (§11.14.10) and at `credential.rotate`
   (§3.5.5) rotates `ik`, `kem` and the wake key, but not the relay key:

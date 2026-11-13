@@ -399,6 +399,13 @@ func Generate() (map[string][]byte, error) {
 	if err := put("relay.json", rlv); err != nil {
 		return nil, err
 	}
+	rrv, err := genRelayRotate()
+	if err != nil {
+		return nil, err
+	}
+	if err := put("relay_rotate.json", rrv); err != nil {
+		return nil, err
+	}
 	return out, nil
 }
 

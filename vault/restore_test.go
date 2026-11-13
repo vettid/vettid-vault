@@ -74,10 +74,16 @@ func newSvcFx(t *testing.T, kind string) *svcFx {
 
 func (f *svcFx) at(off time.Duration) { f.off = off }
 
-func (f *svcFx) mint() string {
+// mint is a standing token from the service's mailbox (§7.1: at most 30
+// days); mintReconnect a reconnect token (at most 365 days).
+func (f *svcFx) mint() string { return f.mintFor(30 * 24 * time.Hour) }
+
+func (f *svcFx) mintReconnect() string { return f.mintFor(300 * 24 * time.Hour) }
+
+func (f *svcFx) mintFor(ttl time.Duration) string {
 	f.t.Helper()
 	rc := relayclient.New(f.n.addr.URL, f.n.relay)
-	tok, err := rc.MintToken(relayauth.EncodeKey(f.vaultPK()), f.n.addr.URL, relayclient.TokenOptions{TTL: 300 * 24 * time.Hour})
+	tok, err := rc.MintToken(relayauth.EncodeKey(f.vaultPK()), f.n.addr.URL, relayclient.TokenOptions{TTL: ttl})
 	if err != nil {
 		f.t.Fatal(err)
 	}
@@ -92,7 +98,7 @@ func (f *svcFx) initiate(ctx []byte, at time.Time, rot []*handshake.Rotation) *h
 	id, _ := envelope.NewULID(at)
 	ini, err := handshake.NewInitiator(handshake.InitiatorConfig{
 		Purpose: handshake.PurposeReconnect, Ctx: handshake.EpochCtx(epochIDOf(ctx)),
-		Identity: f.n.ik, StaticKEM: f.n.kem.Public(), Relay: f.n.addr, Token: f.mint(), ReconnectToken: f.mint(),
+		Identity: f.n.ik, StaticKEM: f.n.kem.Public(), Relay: f.n.addr, Token: f.mint(), ReconnectToken: f.mintReconnect(),
 		Rotations:   rot,
 		ResponderIK: m.keys.ik.Public().(ed25519.PublicKey), ResponderEK: m.keys.kem.Public(), ResponderRelayKey: f.vaultPK(),
 		Policy: policyFor(KindConnection), Now: at, ID: id,
@@ -551,7 +557,7 @@ func TestResponderRotationsFromNamedEpoch(t *testing.T) {
 	} {
 		ini, err := handshake.NewInitiator(handshake.InitiatorConfig{
 			Purpose: handshake.PurposeReconnect, Ctx: handshake.EpochCtx(epochIDOf(c.ctx)),
-			Identity: f.n.ik, StaticKEM: f.n.kem.Public(), Relay: f.n.addr, Token: f.mint(), ReconnectToken: f.mint(),
+			Identity: f.n.ik, StaticKEM: f.n.kem.Public(), Relay: f.n.addr, Token: f.mint(), ReconnectToken: f.mintReconnect(),
 			ResponderIK: c.known, ResponderEK: m.keys.kem.Public(), ResponderRelayKey: f.vaultPK(),
 			Policy: policyFor(KindConnection), Now: f.now(),
 		})
@@ -612,7 +618,7 @@ func TestForkDetectionSuspends(t *testing.T) {
 		f.d.m.startReconnect(f.p, f.now())
 		f.d.m.startRekey(f.p, f.now())
 		f.d.m.mu.Unlock()
-		f.p.Reconnect = HeldToken{Token: f.mint(), Exp: f.now().Add(24 * time.Hour)}
+		f.p.Reconnect = HeldToken{Token: f.mintReconnect(), Exp: f.now().Add(24 * time.Hour)}
 		f.d.m.mu.Lock()
 		f.d.m.startReconnect(f.p, f.now())
 		f.d.m.mu.Unlock()
@@ -764,7 +770,7 @@ func TestCrossingReconnects(t *testing.T) {
 		m := f.d.m
 		m.mu.Lock()
 		defer m.mu.Unlock()
-		f.p.Reconnect = HeldToken{Token: f.mint(), Exp: f.now().Add(24 * time.Hour)}
+		f.p.Reconnect = HeldToken{Token: f.mintReconnect(), Exp: f.now().Add(24 * time.Hour)}
 		m.startReconnect(f.p, f.now())
 		var og *OutgoingHS
 		for _, o := range m.st.Outgoing {
@@ -795,7 +801,7 @@ func TestCrossingReconnects(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		r, renv, err := pi.Respond(handshake.ResponderConfig{Identity: f.n.ik, Token: f.mint(), ReconnectToken: f.mint(),
+		r, renv, err := pi.Respond(handshake.ResponderConfig{Identity: f.n.ik, Token: f.mint(), ReconnectToken: f.mintReconnect(),
 			Policy: policyFor(KindConnection), CollectSender: f.vaultPK(), RecordRelayKey: f.vaultPK(),
 			KnownInitiatorIK: f.d.m.keys.ik.Public().(ed25519.PublicKey), ExpectedCtx: pi.Init().Ctx, Now: f.now()})
 		if err != nil {
@@ -974,7 +980,7 @@ func TestOpenReconnectKeptAcrossStart(t *testing.T) {
 	f := newSvcFx(t, "service")
 	m := f.d.m
 	m.mu.Lock()
-	f.p.Reconnect = HeldToken{Token: f.mint(), Exp: f.now().Add(24 * time.Hour)}
+	f.p.Reconnect = HeldToken{Token: f.mintReconnect(), Exp: f.now().Add(24 * time.Hour)}
 	m.startReconnect(f.p, f.now())
 	var first *OutgoingHS
 	for _, og := range m.st.Outgoing {

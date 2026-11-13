@@ -22,6 +22,9 @@ var (
 	ErrIdentity  = errors.New("handshake: identity key does not match the record")
 	ErrCtx       = errors.New("handshake: ctx does not match")
 	ErrRotation  = errors.New("handshake: invalid rotation statement or chain")
+	// ErrRelayLink: a relay link or chain that does not verify (§3.4.1
+	// rule U: refused relay_unlinked).
+	ErrRelayLink = errors.New("handshake: invalid relay link or chain")
 	ErrSigResp   = errors.New("handshake: sig_R verification failed")
 	ErrSigFin    = errors.New("handshake: sig_I verification failed")
 	// ErrSASCommit: sig_I verified, but n_I does not open sas_commit. Only

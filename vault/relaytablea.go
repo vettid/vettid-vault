@@ -69,25 +69,6 @@ func (m *Manager) tableAHandshake(p *Peer, sender ed25519.PublicKey, now time.Ti
 	return true
 }
 
-// respLinksEvidence is acceptFrom step 3 for an hs.resp that Table A then
-// refuses with its handshake kept: the answer is opened on a copy of the
-// handshake (the handshake itself stays as it is), and its identity links
-// are checked by rule C and kept as seen, as the accepted path checks
-// them. An answer that does not open or verify carries no evidence. It
-// returns the opened answer (its epoch destroyed), or nil.
-func (m *Manager) respLinksEvidence(p *Peer, ini *handshake.Initiator, raw []byte, sender ed25519.PublicKey, now time.Time) *handshake.Result {
-	res := m.peekResp(p, ini, raw, sender, now)
-	if res == nil {
-		return nil
-	}
-	for _, r := range res.Resp.Rotations {
-		if m.rotationConflict(p, r, now) {
-			return nil
-		}
-	}
-	return res
-}
-
 // peekResp opens an hs.resp on a copy of the handshake ini, which stays as
 // it is, and returns the result with its epoch destroyed, or nil if it
 // does not open or verify. The handshake pins the relay key on record

@@ -323,6 +323,25 @@ func TestRelayRotInheritedRepeatNoAnswerKeepsTheWait(t *testing.T) {
 	}
 }
 
+// The lost run's registration said 201; at the repeat the current mailbox
+// is gone (mailbox_unknown), the key's registration is refused for good, and
+// so is the fresh key's: the key is left refused with no stored time, so the
+// 201 of a later attempt (at an unlock) starts the wait instead of
+// completing the key at once.
+func TestRelayRotInheritedRepeatRefusedKeyGetsNoStamp(t *testing.T) {
+	io := newInheritedRepeat(t, func(rw *rotWorld, k, _ string) {
+		delete(rw.live, k) // the rotate meets mailbox_unknown; the registration goes on
+		rw.register = []error{nil, relayErr(403, "forbidden"), relayErr(403, "forbidden")}
+	})
+	rs := ownRelayState(io.m)
+	if rs.Pending == nil || rs.Pending.Refused == "" {
+		t.Fatalf("not left refused: %+v", rs.Pending)
+	}
+	if !rs.Pending.Created.IsZero() {
+		t.Fatalf("a refused key got a stored time %v", rs.Pending.Created)
+	}
+}
+
 // A repeat whose step 2 was not stored makes the first open's event again
 // (recoveryEvent), the inherited key's attempt included: the first open's
 // state write fails after its attempt (a rotate the relay took), and the

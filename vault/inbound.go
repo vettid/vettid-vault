@@ -433,6 +433,12 @@ func (m *Manager) peerByRelayKey(pk ed25519.PublicKey) *Peer {
 
 // dispatch handles a decrypted session-mode message from principal p.
 func (m *Manager) dispatch(ctx context.Context, p *Peer, in *envelope.Inner, ep *handshake.Epoch, raw []byte, sender ed25519.PublicKey, now time.Time) disposition {
+	if m.opt.RelayKeyRotation && in.Type == peerwire.TypeRelayAddressUpdate && m.updateRelayEvidence(p, in, sender, now) {
+		// §3.4.1 acceptFrom step 3 for relay links, and step 1 for a
+		// suspended record (§3.4.2 RK12): rule C first. A device's second
+		// successor is refused here (conflict).
+		return ackAfterFlush
+	}
 	if p.Kind == KindConnection && p.Fork != nil {
 		// §6.6 (0.72.0): a connection suspended on fork evidence accepts
 		// nothing, identity.rotate included.
@@ -773,7 +779,7 @@ func (m *Manager) sendResponse(p *Peer, req *envelope.Inner, key string, out *en
 	}
 	if key == volatileKey {
 		kr := m.sessions[p.ID]
-		if kr == nil || kr.Current() == nil {
+		if kr == nil || kr.Current() == nil || p.RelayConflict != nil {
 			return
 		}
 		raw, err := m.sealFor(p, kr.Current(), out)

@@ -172,7 +172,7 @@ func TestRelayEarlierKeyKeptWhileATokenCanDeposit(t *testing.T) {
 	p := rkPeer(m, "c1", k0)
 	now := testNow()
 	m.st.Issued = append(m.st.Issued, IssuedToken{JTI: "t0", Kind: TokStanding, Sub: relayauth.EncodeKey(rkPub(k0)), PeerID: p.ID,
-		Exp: now.Add(10 * 24 * time.Hour), Denied: true})
+		Exp: now.Add(10 * 24 * time.Hour)})
 	m.relayAt, m.msgID = now, "m-1"
 	if err := m.followRelayLinks(p, []*handshake.RelayLink{rkLink(t, k0, k1)}, rkAddr(k1)); err != nil {
 		t.Fatal(err)
@@ -180,7 +180,7 @@ func TestRelayEarlierKeyKeptWhileATokenCanDeposit(t *testing.T) {
 	p.RelaySeen = []json.RawMessage{rkLink(t, k0, kz).Marshal()} // as if seen before the follow
 	m.pruneEarlierRelays(now.Add(9 * 24 * time.Hour))
 	if p.earlierRelay(rkPub(k0)) == nil || len(p.RelaySeen) != 1 {
-		t.Fatal("dropped while a token issued to it can still deposit (a revoked one counts until its exp)")
+		t.Fatal("dropped while a token issued to it can still deposit")
 	}
 	m.pruneEarlierRelays(now.Add(10 * 24 * time.Hour))
 	if p.EarlierRelays != nil || len(p.RelaySeen) != 0 {
@@ -346,5 +346,30 @@ func TestRelayEarlierKeyKeptForAHandshakesToken(t *testing.T) {
 				t.Fatal("kept after the handshake's token expired")
 			}
 		})
+	}
+}
+
+// A token the vault revoked does not keep an earlier key: rule U revokes
+// the reconnect tokens of the keys it follows away from, which would
+// otherwise keep each one for a reconnect token's life. One revoked before
+// its handshake was recorded (in the registry, denied) counts as revoked.
+func TestRelayEarlierKeyRevokedTokensDoNotKeepIt(t *testing.T) {
+	f := newFixture(t)
+	m := f.m
+	m.opt.RelayKeyRotation = true
+	k0, k1 := rkKey(0x41), rkKey(0x42)
+	p := rkPeer(m, "c1", k0)
+	now := testNow()
+	sub := relayauth.EncodeKey(rkPub(k0))
+	m.st.Issued = append(m.st.Issued, IssuedToken{JTI: "t0", Kind: TokReconnect, Sub: sub, PeerID: p.ID, Exp: now.Add(300 * 24 * time.Hour), Denied: true},
+		IssuedToken{JTI: "t1", Kind: TokReconnect, Sub: sub, PeerID: p.ID, Exp: now.Add(300 * 24 * time.Hour), Denied: true})
+	p.Pending = &PendingEpoch{Issued: []IssuedToken{{JTI: "t1", Kind: TokReconnect, Sub: sub, PeerID: p.ID, Exp: now.Add(300 * 24 * time.Hour)}}}
+	m.relayAt, m.msgID = now, "m-1"
+	if err := m.followRelayLinks(p, []*handshake.RelayLink{rkLink(t, k0, k1)}, rkAddr(k1)); err != nil {
+		t.Fatal(err)
+	}
+	m.pruneEarlierRelays(now.Add(time.Hour))
+	if p.EarlierRelays != nil {
+		t.Fatal("an earlier key kept by revoked tokens only")
 	}
 }

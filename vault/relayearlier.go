@@ -188,10 +188,13 @@ func (m *Manager) followRelayLinks(p *Peer, links []*handshake.RelayLink, to han
 // longer deposit. A key kept for deposits keeps every later earlier key
 // with its followed link, so that rule C still finds a second successor of
 // any key a kept key's chain passed (an intermediate key the vault never
-// issued a token to, for example). A token counts until its exp, revoked
-// or not: a revocation takes effect at the relay only once its denylist
-// request is through, and keeping the key longer only keeps its deposits
-// judged by their cut-off instead of refused as foreign.
+// issued a token to, for example). A token counts until its exp, unless
+// the vault revoked it: rule U revokes the reconnect tokens of the keys it
+// follows away from, and counting them would keep each earlier key for a
+// reconnect token's 365 days, so the per-peer cap would allow only about
+// 32 rotations a year. A deposit under a revoked token that the relay
+// still took before its denylist request went through is then refused as
+// foreign rather than judged by its cut-off: fail closed.
 func (m *Manager) pruneEarlierRelays(now time.Time) {
 	if !m.opt.RelayKeyRotation {
 		return
@@ -216,13 +219,20 @@ func (m *Manager) pruneEarlierRelays(now time.Time) {
 }
 
 // issuedCanDeposit reports whether a token the vault issued with sub pk is
-// unexpired: one it recorded as issued, or one minted in a handshake with
-// p not yet recorded (a pending epoch's, an open hs.init's or hs.resp's).
+// unexpired and not revoked: one it recorded as issued, or one minted in a
+// handshake with p not yet recorded (a pending epoch's, an open hs.init's
+// or hs.resp's; one revoked before that is recorded as denied).
 func (m *Manager) issuedCanDeposit(p *Peer, pk []byte, now time.Time) bool {
 	sub := relayauth.EncodeKey(ed25519.PublicKey(pk))
+	denied := map[string]bool{}
+	for _, t := range m.st.Issued {
+		if t.Denied {
+			denied[t.JTI] = true
+		}
+	}
 	live := func(ts []IssuedToken) bool {
 		for _, t := range ts {
-			if t.Sub == sub && now.Before(t.Exp) {
+			if t.Sub == sub && now.Before(t.Exp) && !t.Denied && !denied[t.JTI] {
 				return true
 			}
 		}

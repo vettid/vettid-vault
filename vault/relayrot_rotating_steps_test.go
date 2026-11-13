@@ -78,7 +78,7 @@ func TestRelayRotStep1StoresPendingWithHeldTokens(t *testing.T) {
 }
 
 // Store first: a pending key not yet stored is never sent to the relay,
-// whatever starts step 2 (here the collect loop's mailbox_unknown).
+// whatever starts step 2.
 func TestRelayRotStep2OnlyForAStoredKey(t *testing.T) {
 	fx := newRotFx(t)
 	fx.fs.setFail(1 << 20) // no write stores it (the attachment run writes too)
@@ -86,8 +86,9 @@ func TestRelayRotStep2OnlyForAStoredKey(t *testing.T) {
 		if err := m.rotateKeys(m.now(), true); err != nil {
 			t.Fatal(err)
 		}
+		m.st.Relay.Anchor = m.now()                 // kept from an earlier attempt: no anchor write before this one
+		m.relayKeyStep(context.Background(), false) // as any trigger after a write would
 	})
-	_ = fx.m.relayMailboxUnknown(context.Background()) // its own write fails
 	if rot, _ := fx.w.log(); len(rot) != 0 {
 		t.Fatalf("rotated before the key was stored: %v", rot)
 	}

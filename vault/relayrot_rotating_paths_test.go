@@ -323,6 +323,9 @@ func TestRelayRotRecoveryPath(t *testing.T) {
 	if pr == nil || pr.Limits == nil || owed == nil || owed.Recovery == "" {
 		t.Fatalf("pending %+v, owed %+v", pr, owed)
 	}
+	if err := m.ProcessBatch(context.Background(), &fakeCollector{}, nil); err != nil {
+		t.Fatal(err)
+	}
 	if rot, _ := rw.log(); len(rot) != 0 {
 		t.Fatalf("rotated before the recovered phone paired: %v", rot)
 	}

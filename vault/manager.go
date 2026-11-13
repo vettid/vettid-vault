@@ -392,7 +392,7 @@ type Manager struct {
 	idleOpened  bool
 	idleGrace   time.Time
 	started     bool
-	hadFailures bool // the header recorded failures before this unlock
+	hadFailures bool // the stored header holds a failure count this unlock resets
 	holdsDEK    bool // counted in unlocked
 	// ocCred caches whether the vault has a credential, for the owner
 	// check (refreshOwnerCred).

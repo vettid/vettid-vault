@@ -13,8 +13,9 @@ import (
 // a header put that fails may still have stored, so its seq is not used
 // again, but the phone's floor never passes the stored header.
 
-// A wrong PIN whose header put fails: bad_pin reports the header_seq as
-// read, and the next unlock with that floor is not refused as a rollback.
+// A wrong PIN whose count's header put fails: the PIN is not tested (§11.8,
+// counted before it is tested), retry reports the header_seq as read, and
+// the next unlock with that floor is not refused as a rollback.
 func TestBadPINWithAFailedHeaderPutReportsTheStoredSeq(t *testing.T) {
 	f := newRFixture(t)
 	f.flush()
@@ -26,8 +27,8 @@ func TestBadPINWithAFailedHeaderPutReportsTheStoredSeq(t *testing.T) {
 	f.st.failHeader = 1
 	f.st.mu.Unlock()
 	_, out := UnlockAlt(context.Background(), AltUnlockParams{Options: f.opts, VaultID: f.vid, PIN: "000000", UnlockSecret: testSecret, pinOnly: true})
-	if out.Code != CodeBadPIN || out.HeaderSeq != stored {
-		t.Fatalf("bad_pin reports header_seq %d, stored %d (%s)", out.HeaderSeq, stored, out.Code)
+	if out.Code != CodeRetry || out.HeaderSeq != stored {
+		t.Fatalf("retry reports header_seq %d, stored %d (%s)", out.HeaderSeq, stored, out.Code)
 	}
 	f.st.mu.Lock()
 	f.st.failHeader = 0
@@ -103,14 +104,17 @@ func TestNoBackupRefusalReportsTheStoredHeaderSeq(t *testing.T) {
 		before := storedHeader(t, d).HeaderSeq
 		opts := d.opts
 		if fails {
-			opts.Store = &faultStore{Store: d.store, failHeader: 1}
+			// The count's write passes (§11.8); no_backup's own write fails.
+			opts.Store = &faultStore{Store: d.store, passHeader: 1, failHeader: 1}
 		}
 		m, uo := cancelUnlock(d, opts, func(p *AltUnlockParams) { p.CancelRecovery = false })
 		if m != nil || uo.OK || uo.Code != CodeNoBackup {
 			t.Fatalf("put fails %v: unlock %+v", fails, uo)
 		}
 		h := storedHeader(t, d)
-		if fails && (h.HeaderSeq != before || h.Recovery == nil) || !fails && (h.HeaderSeq != before+1 || h.Recovery != nil) {
+		// The count's write (+1), then no_backup's (+1, the count reset with
+		// it) or, when that fails, the count given back (+1).
+		if fails && (h.HeaderSeq != before+2 || h.Recovery == nil) || !fails && (h.HeaderSeq != before+2 || h.Recovery != nil) {
 			t.Fatalf("put fails %v: stored header_seq %d (before %d), recovery %v", fails, h.HeaderSeq, before, h.Recovery)
 		}
 		if uo.HeaderSeq != h.HeaderSeq {
@@ -146,5 +150,90 @@ func TestStatusReportsTheStoredHeaderSeq(t *testing.T) {
 	}
 	if n, _ := o.Uint("header_seq", 0, 1<<53); n != stored {
 		t.Fatalf("vault.status header_seq %d, stored %d", n, stored)
+	}
+}
+
+// §11.8 (VAULT-MESSAGING 0.90.8): an unlock's PIN attempt is counted before
+// it is tested. A host that fails the count's header write gets no PIN
+// result, right PIN or wrong: retry, the stored count unchanged.
+func TestUnlockCountWriteFailedTestsNoPIN(t *testing.T) {
+	for _, pin := range []string{"000000", testPIN} {
+		f := newRFixture(t)
+		f.flush()
+		if err := f.m.Lock(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		h0 := f.storedHeader()
+		f.st.mu.Lock()
+		f.st.failHeader = 1
+		f.st.mu.Unlock()
+		m, out := UnlockAlt(context.Background(), AltUnlockParams{Options: f.opts, VaultID: f.vid, PIN: pin, UnlockSecret: testSecret, pinOnly: true})
+		if m != nil || out.Code != CodeRetry || out.HeaderSeq != h0.HeaderSeq {
+			t.Fatalf("pin %s: %+v", pin, out)
+		}
+		if h := f.storedHeader(); h.Backoff.Failures != h0.Backoff.Failures || h.HeaderSeq != h0.HeaderSeq {
+			t.Fatalf("pin %s: stored failures %d seq %d, before %d %d", pin, h.Backoff.Failures, h.HeaderSeq, h0.Backoff.Failures, h0.HeaderSeq)
+		}
+	}
+}
+
+// Each wrong PIN is stored counted before its bad_pin; a right PIN after
+// them resets the stored count.
+func TestUnlockWrongPINsCountedThenReset(t *testing.T) {
+	f := newRFixture(t)
+	f.flush()
+	if err := f.m.Lock(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	for i := 1; i <= 2; i++ {
+		_, out := UnlockAlt(context.Background(), AltUnlockParams{Options: f.opts, VaultID: f.vid, PIN: "000000", UnlockSecret: testSecret, pinOnly: true})
+		h := f.storedHeader()
+		if out.Code != CodeBadPIN || h.Backoff.Failures != i || out.HeaderSeq != h.HeaderSeq {
+			t.Fatalf("wrong PIN %d: %s, stored failures %d, reported seq %d stored %d", i, out.Code, h.Backoff.Failures, out.HeaderSeq, h.HeaderSeq)
+		}
+	}
+	m, out := UnlockAlt(context.Background(), AltUnlockParams{Options: f.opts, VaultID: f.vid, PIN: testPIN, UnlockSecret: testSecret, pinOnly: true})
+	if m == nil || !out.OK {
+		t.Fatalf("right PIN: %+v", out)
+	}
+	defer m.Crash()
+	if h := f.storedHeader(); h.Backoff.Failures != 0 {
+		t.Fatalf("not reset: %d", h.Backoff.Failures)
+	}
+}
+
+// A right PIN with no earlier failures leaves no count behind: the count
+// its attempt stored is reset by the unlock's own header write.
+func TestUnlockRightPINLeavesNoCount(t *testing.T) {
+	f := newRFixture(t)
+	f.flush()
+	if err := f.m.Lock(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	m, out := UnlockAlt(context.Background(), AltUnlockParams{Options: f.opts, VaultID: f.vid, PIN: testPIN, UnlockSecret: testSecret, pinOnly: true})
+	if m == nil || !out.OK {
+		t.Fatalf("right PIN: %+v", out)
+	}
+	defer m.Crash()
+	if h := f.storedHeader(); h.Backoff.Failures != 0 {
+		t.Fatalf("a count left behind: %d", h.Backoff.Failures)
+	}
+}
+
+// What is decided before the PIN (a phone secret that matches nothing) is
+// not counted: nothing is written.
+func TestUnlockWrongSecretIsNotCounted(t *testing.T) {
+	f := newRFixture(t)
+	f.flush()
+	if err := f.m.Lock(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	h0 := f.storedHeader()
+	_, out := UnlockAlt(context.Background(), AltUnlockParams{Options: f.opts, VaultID: f.vid, PIN: "000000", UnlockSecret: testSecret2, pinOnly: true})
+	if out.Code != CodeDeviceSecret {
+		t.Fatalf("%+v", out)
+	}
+	if h := f.storedHeader(); h.Backoff.Failures != h0.Backoff.Failures || h.HeaderSeq != h0.HeaderSeq {
+		t.Fatalf("counted: failures %d seq %d", h.Backoff.Failures, h.HeaderSeq)
 	}
 }

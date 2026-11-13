@@ -403,24 +403,24 @@ func TestRollbackRefused(t *testing.T) {
 // zeroizes immediately, without acking.
 func TestSplitBrainZeroizes(t *testing.T) {
 	f := newFixture(t)
+	// A second instance unlocks while the first runs: its unlock writes the
+	// header (the attempt's count, then its reset, §11.8), so the first
+	// instance's versions are stale.
 	second, _, err := f.unlock(testPIN, 0, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	f.m.mu.Lock()
-	if err := f.m.persist(context.Background(), false); err != nil {
-		t.Fatal(err)
-	}
-	f.m.mu.Unlock()
+	defer second.Crash()
+	first := f.m
 	c := &fakeCollector{}
-	err = second.ProcessBatch(context.Background(), c, []Message{{MsgID: "x", Sender: "AAAA", Payload: []byte{1}}})
-	if !errors.Is(err, ErrSplitBrain) || !second.Locked() {
-		t.Fatalf("err %v locked %v", err, second.Locked())
+	err = first.ProcessBatch(context.Background(), c, []Message{{MsgID: "x", Sender: "AAAA", Payload: []byte{1}}})
+	if !errors.Is(err, ErrSplitBrain) || !first.Locked() {
+		t.Fatalf("err %v locked %v", err, first.Locked())
 	}
 	if len(c.acked) != 0 {
 		t.Fatal("acked after split brain")
 	}
-	if second.dek != nil || second.keys != nil || second.st != nil {
+	if first.dek != nil || first.keys != nil || first.st != nil {
 		t.Fatal("not zeroized")
 	}
 }

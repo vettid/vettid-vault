@@ -34,6 +34,24 @@ func (o *opened) wipe() {
 // bad_pin. A secret and PIN superseded by a replacement whose state is
 // stored are device_secret; the new phone of a transfer or recovery whose
 // state write is not stored is transfer_incomplete.
+// openDEKPrecheck is what openDEK decides before the PIN is tried: the
+// phone's secret matches neither secret_check nor secret_check_next
+// (device_secret), or the header and the state do not belong together
+// (state_rollback). "" when the PIN is to be tried.
+func openDEKPrecheck(h *Header, secret []byte, vaultID string, stateVer uint64) string {
+	cur, _ := recovery.SecretCheck(h.Pepper, vaultID, secret)
+	curMatch := cur != nil && suite.Equal(cur, h.SecretCheck)
+	nx := h.Next
+	nxMatch := nx != nil && cur != nil && suite.Equal(cur, nx.SecretCheck)
+	if !curMatch && !nxMatch {
+		return CodeDeviceSecret
+	}
+	if nx != nil && stateVer != h.DEKVersion && stateVer != nx.DEKVersion || nx == nil && stateVer != h.DEKVersion {
+		return CodeRollback
+	}
+	return ""
+}
+
 func openDEK(h *Header, pin string, secret []byte, vaultID string, stateVer uint64) opened {
 	cur, _ := recovery.SecretCheck(h.Pepper, vaultID, secret)
 	curMatch := cur != nil && suite.Equal(cur, h.SecretCheck)

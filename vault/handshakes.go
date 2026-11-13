@@ -411,9 +411,16 @@ func (m *Manager) respondReconnect(pi *handshake.PendingInit, p *Peer, sender ed
 	// From an earlier relay key before its cut-off that is the earlier
 	// key's mailbox (the library checks that from.relay.pk is the sender),
 	// not the one on record; otherwise the one on record, as before.
+	// The address must be the one the vault keeps for that earlier key
+	// (its URL as it was on record): an hs.init cannot send the answer
+	// elsewhere. Any other is refused as a bad token.
 	answerTo := p.Relay
-	if rstate == relayEarlierBefore && suite.EqualPublic(body.From.Relay.PK, sender) {
-		answerTo = relayOf(body.From.Relay)
+	if rstate == relayEarlierBefore {
+		answerTo = PeerRelay{}
+		if e := p.earlierRelay(sender); e != nil && suite.EqualPublic(body.From.Relay.PK, sender) &&
+			body.From.Relay.URL == e.Relay.URL && body.From.Relay.Mailbox == e.Relay.Mailbox {
+			answerTo = e.Relay
+		}
 	}
 	st, err1 := m.heldTokenFrom(body.Token, p, answerTo, TokStanding)
 	rt, err2 := m.heldTokenFrom(body.ReconnectToken, p, answerTo, TokReconnect)
@@ -1124,7 +1131,10 @@ func (m *Manager) finishReconnect(p *Peer, aw *AwaitingHS, fr *handshake.FinResu
 func (m *Manager) activate(p *Peer, ep *handshake.Epoch, purpose handshake.Purpose, issued []IssuedToken, pendingID string, ownChain int, o actOpts, now time.Time) {
 	if m.opt.RelayKeyRotation && p.RelayRestart != nil {
 		// §3.4.2 RK6: an epoch established after the follow ends a restart
-		// still owed (the peer's reconnect or rekey made one current).
+		// still owed (the peer's reconnect or rekey made one current). That
+		// any establishment ends it, whoever began the handshake, is a
+		// reading of this release (RK6 names P's reconnect); the spec
+		// should confirm.
 		p.RelayRestart = nil
 	}
 	isNew := m.peer(p.ID) == nil
@@ -1576,7 +1586,11 @@ func (m *Manager) startReconnectCtx(p *Peer, ctx []byte, now time.Time) *Outgoin
 	if noReconnectToken(p, now) {
 		// §3.4.1 "The reconnect bound": Q cannot start a try because it
 		// holds no reconnect token for P; (0.88.2) not judged while
-		// carried tokens wait (§6.3.1).
+		// carried tokens wait (§6.3.1), nor (§3.4.2 RK6) while a token for
+		// P's new mailbox is awaited after a follow.
+		if m.relayAwaitsRC(p, ctx, now) {
+			return nil
+		}
 		if p.State == PeerActive && !m.carriedWait(p, now) {
 			m.markStale(p, now)
 		}

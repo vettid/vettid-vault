@@ -517,11 +517,13 @@ func TestRuleUQueuedDepositsFollow(t *testing.T) {
 	}
 }
 
-// RK5 "Links first" (this release's reading): the update's identity links are
-// applied before rule U's checks, so they are followed even when rule U
-// then refuses the update (here for its token); its relay links are not.
-func TestRK5IdentityLinksFollowedWhenUpdateRefused(t *testing.T) {
+// RK10 ("An update Q refuses has none of its links followed ... whatever
+// the reason"): an update refused for its token has none of its identity
+// links followed either; rule U's checks that do not depend on the ik run
+// before the identity links are applied.
+func TestRK5RefusedUpdateFollowsNoIdentityLink(t *testing.T) {
 	f := rkPair(t)
+	ik := append([]byte(nil), f.p(0).IK...)
 	f.rotate(1)
 	f.lose(1, 0, kRotate)
 	u := f.rkSend(true, true)
@@ -538,8 +540,8 @@ func TestRK5IdentityLinksFollowedWhenUpdateRefused(t *testing.T) {
 	if f.followedK1() || f.activityCount(0, "drop.peer_key", "token_unusable") != 1 {
 		t.Fatal("setup: the update was not refused token_unusable")
 	}
-	if !bytes.Equal(f.p(0).IK, f.m(1).keys.ik.Public().(ed25519.PublicKey)) {
-		t.Fatal("the refused update's identity links were not followed first")
+	if !bytes.Equal(f.p(0).IK, ik) {
+		t.Fatal("a refused update's identity link was followed")
 	}
 }
 

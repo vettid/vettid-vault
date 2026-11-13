@@ -401,6 +401,11 @@ type Peer struct {
 	// again once it holds a reconnect token for the peer's current
 	// mailbox (rk6Tick).
 	RelayRestart *RelayRestart `json:"relay_restart,omitempty"`
+	// RelayAwaitRC is when the vault followed the peer's relay link with
+	// no reconnect token for its new mailbox (the one held for the passed
+	// mailbox was dropped); until one arrives, a reconnect it wants waits
+	// (relayAwaitsRC). Zero otherwise.
+	RelayAwaitRC time.Time `json:"relay_await_rc,omitzero"`
 }
 
 // RevokedToken is a revoked standing token's jti and exp.

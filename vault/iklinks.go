@@ -788,7 +788,7 @@ func (m *Manager) tickDemoted(p *Peer, now time.Time) {
 		return
 	}
 	if !m.canReconnect(p, now) {
-		if noReconnectToken(p, now) {
+		if noReconnectToken(p, now) && !m.relayAwaitsRC(p, p.LastEpochID, now) {
 			m.markStale(p, now) // no reconnect token left: no way back (review RR2-3)
 		}
 		return // until something changes (an answer settles): no-op

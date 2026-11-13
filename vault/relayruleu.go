@@ -94,22 +94,16 @@ func (m *Manager) ruleU(s *Session, in *envelope.Inner) error {
 	if p.suspended() {
 		return nil // acceptFrom step 1
 	}
-	// §3.4.2 RK5 "Links first", and RK8's order (the identity links first,
-	// then the relay links, then the tokens): the identity links are
-	// applied, and R29-K9 judged, before any of rule U's checks, so an
-	// update then refused for its relay links or its token still has its
-	// identity links followed. RK10's "An update Q refuses has none of its
-	// links followed" is read as its relay links and tokens (a reading of
-	// this release; the spec should confirm). This also holds for an update
-	// from an earlier key after its cut-off, which Table A sends here, while
-	// an identity.rotate in that row is refused superseded_relay unless all
-	// its links are followed: the same links could come in an
-	// identity.rotate from P's current key, so nothing is gained, but the
-	// spec should confirm the asymmetry too. The ik requirement is checked
-	// right after the identity links.
-	if !m.rk5(s, u.Rotations) {
-		return nil
-	}
+	// Rule U's checks that do not depend on the ik run first and change
+	// nothing: the chain and its ends, the followed prefix, rollback, the
+	// cap and rule T on the update's token. If any fails the update is
+	// refused with none of its links followed, identity links included
+	// (§3.4.2 RK10: "An update Q refuses has none of its links followed
+	// ... whatever the reason for the refusal"): otherwise an old copy
+	// holding an earlier key could move P's ik through an update it knows
+	// will be refused. Only then are the identity links applied (RK5 "Links
+	// first", with R29-K9), the ik requirement checked, and the relay links
+	// followed (RK8's order: identity links, relay links, tokens).
 	if _, ok := relayLinksKept(sender, u.Relay.PK, u.Links); !ok {
 		// v, suite, old equal to new, a repeated key, a bad signature, a
 		// break, or an end mismatch (the first old is not the sender, the
@@ -119,7 +113,11 @@ func (m *Manager) ruleU(s *Session, in *envelope.Inner) error {
 	}
 	k := m.followedRelayPrefix(p, u.Links)
 	if k == len(u.Links) {
-		m.ruleUDuplicate(p, now)
+		// The duplicate: nothing is followed; its identity links are
+		// applied first (RK5; R29-K9 runs on a duplicate too).
+		if m.rk5(s, u.Rotations) {
+			m.ruleUDuplicate(p, now)
+		}
 		return nil
 	}
 	links := u.Links[k:]
@@ -143,14 +141,18 @@ func (m *Manager) ruleU(s *Session, in *envelope.Inner) error {
 		m.refusePeerKey(p, "token_unusable", now)
 		return nil
 	}
-	// rule T: a reconnect_token that does not pass is ignored, no reason to
-	// refuse (rule U names the update's `token` only; a reading of this release,
-	// the spec should confirm); only a connection holds one.
+	// rule T: a reconnect_token that does not pass (§7.1's holder's checks
+	// included) is ignored, no reason to refuse (rule U names the update's
+	// `token` only; a reading of this release, the spec should confirm);
+	// only a connection holds one.
 	var rt HeldToken
 	if u.ReconnectToken != "" && p.Kind == KindConnection {
 		if t, err := m.heldTokenFrom(u.ReconnectToken, p, addr, TokReconnect); err == nil {
 			rt = t
 		}
+	}
+	if !m.rk5(s, u.Rotations) {
+		return nil
 	}
 	passed := make([]ed25519.PublicKey, 0, len(links))
 	for _, l := range links {
@@ -165,10 +167,22 @@ func (m *Manager) ruleU(s *Session, in *envelope.Inner) error {
 	if h := m.opt.Hooks.Adopt; h != nil {
 		h(p.ID, TokStanding, st.Token, "update")
 	}
-	if rt.Token != "" {
-		p.Reconnect = rt
-		if h := m.opt.Hooks.Adopt; h != nil {
-			h(p.ID, TokReconnect, rt.Token, "update")
+	if p.Kind == KindConnection {
+		// The reconnect token held for the passed mailbox cannot deposit at
+		// the new one: it counts as not held. The update's replaces it, as
+		// a held token is replaced (§6.3.1, 0.90.4 §7.1: only by a later
+		// exp; none for the new mailbox is held, so any passes). Without
+		// one, a reconnect wanted until one arrives waits (RK6's owed
+		// wait, relayAwaitsRC), not stale.
+		p.Reconnect = HeldToken{}
+		p.RelayAwaitRC = time.Time{}
+		if rt.Token != "" {
+			p.Reconnect = rt
+			if h := m.opt.Hooks.Adopt; h != nil {
+				h(p.ID, TokReconnect, rt.Token, "update")
+			}
+		} else {
+			p.RelayAwaitRC = now.UTC()
 		}
 	}
 	m.readdressQueued(p, old, now)
@@ -206,13 +220,13 @@ func (m *Manager) followedRelayPrefix(p *Peer, links []*handshake.RelayLink) int
 // end, on the same clock as relay.token.refresh (a reading of this release; the
 // spec should confirm which of §7.2's limits applies).
 func (m *Manager) ruleUDuplicate(p *Peer, now time.Time) {
-	if p.Kind == KindConnection {
-		if t, ok := m.st.attach().Renewed[p.ID]; ok && now.Sub(t) < RenewEvery {
-			return
-		}
-		m.st.attach().Renewed[p.ID] = now
-		m.dirty = true
+	// A device too: §7.2 bounds only a connection's refreshes, but a
+	// duplicate update costs a fresh token each (a reading of this release).
+	if t, ok := m.st.attach().Renewed[p.ID]; ok && now.Sub(t) < RenewEvery {
+		return
 	}
+	m.st.attach().Renewed[p.ID] = now
+	m.dirty = true
 	m.answerUpdate(p, now)
 }
 
@@ -494,4 +508,32 @@ func (m *Manager) issuedRecorded(jti string) bool {
 		}
 	}
 	return false
+}
+
+// relayAwaitsRC is §3.4.2 RK6's owed wait for any reconnect the vault
+// wants with p after following its relay link, while it holds no
+// reconnect token for p's new mailbox (the one it held was for the passed
+// mailbox: not held): instead of "no reconnect token" (stale), the
+// reconnect naming ctx is owed and started by rk6Tick once a token for the
+// current mailbox arrives, within RelayRestartWait of the follow. It
+// reports whether the reconnect waits.
+func (m *Manager) relayAwaitsRC(p *Peer, ctx []byte, now time.Time) bool {
+	if !m.opt.RelayKeyRotation || p.RelayAwaitRC.IsZero() {
+		return false
+	}
+	if !noReconnectToken(p, now) {
+		p.RelayAwaitRC = time.Time{}
+		m.dirty = true
+		return false
+	}
+	if now.Sub(p.RelayAwaitRC) >= m.opt.scale(RelayRestartWait) {
+		p.RelayAwaitRC = time.Time{}
+		m.dirty = true
+		return false
+	}
+	if p.RelayRestart == nil {
+		p.RelayRestart = &RelayRestart{Named: append([]byte(nil), ctx...), Since: p.RelayAwaitRC}
+		m.dirty = true
+	}
+	return true
 }

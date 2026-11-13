@@ -43,7 +43,7 @@ import (
 // relay links, a chain's 32 (handshake.MaxRelayLinks), and fails closed: a
 // follow that would keep more is refused (unexpected) and changes nothing,
 // so that no key the vault followed away from is forgotten while it could
-// still be announced again (I3). Decided 2026-11-12; the spec should
+// still be announced again (I3). A reading of this release; the spec should
 // confirm the cap and the refusal.
 const MaxEarlierRelays = handshake.MaxRelayLinks
 
@@ -99,8 +99,13 @@ func (m *Manager) ruleU(s *Session, in *envelope.Inner) error {
 	// applied, and R29-K9 judged, before any of rule U's checks, so an
 	// update then refused for its relay links or its token still has its
 	// identity links followed. RK10's "An update Q refuses has none of its
-	// links followed" is read as its relay links and tokens (decided
-	// 2026-11-12; the spec should confirm). The ik requirement is checked
+	// links followed" is read as its relay links and tokens (a reading of
+	// this release; the spec should confirm). This also holds for an update
+	// from an earlier key after its cut-off, which Table A sends here, while
+	// an identity.rotate in that row is refused superseded_relay unless all
+	// its links are followed: the same links could come in an
+	// identity.rotate from P's current key, so nothing is gained, but the
+	// spec should confirm the asymmetry too. The ik requirement is checked
 	// right after the identity links.
 	if !m.rk5(s, u.Rotations) {
 		return nil

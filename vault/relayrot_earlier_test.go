@@ -373,3 +373,24 @@ func TestRelayEarlierKeyRevokedTokensDoNotKeepIt(t *testing.T) {
 		t.Fatal("an earlier key kept by revoked tokens only")
 	}
 }
+
+// A denied standing token still keeps the earlier key until its exp: a
+// refresh denies the older standing tokens, and they can deposit until the
+// relay has taken the denylist request (only revoked reconnect tokens stop
+// counting).
+func TestRelayEarlierKeyDeniedStandingTokenKeepsIt(t *testing.T) {
+	d := newDevFixture(t)
+	d.asConnection(t, "c1", 0x7a)
+	p := d.m.st.Connections["c1"]
+	pk := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x61}, 32)).Public().(ed25519.PublicKey)
+	sub := relayauth.EncodeKey(pk)
+	now := time.Now()
+	d.m.st.Issued = append(d.m.st.Issued, IssuedToken{JTI: "s0", Kind: TokStanding, Sub: sub, PeerID: p.ID, Exp: now.Add(20 * 24 * time.Hour), Denied: true})
+	if !d.m.issuedCanDeposit(p, pk, now) {
+		t.Fatal("a denied standing token, unexpired, no longer keeps the earlier key")
+	}
+	d.m.st.Issued[len(d.m.st.Issued)-1].Kind = TokReconnect
+	if d.m.issuedCanDeposit(p, pk, now) {
+		t.Fatal("a denied reconnect token still keeps the earlier key")
+	}
+}

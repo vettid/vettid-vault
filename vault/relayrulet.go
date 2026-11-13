@@ -113,7 +113,11 @@ func (m *Manager) ruleTDefers(p *Peer, in *envelope.Inner, now time.Time) bool {
 	if d == nil {
 		// Every deferral of p's kept counts, whatever its age, so that
 		// replays under fresh msg_ids cannot grow the state: past the cap
-		// a message is processed at once.
+		// a message is processed at once. An entry stays until
+		// DedupeRetention, so 8 deferrals that never come back stop further
+		// deferral for this peer until then: a later relay.token.issued for
+		// a mailbox not yet known is processed at once and its token ignored
+		// (liveness only: P's resend recovers).
 		n := 0
 		for _, x := range m.st.Deferred {
 			if x.PeerID == p.ID && x.Reason == deferUnknownIss {

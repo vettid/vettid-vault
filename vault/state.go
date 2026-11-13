@@ -218,15 +218,20 @@ type RelayState struct {
 // MailboxCollect is RK14 step 1's record of one of the vault's own
 // mailboxes (§3.4.2). LastMsgID is the largest msg_id such that every
 // message the relay gave from that mailbox up to it was processed and
-// flushed; NoAckFloor the smallest msg_id given and left unprocessed
-// (LastMsgID does not pass it until it is processed). Stopped is when the
+// flushed. Unprocessed are the msg_ids given (collected, held back by the
+// order of processing, or left unacked) and not yet processed, Done those
+// processed above LastMsgID, in order, each at most collectTrack; Ceiling
+// is the lowest msg_id Unprocessed could not keep, which LastMsgID never
+// passes again (erring low costs only re-deposits). Stopped is when the
 // vault ended its collects of the mailbox (zero: not ended); TellingDue:
 // relay.mailbox.closed is owed for it (sent by a later change).
 type MailboxCollect struct {
-	LastMsgID  string    `json:"last_msg_id,omitempty"`
-	NoAckFloor string    `json:"no_ack_floor,omitempty"`
-	Stopped    time.Time `json:"stopped,omitzero"`
-	TellingDue bool      `json:"telling_due,omitempty"`
+	LastMsgID   string    `json:"last_msg_id,omitempty"`
+	Unprocessed []string  `json:"unprocessed,omitempty"`
+	Done        []string  `json:"done,omitempty"`
+	Ceiling     string    `json:"ceiling,omitempty"`
+	Stopped     time.Time `json:"stopped,omitzero"`
+	TellingDue  bool      `json:"telling_due,omitempty"`
 }
 
 // PendingRelay is a relay key stored before the relay's rotate (§3.4 step
@@ -757,6 +762,9 @@ type IssuedToken struct {
 	PeerID string    `json:"peer_id,omitempty"`
 	Exp    time.Time `json:"exp"`
 	Denied bool      `json:"denied,omitempty"`
+	// Iss is the vault mailbox that issued it (only with
+	// Options.RelayKeyRotation): a revocation goes to it (§3.4.1 S7).
+	Iss string `json:"iss,omitempty"`
 	// Handshake: minted in a handshake's hs.init or hs.resp (recorded at
 	// activation). A refresh after quota_exceeded spares the newest such
 	// standing token, which the peer may not yet have adopted (0.88.2 §7.2,

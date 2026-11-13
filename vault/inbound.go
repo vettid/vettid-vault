@@ -221,7 +221,8 @@ func (m *Manager) getCollector(ctx context.Context) (Collector, error) {
 		c = cr.NewPollCollector(m.opt.PollWait)
 	} else {
 		var err error
-		if c, err = m.relay.Collector(ctx, m.opt.WebSocket); err != nil {
+		ws := m.opt.WebSocket && !(m.relayRotation() && m.collectsOld()) // §3.4.1 "Order of processing"
+		if c, err = m.relay.Collector(ctx, ws); err != nil {
 			return nil, err
 		}
 	}

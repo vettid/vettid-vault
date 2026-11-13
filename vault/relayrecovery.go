@@ -45,6 +45,12 @@ func (m *Manager) inheritedKeyAtOpen(ctx context.Context, p RecoveryOpenParams, 
 	if m.relay == nil {
 		m.relay = p.Relay(m.st.Relay.URL, m.keys.relay)
 	}
+	if now.Before(pr.RetryAfter) {
+		// A retry_after still running is honoured here too (§3.4
+		// "Retrying with the same key"): no attempt, as if unanswered.
+		m.relayKeyFailedAt(now)
+		return
+	}
 	hadAnchor := !m.st.Relay.Anchor.IsZero()
 	out, created, byRotate, err := m.relayKeyCall(ctx)
 	if !hadAnchor && !(out == relayRefused && byRotate && relaysOwnRefusal(err)) {

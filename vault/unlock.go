@@ -253,6 +253,9 @@ func UnlockAlt(ctx context.Context, p AltUnlockParams) (*Manager, *AltUnlockOutc
 	if !validRelease(own) || p.Store == nil || p.Sealer == nil {
 		return nil, out.drop(ErrHeader)
 	}
+	if p.Options.relayRotationRefused() {
+		return nil, out.drop(ErrRelayKeyRotationUnfinished)
+	}
 	hkey := store.HeaderKey(p.VaultID, own.PCR0)
 	if !store.ValidKey(hkey) {
 		return nil, out.drop(ErrMissing)

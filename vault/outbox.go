@@ -695,7 +695,7 @@ func (m *Manager) drainOutbox(ctx context.Context) {
 				m.unlinkOutcome(e, err, now) // §11.14.10: the notice settled, or not
 			}
 		case OpRevoke:
-			err = m.relay.Revoke(ctx, e.Kind, e.Value)
+			err = m.revoke(ctx, e.Kind, e.Value) // §3.4.1 S7: to the issuing mailbox
 		case OpDeleteClaim:
 			err = m.relay.DeleteClaim(ctx, e.Value)
 			if RelayCode(err) == CodeClaimUnknown {

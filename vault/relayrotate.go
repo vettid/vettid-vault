@@ -227,6 +227,103 @@ func (m *Manager) ownRelay() Relay {
 	return m.relay
 }
 
+// blobMailbox is the own mailbox a blob named by the message being handled
+// was put in: the one the message was collected from ("" without
+// Options.RelayKeyRotation: the current one).
+func (m *Manager) blobMailbox() string {
+	if !m.relayRotation() {
+		return ""
+	}
+	return m.collectedFrom()
+}
+
+// errBlobGone answers a blob in an own mailbox the vault no longer
+// collects (its key's collects ended, §3.4.2 RK14 step 1): as the relay
+// answers a blob it does not have.
+var errBlobGone = &relayclient.Error{Status: 404, Code: CodeBlobUnknown}
+
+// blobRelay is the Relay that may fetch and delete the blobs of the own
+// mailbox mb ("" or the current one: the current Relay; an old one still
+// collected: its key's), nil for any other. Takes the lock.
+func (m *Manager) blobRelay(mb string) Relay {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.st == nil || mb == "" || mb == m.st.Relay.Mailbox {
+		return m.relay
+	}
+	for i := range m.st.Relay.Old {
+		if o := &m.st.Relay.Old[i]; o.Mailbox == mb && o.Collect.Stopped.IsZero() {
+			return m.oldRelayClient(i)
+		}
+	}
+	return nil
+}
+
+// deleteBlobIn deletes a blob of the own mailbox mb, best effort.
+func (m *Manager) deleteBlobIn(ctx context.Context, mb, id string) {
+	if rel := m.blobRelay(mb); rel != nil {
+		_ = rel.DeleteBlob(ctx, id)
+	}
+}
+
+// ownRelays are the Relays of the vault's own mailboxes whose blobs it
+// keeps: the current one first, then each old one still collected. Takes
+// the lock.
+func (m *Manager) ownRelays() []Relay {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := []Relay{m.relay}
+	if m.st == nil || !m.relayRotation() {
+		return out
+	}
+	for i := range m.st.Relay.Old {
+		if m.st.Relay.Old[i].Collect.Stopped.IsZero() {
+			if r := m.oldRelayClient(i); r != nil {
+				out = append(out, r)
+			}
+		}
+	}
+	return out
+}
+
+// revoke sends a revocation to the mailboxes that issued what it names
+// (§3.4.1 S7): a token by its jti to the one that issued it, a sender's
+// key to the current mailbox and every old one kept. An old mailbox
+// already gone (mailbox_unknown) took its tokens with it.
+func (m *Manager) revoke(ctx context.Context, kind, value string) error {
+	if !m.relayRotation() || len(m.st.Relay.Old) == 0 {
+		return m.relay.Revoke(ctx, kind, value)
+	}
+	rels := []Relay{m.relay}
+	switch kind {
+	case "jti":
+		for _, t := range m.st.Issued {
+			if t.JTI == value && t.Iss != "" && t.Iss != m.st.Relay.Mailbox {
+				rels = nil
+				for i := range m.st.Relay.Old {
+					if m.st.Relay.Old[i].Mailbox == t.Iss {
+						rels = append(rels, m.oldRelayClient(i))
+					}
+				}
+			}
+		}
+	case "sub":
+		for i := range m.st.Relay.Old {
+			rels = append(rels, m.oldRelayClient(i))
+		}
+	}
+	var err error
+	for _, r := range rels {
+		if r == nil {
+			continue
+		}
+		if e := r.Revoke(ctx, kind, value); e != nil && RelayCode(e) != CodeMailboxUnknown && err == nil {
+			err = e
+		}
+	}
+	return err
+}
+
 // relayRecipients are the recipients of a relay-key rotation (§3.4 step
 // 2): every active device and connection, in id order.
 func (m *Manager) relayRecipients() []*Peer {
@@ -456,7 +553,7 @@ func (m *Manager) mintOnKey(key ed25519.PrivateKey, fresh bool, p *Peer, kind st
 	if err != nil {
 		return "", IssuedToken{}, err
 	}
-	return tok, IssuedToken{JTI: jti, Kind: kind, Sub: sub, PeerID: p.ID, Exp: iat.Add(ttl)}, nil
+	return tok, IssuedToken{JTI: jti, Kind: kind, Sub: sub, PeerID: p.ID, Exp: iat.Add(ttl), Iss: relayauth.MailboxID(pubOf(key))}, nil
 }
 
 // replaceIssued puts it in place of the entry of the same kind.
@@ -768,6 +865,9 @@ func (m *Manager) makePendingCurrent(created bool, now time.Time) bool {
 	// The old key is kept, with its anchor (§3.4 (a); §3.4.2 RK14 step
 	// 1: the key made current has none until a rotation away from it is
 	// attempted).
+	// Old keys are not deleted yet: §3.4 "When the old key is deleted"
+	// (every recipient acknowledged or stale, the notices to removed
+	// devices settled, RK14 step 1 done) is a later change.
 	oldKey, oldSub := m.keys.relay, relayauth.EncodeKey(pubOf(m.keys.relay))
 	// §3.4.2 RK14 step 1: what was collected from it goes with it; a stop
 	// recorded before this write (mailbox_unknown) has its telling queued

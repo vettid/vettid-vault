@@ -173,6 +173,22 @@ type Options struct {
 	// release turns it on before the whole of §3.4.2 is built (RK0: the
 	// vault does not advertise relay_follow).
 	RelayKeyRotation bool
+	// RelayKeyRotationUnfinished must be set with RelayKeyRotation, or no
+	// vault is made or opened (ErrRelayKeyRotationUnfinished): tests and
+	// the harness only, until relay.address.update and relay.mailbox.closed
+	// are sent. Without them a vault that rotated its relay key would lose
+	// everything deposited to its old mailbox after RK14's stop.
+	RelayKeyRotationUnfinished bool
+}
+
+// ErrRelayKeyRotationUnfinished refuses Options.RelayKeyRotation without
+// Options.RelayKeyRotationUnfinished.
+var ErrRelayKeyRotationUnfinished = errors.New("vault: relay-key rotation is unfinished: tests and harness only")
+
+// relayRotationRefused reports Options that turn the switch on without the
+// test-only companion.
+func (o *Options) relayRotationRefused() bool {
+	return o.RelayKeyRotation && !o.RelayKeyRotationUnfinished
 }
 
 // LifecycleEvent is reported to the parent, which writes it to the vault
@@ -598,6 +614,9 @@ type EnrollApp struct {
 // and sealed header written create-only. The vault is returned unlocked.
 func Create(ctx context.Context, p CreateParams) (*Manager, error) {
 	p.Options.defaults()
+	if p.Options.relayRotationRefused() {
+		return nil, ErrRelayKeyRotationUnfinished
+	}
 	now := p.Now()
 	if p.VaultID == "" {
 		b, err := suite.RandomBytes(16)

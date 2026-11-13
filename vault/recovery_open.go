@@ -137,6 +137,9 @@ func RecoveryOpen(ctx context.Context, p RecoveryOpenParams) (*Manager, *Recover
 	if !validRelease(own) || p.Store == nil || p.Sealer == nil {
 		return drop()
 	}
+	if p.Options.relayRotationRefused() {
+		return nil, out.fail(OpenRetry) // before anything is read or spent
+	}
 	hkey := store.HeaderKey(p.VaultID, own.PCR0)
 	hblob, hver, err := p.Store.Get(ctx, hkey)
 	if err != nil {

@@ -441,7 +441,11 @@ func transient(err error) bool {
 // sniffing. It returns the content and its sniffed type, or a reason:
 // "unknown" (blob_unknown), "transient", ReasonBad or ReasonType.
 func (m *Manager) fetchBlob(ctx context.Context, b AttBlob, maxBlob int) ([]byte, string, string, error) {
-	data, err := m.ownRelay().GetBlob(ctx, b.ID)
+	rel := m.blobRelay(b.Mailbox)
+	if rel == nil {
+		return nil, "", "unknown", errBlobGone
+	}
+	data, err := rel.GetBlob(ctx, b.ID)
 	if err != nil {
 		switch {
 		case RelayCode(err) == CodeBlobUnknown:
@@ -686,7 +690,7 @@ func (m *Manager) outPrepareJob(r *attRunner, e *AttEntry) attJob {
 			if m.attCrashAt("prepared") {
 				return n
 			}
-			_ = m.ownRelay().DeleteBlob(ctx, blob.ID)
+			m.deleteBlobIn(ctx, blob.Mailbox, blob.ID)
 			if deliver {
 				m.deliver(ctx, r, id, content, false, false)
 			}
@@ -968,7 +972,7 @@ func (m *Manager) inFetchJob(r *attRunner, e *AttEntry) attJob {
 				if m.attCrashAt("stored") {
 					return n
 				}
-				_ = m.ownRelay().DeleteBlob(ctx, blob.ID) // only then (§10.5.1 step 2)
+				m.deleteBlobIn(ctx, blob.Mailbox, blob.ID) // only then (§10.5.1 step 2)
 			}
 			m.attDrain(r)
 			return n
@@ -1211,7 +1215,9 @@ func (m *Manager) attMaintain(r *attRunner, w *attWork) {
 		if ctx.Err() != nil {
 			return
 		}
-		_ = m.ownRelay().DeleteBlob(ctx, id)
+		for _, rel := range m.ownRelays() { // in whichever own mailbox holds it
+			_ = rel.DeleteBlob(ctx, id)
+		}
 	}
 	for _, t := range w.thumbs {
 		obj, err := attwire.SealObject(t.key, t.vid, t.id, attwire.PartThumb, t.thumb)
@@ -1262,6 +1268,12 @@ func (m *Manager) attMaintain(r *attRunner, w *attWork) {
 	}
 	list, err := m.ownRelay().ListBlobs(ctx)
 	listed := err == nil
+	// The old mailboxes still collected (§3.4 (a)): their blobs too.
+	olds := m.ownRelays()[1:]
+	oldLists := make([]BlobList, len(olds))
+	for i, rel := range olds {
+		oldLists[i], _ = rel.ListBlobs(ctx)
+	}
 	if err != nil && w.purge {
 		m.mu.Lock()
 		if m.att == r {
@@ -1275,13 +1287,16 @@ func (m *Manager) attMaintain(r *attRunner, w *attWork) {
 		if !listed {
 			break
 		}
-		for _, b := range list.Blobs {
-			if b.BlobID == d.blob && b.Sender != "" && b.Sender == d.sender {
-				m.mu.Lock()
-				named := m.st != nil && m.attBlobNamed(d.blob)
-				m.mu.Unlock()
-				if !named {
-					_ = m.ownRelay().DeleteBlob(ctx, d.blob)
+		lists, rels := append([]BlobList{list}, oldLists...), append([]Relay{m.ownRelay()}, olds...)
+		for i, l := range lists {
+			for _, b := range l.Blobs {
+				if b.BlobID == d.blob && b.Sender != "" && b.Sender == d.sender {
+					m.mu.Lock()
+					named := m.st != nil && m.attBlobNamed(d.blob)
+					m.mu.Unlock()
+					if !named {
+						_ = rels[i].DeleteBlob(ctx, d.blob)
+					}
 				}
 			}
 		}
@@ -1312,13 +1327,16 @@ func (m *Manager) attMaintain(r *attRunner, w *attWork) {
 		m.mu.Unlock()
 	}
 	if w.purge && listed {
-		m.attPurge(r, list)
+		m.attPurge(r, list, m.ownRelay())
+		for i, rel := range olds {
+			m.attPurge(r, oldLists[i], rel)
+		}
 	}
 }
 
 // attPurge deletes every blob of the own mailbox older than 24 hours that
 // no entry names (§10.5.1 "Orphan blobs").
-func (m *Manager) attPurge(r *attRunner, list BlobList) {
+func (m *Manager) attPurge(r *attRunner, list BlobList, rel Relay) {
 	m.mu.Lock()
 	if m.locked || m.st == nil || m.att != r {
 		m.mu.Unlock()
@@ -1339,7 +1357,7 @@ func (m *Manager) attPurge(r *attRunner, list BlobList) {
 	_ = m.flushIfDirty(context.Background())
 	m.mu.Unlock()
 	for _, id := range del {
-		_ = m.ownRelay().DeleteBlob(r.ctx, id)
+		_ = rel.DeleteBlob(r.ctx, id)
 	}
 }
 

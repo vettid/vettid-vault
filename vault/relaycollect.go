@@ -106,36 +106,116 @@ func (m *Manager) mailboxGone(mailbox string, now time.Time) bool {
 	return true
 }
 
+// collectTrack bounds MailboxCollect's Unprocessed and Done (each): a
+// message past it holds last_msg_id at the Ceiling, or is not counted as
+// processed, which errs low.
+const collectTrack = 256
+
+// insertID adds id to the ordered list l, without duplicates, keeping at
+// most collectTrack; it returns the list and the id it dropped ("" for
+// none: the highest goes).
+func insertID(l []string, id string) ([]string, string) {
+	i := sort.Search(len(l), func(i int) bool { return !msgIDBefore(l[i], id) })
+	if i < len(l) && l[i] == id {
+		return l, ""
+	}
+	l = append(l, "")
+	copy(l[i+1:], l[i:])
+	l[i] = id
+	if len(l) > collectTrack {
+		dropped := l[len(l)-1]
+		return l[:len(l)-1], dropped
+	}
+	return l, ""
+}
+
+func removeID(l []string, id string) []string {
+	for i, x := range l {
+		if x == id {
+			return append(l[:i], l[i+1:]...)
+		}
+	}
+	return l
+}
+
+// given records a message the relay gave from the mailbox.
+func (r *MailboxCollect) given(id string) {
+	if id == "" || r.LastMsgID != "" && !msgIDBefore(r.LastMsgID, id) {
+		return // at or below last_msg_id: already processed
+	}
+	for _, d := range r.Done {
+		if d == id {
+			return
+		}
+	}
+	var dropped string
+	r.Unprocessed, dropped = insertID(r.Unprocessed, id)
+	if dropped != "" && (r.Ceiling == "" || msgIDBefore(dropped, r.Ceiling)) {
+		r.Ceiling = dropped
+	}
+}
+
+// processed records a message processed and flushed with this batch, and
+// moves last_msg_id up to below the lowest message given and not yet
+// processed.
+func (r *MailboxCollect) processed(id string) {
+	r.Unprocessed = removeID(r.Unprocessed, id)
+	if r.LastMsgID == "" || msgIDBefore(r.LastMsgID, id) {
+		r.Done, _ = insertID(r.Done, id)
+	}
+}
+
+func (r *MailboxCollect) advance() {
+	limit := r.Ceiling
+	if len(r.Unprocessed) > 0 && (limit == "" || msgIDBefore(r.Unprocessed[0], limit)) {
+		limit = r.Unprocessed[0]
+	}
+	n := 0
+	for n < len(r.Done) && (limit == "" || msgIDBefore(r.Done[n], limit)) {
+		n++
+	}
+	if n > 0 {
+		r.LastMsgID = r.Done[n-1]
+		r.Done = append([]string(nil), r.Done[n:]...)
+	}
+}
+
+// noteGiven records messages the relay gave from a mailbox (the order of
+// processing holds some back before any batch sees them).
+func (m *Manager) noteGiven(mailbox string, ids []string) {
+	if !m.relayRotation() || m.st == nil {
+		return
+	}
+	if r := m.collectRec(mailbox); r != nil {
+		for _, id := range ids {
+			r.given(id)
+		}
+		m.dirty = true
+	}
+}
+
 // noteCollected keeps each mailbox's last_msg_id, in the flush of the batch
 // (§3.4.2 RK14 step 1 "What P records"): processed is the batch's
-// disposition per message (false: left unacked for redelivery).
+// disposition per message (false: left unacked for redelivery). Every
+// message the relay gave counts, in whatever order the batch has them.
 func (m *Manager) noteCollected(c Collector, msgs []Message, processed []bool) {
 	if !m.relayRotation() || len(msgs) == 0 {
 		return
 	}
-	idx := make([]int, len(msgs))
-	for i := range idx {
-		idx[i] = i
-	}
-	sort.SliceStable(idx, func(a, b int) bool { return msgIDBefore(msgs[idx[a]].MsgID, msgs[idx[b]].MsgID) })
-	for _, i := range idx {
-		r := m.collectRec(collectMailbox(c, msgs[i].MsgID, m.st.Relay.Mailbox))
+	touched := map[*MailboxCollect]bool{}
+	for i, msg := range msgs {
+		r := m.collectRec(collectMailbox(c, msg.MsgID, m.st.Relay.Mailbox))
 		if r == nil {
 			continue
 		}
-		id := msgs[i].MsgID
-		if !processed[i] {
-			if r.NoAckFloor == "" || msgIDBefore(id, r.NoAckFloor) {
-				r.NoAckFloor = id
-			}
-			continue
+		r.given(msg.MsgID)
+		if processed[i] {
+			r.processed(msg.MsgID)
 		}
-		if id == r.NoAckFloor {
-			r.NoAckFloor = ""
-		}
-		if (r.NoAckFloor == "" || msgIDBefore(id, r.NoAckFloor)) && (r.LastMsgID == "" || msgIDBefore(r.LastMsgID, id)) {
-			r.LastMsgID = id
-		}
+		touched[r] = true
+	}
+	for r := range touched {
+		r.advance()
 	}
 	m.dirty = true
 }
@@ -173,8 +253,12 @@ type collectPart struct {
 	mailbox string
 	c       Collector
 	main    bool
-	to      time.Time // collected-to: zero until a collect returned fewer than max
-	gone    bool      // left the set (mailbox_unknown, or its collects ended)
+	// stream: a WebSocket session, whose batches end on a time window, not
+	// at the relay's max, so they never tell that the backlog is empty:
+	// its collected-to never moves.
+	stream bool
+	to     time.Time // collected-to: zero until a collect returned fewer than max
+	gone   bool      // left the set (mailbox_unknown, or its collects ended)
 }
 
 type heldMsg struct {
@@ -194,10 +278,14 @@ type multiCollector struct {
 	held  []heldMsg
 	from  map[string]*collectPart
 	now   func() time.Time
+	idle  time.Duration // the wait of a round with no long-poll
 	// gone reports a mailbox_unknown from an old mailbox; stopped whether
 	// a mailbox's collects have ended. Both take the vault's lock.
 	gone    func(mailbox string)
 	stopped func(mailbox string) bool
+	// given records what a collect gave (last_msg_id never passes a
+	// message held here); it takes the vault's lock.
+	given func(mailbox string, ids []string)
 }
 
 func (c *multiCollector) mailboxOf(id string) string {
@@ -242,8 +330,15 @@ func (c *multiCollector) Next(ctx context.Context) ([]Message, error) {
 			}
 			continue // a transient failure: its collected-to does not move
 		}
-		if len(msgs) < MaxBatch {
+		if len(msgs) < MaxBatch && !p.stream {
 			p.to = start.Add(-collectedToWindow)
+		}
+		ids := make([]string, 0, len(msgs))
+		for _, msg := range msgs {
+			ids = append(ids, msg.MsgID)
+		}
+		if len(ids) > 0 {
+			c.given(p.mailbox, ids)
 		}
 		c.mu.Lock()
 		for _, msg := range msgs {
@@ -255,7 +350,24 @@ func (c *multiCollector) Next(ctx context.Context) ([]Message, error) {
 		}
 		c.mu.Unlock()
 	}
-	return c.release(), nil
+	out := c.release()
+	if len(out) == 0 && !c.hasMain() {
+		// No long-poll in this round (the current mailbox is not
+		// collected): wait as one would, so that the loop does not spin.
+		if !sleep(ctx, c.idle) {
+			return nil, ctx.Err()
+		}
+	}
+	return out, nil
+}
+
+func (c *multiCollector) hasMain() bool {
+	for _, p := range c.parts {
+		if p.main && !p.gone {
+			return true
+		}
+	}
+	return false
 }
 
 // release returns the held messages deposited no later than the earliest
@@ -332,7 +444,12 @@ func (idleCollector) Close() error                      { return nil }
 func (m *Manager) rotationCollector(ctx context.Context, main Collector) Collector {
 	parts := []*collectPart{}
 	if main != nil {
-		parts = append(parts, &collectPart{mailbox: m.st.Relay.Mailbox, c: main, main: true})
+		_, ws := main.(*wsCollector)
+		parts = append(parts, &collectPart{mailbox: m.st.Relay.Mailbox, c: main, main: true, stream: ws})
+	}
+	wait := m.opt.PollWait
+	if wait == 0 {
+		wait = LongPollWait
 	}
 	now := m.now()
 	m.stopOldCollects(now)
@@ -356,10 +473,6 @@ func (m *Manager) rotationCollector(ctx context.Context, main Collector) Collect
 	}
 	switch {
 	case len(parts) == 0:
-		wait := m.opt.PollWait
-		if wait == 0 {
-			wait = LongPollWait
-		}
 		return idleCollector{wait: wait}
 	case len(parts) == 1 && main != nil:
 		return main
@@ -367,13 +480,18 @@ func (m *Manager) rotationCollector(ctx context.Context, main Collector) Collect
 	// Old mailboxes first: each is polled without waiting before the
 	// current one's long-poll.
 	sort.SliceStable(parts, func(i, j int) bool { return !parts[i].main && parts[j].main })
-	return &multiCollector{parts: parts, from: map[string]*collectPart{}, now: m.now,
+	return &multiCollector{parts: parts, from: map[string]*collectPart{}, now: m.now, idle: wait,
 		gone: func(mb string) {
 			m.mu.Lock()
 			defer m.mu.Unlock()
 			if m.mailboxGone(mb, m.now()) {
 				_ = m.persist(ctx, false) // at once (a copy could register it again)
 			}
+		},
+		given: func(mb string, ids []string) {
+			m.mu.Lock()
+			defer m.mu.Unlock()
+			m.noteGiven(mb, ids)
 		},
 		stopped: func(mb string) bool {
 			m.mu.Lock()
@@ -421,4 +539,16 @@ func (m *Manager) collectedCurrent() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.rk.noOK = false
+}
+
+// collectsOld reports whether an old mailbox is still collected: the
+// current one is then collected over HTTP, whose batch shows when the
+// backlog is empty (collected-to), not over a WebSocket.
+func (m *Manager) collectsOld() bool {
+	for _, o := range m.st.Relay.Old {
+		if o.Collect.Stopped.IsZero() && !oldStopDue(&o, m.now()) {
+			return true
+		}
+	}
+	return false
 }

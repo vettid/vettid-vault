@@ -16,9 +16,10 @@ const ReleasesDir = "../../testdata/releases"
 
 // addedLater are vector files added after the first refs the matrix
 // checks (the synthetic row's base): a frozen directory may lack them, and
-// they are checked when present. The four newest (rekey, handshake_desktop,
-// inner_reject, relay) exist only from the release that added them on.
-var addedLater = map[string]bool{"recovery.json": true, "leash.json": true, "appkey.json": true, "calls.json": true, "blob.json": true, "attachment.json": true, "unlock.json": true, "connauth.json": true, "connauth_purpose.json": true, "wallet_caps.json": true, "rekey.json": true, "handshake_desktop.json": true, "inner_reject.json": true, "relay.json": true}
+// they are checked when present. The five newest (rekey, handshake_desktop,
+// inner_reject, relay, relay_rotate) exist only from the release that
+// added them on.
+var addedLater = map[string]bool{"recovery.json": true, "leash.json": true, "appkey.json": true, "calls.json": true, "blob.json": true, "attachment.json": true, "unlock.json": true, "connauth.json": true, "connauth_purpose.json": true, "wallet_caps.json": true, "rekey.json": true, "handshake_desktop.json": true, "inner_reject.json": true, "relay.json": true, "relay_rotate.json": true}
 
 var releaseDirName = regexp.MustCompile(`^[1-9][0-9]*$`)
 

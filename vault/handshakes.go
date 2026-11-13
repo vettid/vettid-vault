@@ -1024,9 +1024,15 @@ func (m *Manager) finishReconnect(p *Peer, aw *AwaitingHS, fr *handshake.FinResu
 		// Table B "Reached": the links are applied, then H5 (answers
 		// pinned to an ik no longer current are dropped), with "Epochs
 		// after an ik link" and "Pending epochs at a link"; nothing is
-		// restarted beside the epoch this reconnect establishes.
+		// restarted beside the epoch this reconnect establishes. Strict F1
+		// runs with E the epoch the hs.init named (§3.4.1 invariant I3,
+		// owner decision 2026-11-12), as for a refused reconnect's links
+		// (refusedReconnectLinks), the ctx now authenticated by sig_I: an
+		// epoch of P after it signed by the link's old_ik, established at Q
+		// before this hs.fin, was a copy's. An answer recorded without
+		// Named runs none, as before.
 		m.noLinkRestart = true
-		m.followLinks(p, fresh, nil, now)
+		m.followLinksF1(p, fresh, nil, pend.Named, now)
 		m.noLinkRestart = false
 		if p.suspended() {
 			fr.Epoch.Destroy()

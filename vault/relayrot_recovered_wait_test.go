@@ -84,6 +84,9 @@ func TestRelayRotInheritedUnansweredAtTheOpenIsNotHeldByThePhone(t *testing.T) {
 		delete(rw.live, k)
 		rw.register = []error{relayErr(503, "")}
 	})
+	// The open's attempt got no answer: the key is marked Unconfirmed (a lost
+	// run of the open may have had its mailbox made afresh); its wait runs first.
+	io.f.clock = io.f.clock.Add(freshMailboxWait)
 	rs := ownRelayState(io.m)
 	if io.m.pendingMailbox() != io.p || rs.Collect.Stopped.IsZero() || rs.Pending.Recovery != "" {
 		t.Fatalf("after the open: pending %s, relay %+v", io.m.pendingMailbox(), rs)
@@ -184,6 +187,9 @@ func TestRelayRotPhoneUnlockConfirmingAMoveIsAnsweredOK(t *testing.T) {
 		delete(rw.live, k)
 		rw.register = []error{relayErr(503, "")}
 	})
+	// The open's attempt got no answer: the key is marked Unconfirmed (a lost
+	// run of the open may have had its mailbox made afresh); its wait runs first.
+	io.f.clock = io.f.clock.Add(freshMailboxWait)
 	io.m.mu.Lock()
 	io.m.st.ReleaseMove = &ReleaseMove{To: testRelease.PCR0, ToRelease: testRelease.Number, From: "earlier-release", ApprovedBy: "dev1"}
 	io.m.dirty = true
@@ -225,6 +231,9 @@ func TestRelayRotPhoneUnlockRetryCarriesTheRetryAfter(t *testing.T) {
 		delete(rw.live, k)
 		rw.register = []error{relayErr(503, "")}
 	})
+	// The open's attempt got no answer: the key is marked Unconfirmed (a lost
+	// run of the open may have had its mailbox made afresh); its wait runs first.
+	io.f.clock = io.f.clock.Add(freshMailboxWait)
 	if err := io.m.Lock(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -251,6 +260,9 @@ func TestRelayRotInheritedUnansweredAtTheOpenRetriedSooner(t *testing.T) {
 		delete(rw.live, k)
 		rw.register = []error{relayErr(429, "rate_limited")}
 	})
+	// The open's attempt got no answer: the key is marked Unconfirmed (a lost
+	// run of the open may have had its mailbox made afresh); its wait runs first.
+	io.f.clock = io.f.clock.Add(freshMailboxWait)
 	rot0, reg0 := io.rw.log()
 	if err := io.m.ProcessBatch(context.Background(), &fakeCollector{}, nil); err != nil {
 		t.Fatal(err)
@@ -470,6 +482,10 @@ func TestRelayRotSecondRecoveryInheritsTheKeyWithoutTheWait(t *testing.T) {
 	if m.pendingMailbox() != pend || pendingRecovery(m) != "" || !recoveryInvitePending(m) {
 		t.Fatalf("pending %s (want %s), recovery %q", m.pendingMailbox(), pend, pendingRecovery(m))
 	}
+	// No answer at the open: the key is marked Unconfirmed, and its wait (not
+	// the phone's) runs first.
+	f.clock = f.clock.Add(freshMailboxWait)
+	f.bucket.Advance(freshMailboxWait)
 	rot0, _ := rw.log()
 	if err := m.ProcessBatch(context.Background(), &fakeCollector{}, nil); err != nil {
 		t.Fatal(err)
@@ -488,6 +504,9 @@ func TestRelayRotPhoneUnlockRetryReportsTheStoredHeaderSeq(t *testing.T) {
 		delete(rw.live, k)
 		rw.register = []error{relayErr(503, "")}
 	})
+	// The open's attempt got no answer: the key is marked Unconfirmed (a lost
+	// run of the open may have had its mailbox made afresh); its wait runs first.
+	io.f.clock = io.f.clock.Add(freshMailboxWait)
 	if err := io.m.Lock(context.Background()); err != nil {
 		t.Fatal(err)
 	}

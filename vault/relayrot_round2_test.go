@@ -221,8 +221,17 @@ func TestRelayRotInheritedAttemptAtTheOpenUnit(t *testing.T) {
 		m.st.Relay.Pending.RetryAfter = time.Time{}
 		m.inheritedKeyAtOpen(context.Background(), RecoveryOpenParams{Options: fx.fixture.opts}, fx.clk)
 	})
+	// Answered as existing: a lost run of the open may have had it made
+	// afresh, so it is marked and waits.
+	if rot, _ := fx.w.log(); len(rot) != 2 || fx.pendingMailbox() != p || fx.pending().Unconfirmed.IsZero() {
+		t.Fatalf("the open's attempt: rotates %v", rot)
+	}
+	fx.setClk(fx.clk.Add(freshMailboxWait))
+	fx.do(func(m *Manager) {
+		m.relayKeyAttempt(context.Background(), false) // a sooner retry once the wait has run
+	})
 	if fx.mailbox() != p || fx.pending() != nil {
-		t.Fatal("the open's attempt did not complete the inherited key")
+		t.Fatal("the attempt after the wait did not complete the inherited key")
 	}
 }
 

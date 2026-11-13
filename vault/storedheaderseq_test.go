@@ -88,7 +88,8 @@ func TestRecoveryOpenAnswersReportTheStoredSeq(t *testing.T) {
 // put fails (not the seq of the write that failed), so the app's floor
 // never passes the stored header.
 func TestNoBackupRefusalReportsTheStoredHeaderSeq(t *testing.T) {
-	for _, fails := range []bool{false, true} {
+	for _, failing := range []int{0, 1, 2} {
+		fails := failing > 0
 		d := newDevFixture(t)
 		if err := d.m.Lock(context.Background()); err != nil {
 			t.Fatal(err)
@@ -104,8 +105,9 @@ func TestNoBackupRefusalReportsTheStoredHeaderSeq(t *testing.T) {
 		before := storedHeader(t, d).HeaderSeq
 		opts := d.opts
 		if fails {
-			// The count's write passes (§11.8); no_backup's own write fails.
-			opts.Store = &faultStore{Store: d.store, passHeader: 1, failHeader: 1}
+			// The count's write passes (§11.8); no_backup's own write fails,
+			// and with 2 the count's reset fails too.
+			opts.Store = &faultStore{Store: d.store, passHeader: 1, failHeader: failing}
 		}
 		m, uo := cancelUnlock(d, opts, func(p *AltUnlockParams) { p.CancelRecovery = false })
 		if m != nil || uo.OK || uo.Code != CodeNoBackup {
@@ -114,7 +116,11 @@ func TestNoBackupRefusalReportsTheStoredHeaderSeq(t *testing.T) {
 		h := storedHeader(t, d)
 		// The count's write (+1), then no_backup's (+1, the count reset with
 		// it) or, when that fails, the count's reset (+1).
-		if fails && (h.HeaderSeq != before+2 || h.Recovery == nil) || !fails && (h.HeaderSeq != before+2 || h.Recovery != nil) {
+		want := before + 2
+		if failing == 2 {
+			want = before + 1 // only the count is stored
+		}
+		if fails && (h.HeaderSeq != want || h.Recovery == nil) || !fails && (h.HeaderSeq != want || h.Recovery != nil) {
 			t.Fatalf("put fails %v: stored header_seq %d (before %d), recovery %v", fails, h.HeaderSeq, before, h.Recovery)
 		}
 		if uo.HeaderSeq != h.HeaderSeq {

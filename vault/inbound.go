@@ -278,6 +278,7 @@ func (m *Manager) ProcessBatch(ctx context.Context, c Collector, msgs []Message)
 	m.msgMailbox = ""
 	// §3.4.2 RK14 step 1: last_msg_id, in this batch's flush.
 	m.noteCollected(c, msgs, processed)
+	m.noteBatchDrained(c, msgs, now)
 
 	m.batchEndFeatures(now) // after the messages: call liveness sees the batch's keep-alives
 	m.reconfirmAll(now)     // §6.3.1: hs.confirm again, once per batch, unless one is queued

@@ -83,7 +83,7 @@ func TestRelayRotBlobInTheOldMailbox(t *testing.T) {
 	fx.w.mu.Lock()
 	dels := strings.Join(fx.w.blobDeletes, ",")
 	fx.w.mu.Unlock()
-	if dels != old+"/B1" {
+	if !strings.HasPrefix(dels, old+"/B1") { // its own mailbox first, then the others
 		t.Fatalf("deletes %v", dels)
 	}
 	fx.w.mu.Lock()
@@ -261,7 +261,7 @@ func TestRelayRotBlobCallFromTheOldMailbox(t *testing.T) {
 				}
 				fx.w.mu.Lock()
 				defer fx.w.mu.Unlock()
-				if strings.Join(fx.w.blobDeletes, ",") != old+"/B2" {
+				if len(fx.w.blobDeletes) == 0 || fx.w.blobDeletes[0] != old+"/B2" {
 					t.Fatalf("deletes %v", fx.w.blobDeletes)
 				}
 				return

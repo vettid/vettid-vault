@@ -116,11 +116,7 @@ func (m *Manager) runBlobCall(r *attRunner, deviceID string, req envelope.Inner,
 		}
 		ctx, cancel := context.WithTimeout(ctx, blobCallBound)
 		defer cancel()
-		var data []byte
-		var err error = errBlobGone
-		if rel := m.blobRelay(mailbox); rel != nil {
-			data, err = rel.GetBlob(ctx, blobID)
-		}
+		data, err := m.getBlobAny(ctx, mailbox, blobID)
 		switch {
 		case err != nil && (transient(err) || ctx.Err() != nil):
 			code = "relay_error"

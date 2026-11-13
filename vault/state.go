@@ -220,18 +220,23 @@ type RelayState struct {
 // message the relay gave from that mailbox up to it was processed and
 // flushed. Unprocessed are the msg_ids given (collected, held back by the
 // order of processing, or left unacked) and not yet processed, Done those
-// processed above LastMsgID, in order, each at most collectTrack; Ceiling
-// is the lowest msg_id Unprocessed could not keep, which LastMsgID never
-// passes again (erring low costs only re-deposits). Stopped is when the
+// processed above LastMsgID, in order, each at most collectTrack; GivenAt
+// is when each of Unprocessed was last given. Ceiling is the lowest
+// msg_id Unprocessed could not keep, set at CeilingAt, which LastMsgID
+// does not pass (erring low costs only re-deposits). A full drain of the
+// mailbox later than two leases after an id was given, or the ceiling
+// set, without it shows the relay no longer has it: it is pruned. Stopped is when the
 // vault ended its collects of the mailbox (zero: not ended); TellingDue:
 // relay.mailbox.closed is owed for it (sent by a later change).
 type MailboxCollect struct {
-	LastMsgID   string    `json:"last_msg_id,omitempty"`
-	Unprocessed []string  `json:"unprocessed,omitempty"`
-	Done        []string  `json:"done,omitempty"`
-	Ceiling     string    `json:"ceiling,omitempty"`
-	Stopped     time.Time `json:"stopped,omitzero"`
-	TellingDue  bool      `json:"telling_due,omitempty"`
+	LastMsgID   string               `json:"last_msg_id,omitempty"`
+	Unprocessed []string             `json:"unprocessed,omitempty"`
+	Done        []string             `json:"done,omitempty"`
+	GivenAt     map[string]time.Time `json:"given_at,omitempty"`
+	Ceiling     string               `json:"ceiling,omitempty"`
+	CeilingAt   time.Time            `json:"ceiling_at,omitzero"`
+	Stopped     time.Time            `json:"stopped,omitzero"`
+	TellingDue  bool                 `json:"telling_due,omitempty"`
 }
 
 // PendingRelay is a relay key stored before the relay's rotate (§3.4 step

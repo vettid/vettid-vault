@@ -259,9 +259,44 @@ func (m *Manager) blobRelay(mb string) Relay {
 	return nil
 }
 
-// deleteBlobIn deletes a blob of the own mailbox mb, best effort.
+// blobRelays are the Relays to look for a blob of the own mailbox mb in:
+// that mailbox's first (while it is collected), then the other own
+// mailboxes still collected. A blob recorded before the first rotation
+// ("", the then-current mailbox) or put by a peer that changed the
+// vault's address between its upload and its deposit lies in another of
+// them; blob ids are the relay's, so another mailbox cannot hold another
+// blob under the same id.
+func (m *Manager) blobRelays(mb string) []Relay {
+	first := m.blobRelay(mb)
+	var out []Relay
+	if first != nil {
+		out = append(out, first)
+	}
+	for _, r := range m.ownRelays() {
+		if r != first {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// getBlobAny fetches a blob of the own mailbox mb, looking in the others
+// still collected when that one does not have it (blobRelays).
+func (m *Manager) getBlobAny(ctx context.Context, mb, id string) ([]byte, error) {
+	var err error = errBlobGone
+	for _, rel := range m.blobRelays(mb) {
+		var data []byte
+		if data, err = rel.GetBlob(ctx, id); RelayCode(err) != CodeBlobUnknown {
+			return data, err
+		}
+	}
+	return nil, err
+}
+
+// deleteBlobIn deletes a blob of the own mailbox mb, best effort, in every
+// own mailbox it may lie in (blobRelays).
 func (m *Manager) deleteBlobIn(ctx context.Context, mb, id string) {
-	if rel := m.blobRelay(mb); rel != nil {
+	for _, rel := range m.blobRelays(mb) {
 		_ = rel.DeleteBlob(ctx, id)
 	}
 }

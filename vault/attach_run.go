@@ -441,11 +441,7 @@ func transient(err error) bool {
 // sniffing. It returns the content and its sniffed type, or a reason:
 // "unknown" (blob_unknown), "transient", ReasonBad or ReasonType.
 func (m *Manager) fetchBlob(ctx context.Context, b AttBlob, maxBlob int) ([]byte, string, string, error) {
-	rel := m.blobRelay(b.Mailbox)
-	if rel == nil {
-		return nil, "", "unknown", errBlobGone
-	}
-	data, err := rel.GetBlob(ctx, b.ID)
+	data, err := m.getBlobAny(ctx, b.Mailbox, b.ID)
 	if err != nil {
 		switch {
 		case RelayCode(err) == CodeBlobUnknown:

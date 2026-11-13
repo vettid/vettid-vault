@@ -138,8 +138,8 @@ func removeID(l []string, id string) []string {
 	return l
 }
 
-// given records a message the relay gave from the mailbox.
-func (r *MailboxCollect) given(id string) {
+// given records a message the relay gave from the mailbox at now.
+func (r *MailboxCollect) given(id string, now time.Time) {
 	if id == "" || r.LastMsgID != "" && !msgIDBefore(r.LastMsgID, id) {
 		return // at or below last_msg_id: already processed
 	}
@@ -150,8 +150,59 @@ func (r *MailboxCollect) given(id string) {
 	}
 	var dropped string
 	r.Unprocessed, dropped = insertID(r.Unprocessed, id)
-	if dropped != "" && (r.Ceiling == "" || msgIDBefore(dropped, r.Ceiling)) {
-		r.Ceiling = dropped
+	if r.GivenAt == nil {
+		r.GivenAt = map[string]time.Time{}
+	}
+	if dropped != id {
+		r.GivenAt[id] = now.UTC()
+	}
+	if dropped != "" {
+		delete(r.GivenAt, dropped)
+		if r.Ceiling == "" || msgIDBefore(dropped, r.Ceiling) {
+			r.Ceiling, r.CeilingAt = dropped, now.UTC()
+		}
+	}
+}
+
+// pruneUnhanded is a full drain of the mailbox at now (a collect that
+// returned fewer than max, over HTTP) that gave the ids in got: each
+// unprocessed id given more than bound before it, absent from it and not
+// held, is one the relay no longer has (acked before a crash undid its
+// processing, or dropped by the relay), so it holds last_msg_id no more;
+// a ceiling older than bound goes the same way (a message it stood for
+// and still unprocessed would be in got, given again).
+func (r *MailboxCollect) pruneUnhanded(got, held map[string]bool, now time.Time, bound time.Duration) {
+	keep := r.Unprocessed[:0]
+	for _, id := range r.Unprocessed {
+		if !got[id] && !held[id] && now.Sub(r.GivenAt[id]) > bound {
+			delete(r.GivenAt, id)
+			continue
+		}
+		keep = append(keep, id)
+	}
+	r.Unprocessed = keep
+	if r.Ceiling != "" && now.Sub(r.CeilingAt) > bound {
+		r.Ceiling, r.CeilingAt = "", time.Time{}
+	}
+	r.advance()
+}
+
+// leaseBound is how long after a message was given a full drain without
+// it shows the relay no longer has it: two of the relay's visibility
+// timeouts (60 s if it gave none), and a long-poll.
+func (m *Manager) leaseBound() time.Duration {
+	vis := time.Duration(m.limits.VisibilityTimeoutSeconds) * time.Second
+	return 2*max(vis, RuleTVisibility) + LongPollWait
+}
+
+// noteDrained is pruneUnhanded for mailbox, under the lock.
+func (m *Manager) noteDrained(mailbox string, got, held map[string]bool, now time.Time) {
+	if !m.relayRotation() || m.st == nil {
+		return
+	}
+	if r := m.collectRec(mailbox); r != nil {
+		r.pruneUnhanded(got, held, now, m.leaseBound())
+		m.dirty = true
 	}
 }
 
@@ -160,6 +211,7 @@ func (r *MailboxCollect) given(id string) {
 // processed.
 func (r *MailboxCollect) processed(id string) {
 	r.Unprocessed = removeID(r.Unprocessed, id)
+	delete(r.GivenAt, id)
 	if r.LastMsgID == "" || msgIDBefore(r.LastMsgID, id) {
 		r.Done, _ = insertID(r.Done, id)
 	}
@@ -188,7 +240,7 @@ func (m *Manager) noteGiven(mailbox string, ids []string) {
 	}
 	if r := m.collectRec(mailbox); r != nil {
 		for _, id := range ids {
-			r.given(id)
+			r.given(id, m.now())
 		}
 		m.dirty = true
 	}
@@ -208,7 +260,7 @@ func (m *Manager) noteCollected(c Collector, msgs []Message, processed []bool) {
 		if r == nil {
 			continue
 		}
-		r.given(msg.MsgID)
+		r.given(msg.MsgID, m.now())
 		if processed[i] {
 			r.processed(msg.MsgID)
 		}
@@ -286,6 +338,9 @@ type multiCollector struct {
 	// given records what a collect gave (last_msg_id never passes a
 	// message held here); it takes the vault's lock.
 	given func(mailbox string, ids []string)
+	// drained reports a full drain of a mailbox (pruneUnhanded): what it
+	// gave and what is still held here from it. It takes the vault's lock.
+	drained func(mailbox string, got, held map[string]bool, at time.Time)
 }
 
 func (c *multiCollector) mailboxOf(id string) string {
@@ -342,13 +397,29 @@ func (c *multiCollector) Next(ctx context.Context) ([]Message, error) {
 		}
 		c.mu.Lock()
 		for _, msg := range msgs {
-			if c.from[msg.MsgID] != nil {
-				continue // a redelivery of a message held here
+			c.from[msg.MsgID] = p // acks go where it came from
+			if c.isHeld(msg.MsgID) {
+				continue // a redelivery of a message still held here
 			}
-			c.from[msg.MsgID] = p
 			c.held = append(c.held, heldMsg{msg: msg, at: heldAt(msg, start), part: p})
 		}
+		var drainedHeld map[string]bool
+		if len(msgs) < MaxBatch && !p.stream && c.drained != nil {
+			drainedHeld = map[string]bool{}
+			for _, h := range c.held {
+				if h.part == p {
+					drainedHeld[h.msg.MsgID] = true
+				}
+			}
+		}
 		c.mu.Unlock()
+		if drainedHeld != nil {
+			got := map[string]bool{}
+			for _, id := range ids {
+				got[id] = true
+			}
+			c.drained(p.mailbox, got, drainedHeld, start)
+		}
 	}
 	out := c.release()
 	if len(out) == 0 && !c.hasMain() {
@@ -359,6 +430,18 @@ func (c *multiCollector) Next(ctx context.Context) ([]Message, error) {
 		}
 	}
 	return out, nil
+}
+
+// isHeld reports whether id is held here, collected and not yet released
+// (a message released and left unacked is handed back by the relay and
+// held again). With c.mu held.
+func (c *multiCollector) isHeld(id string) bool {
+	for _, h := range c.held {
+		if h.msg.MsgID == id {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *multiCollector) hasMain() bool {
@@ -488,6 +571,11 @@ func (m *Manager) rotationCollector(ctx context.Context, main Collector) Collect
 				_ = m.persist(ctx, false) // at once (a copy could register it again)
 			}
 		},
+		drained: func(mb string, got, held map[string]bool, at time.Time) {
+			m.mu.Lock()
+			defer m.mu.Unlock()
+			m.noteDrained(mb, got, held, at)
+		},
 		given: func(mb string, ids []string) {
 			m.mu.Lock()
 			defer m.mu.Unlock()
@@ -551,4 +639,23 @@ func (m *Manager) collectsOld() bool {
 		}
 	}
 	return false
+}
+
+// noteBatchDrained is pruneUnhanded for a batch of the current mailbox's
+// own collector (not one of several, which reports its drains itself; not
+// a WebSocket session, whose batches never show a drain) that returned
+// fewer than max.
+func (m *Manager) noteBatchDrained(c Collector, msgs []Message, now time.Time) {
+	if !m.relayRotation() || len(msgs) >= MaxBatch {
+		return
+	}
+	switch c.(type) {
+	case *multiCollector, *wsCollector, idleCollector:
+		return
+	}
+	got := map[string]bool{}
+	for _, msg := range msgs {
+		got[msg.MsgID] = true
+	}
+	m.noteDrained(m.st.Relay.Mailbox, got, nil, now)
 }

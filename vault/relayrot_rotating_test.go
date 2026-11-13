@@ -37,6 +37,7 @@ type rotWorld struct {
 	blobDeletes []string
 	revokes     []string
 	wsAsked     map[string]bool
+	blobInfo    map[string]BlobEntry // "mailbox/id": sender, created_at
 	// queue are the messages waiting in each mailbox, given once each
 	// (inflight) until acked; collectErr answers a mailbox's collects;
 	// collects logs the mailbox of each collect, acks each ack.
@@ -49,7 +50,7 @@ type rotWorld struct {
 
 func newRotWorld() *rotWorld {
 	return &rotWorld{live: map[string]bool{}, queue: map[string][]Message{}, inflight: map[string]bool{}, collectErr: map[string]error{},
-		blobs: map[string]map[string][]byte{}, wsAsked: map[string]bool{}}
+		blobs: map[string]map[string][]byte{}, wsAsked: map[string]bool{}, blobInfo: map[string]BlobEntry{}}
 }
 
 // put queues a message in mailbox mb, deposited at at.
@@ -197,7 +198,9 @@ func (r *rotRelay) ListBlobs(context.Context) (BlobList, error) {
 	defer r.w.mu.Unlock()
 	var out BlobList
 	for id, b := range r.w.blobs[mailboxOf(r.key)] {
-		out.Blobs = append(out.Blobs, BlobEntry{BlobID: id, Size: int64(len(b))})
+		e := r.w.blobInfo[mailboxOf(r.key)+"/"+id]
+		e.BlobID, e.Size = id, int64(len(b))
+		out.Blobs = append(out.Blobs, e)
 	}
 	out.MaxBytes = 64 << 20
 	return out, nil

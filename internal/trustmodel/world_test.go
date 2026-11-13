@@ -70,7 +70,7 @@ type World struct {
 	noRefusedLinks    bool // 0.88.2 (M1): a refused reconnect's links are not followed (the deadlock scenario's "off")
 	noConfirmAgain    bool // 0.88.1: R does not queue hs.confirm again every 12 days (TestR29R3ConfirmAgain's "off")
 	noConfRekey       bool // F13 §6.2 and lead item 6: a rekey whose ctx is the responder's confirmed (not current) epoch is refused
-	f1Fin             bool // 0.90.4: Strict F1 runs on the links applied at a rekey or reconnect hs.fin (TRUSTMODEL_F1FIN; off by default)
+	noF1Fin           bool // before 0.90.4: Strict F1 does not run on the links applied at a rekey or reconnect hs.fin (TRUSTMODEL_NOF1FIN)
 
 	issuer   map[int]Key    // jti -> iss: a token "verifies" only if its issuer minted it
 	epTruth  map[int][2]PID // epoch -> (initiator actor, responder actor)

@@ -39,19 +39,14 @@
 //     S1PAUSE, and the cap on RK6, RK9, RK10 and RK11. RK14: GRACE14, HOLD
 //     and TELL. RK15 is not a rule: the randomized runs check it.
 //
-// VAULT-MESSAGING 0.90.4 (vettid.org #588, an erratum to §3.4.1 Strict
-// F1) runs Strict F1 on the links a rekey or reconnect hs.init carried,
-// applied at its verified hs.fin (E: the epoch the rekey traveled under
-// or the reconnect named; no reconnect started). The model has it behind
-// TRUSTMODEL_F1FIN=1, off by default: with it on, honest pairs are
-// suspended (I4-false). A side demoted by Strict F1 at its peer's
-// identity.rotate reconnects naming E; if it rotates its own ik before
-// that reconnect completes, the restarted reconnect carries its new link,
-// and at its hs.fin the peer runs Strict F1 with that E against its later
-// epochs signed by the side's old ik, which the side honestly used, so a
-// received flag suspends the pair. With it on, the old copy's epoch
-// set up between Q's hs.resp and P's hs.fin is demoted (the default
-// config's I3 at run seed 7497118903681018023 no longer occurs).
+// From VAULT-MESSAGING 0.90.4 (vettid.org #588, an erratum to §3.4.1
+// Strict F1) the model also runs Strict F1 on the links a rekey or
+// reconnect hs.init carried, applied at its verified hs.fin (E: the
+// epoch the rekey traveled under or the reconnect named; no reconnect
+// started). Strict F1 judges only epochs that are not pending, abandoned
+// or destroyed, as the vault does: those stay with "Pending epochs at a
+// link", R29-K9 and rule E. TRUSTMODEL_NOF1FIN turns the hs.fin case
+// off, for attribution.
 //
 // Model limits of §3.4.2:
 //   - §8.4's ts window is applied only to RK13's pause (its past bound;
@@ -112,7 +107,7 @@
 // I1), TRUSTMODEL_ROTBURST (each vault rotates 4 to 6 times at the start),
 // TRUSTMODEL_CHOSEN (every rule of §3.4.2, the final set; chosen_test.go),
 // TRUSTMODEL_CH=a,b,-c (single rules of it on or off, for attribution),
-// TRUSTMODEL_F1FIN (0.90.4's Strict F1 at hs.fin on),
+// TRUSTMODEL_NOF1FIN (0.90.4's Strict F1 at hs.fin off, for attribution),
 // TRUSTMODEL_NOM1 (0.88.2's links of a refused reconnect off, for
 // attribution), TRUSTMODEL_DEBUG (report malformed updates as violations).
 //

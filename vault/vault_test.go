@@ -65,6 +65,10 @@ type stubRelay struct {
 	// revocation, quota; injected failures) before it is recorded.
 	now   func() time.Time
 	check func(mailbox, token string) error
+	// stretch, if set, replaces the ttl of each token minted (by its
+	// quota, a test tells a standing token from a reconnect token): an
+	// issuer minting tokens over §7.1's caps.
+	stretch func(ttl time.Duration, q *relayauth.Quota) time.Duration
 	// checkPayload, if set, is check with the deposit's payload (the
 	// random-pair harness's quota by message type).
 	checkPayload func(mailbox, token string, payload []byte) error
@@ -173,6 +177,11 @@ func (r *stubRelay) client() *relayclient.Client {
 	return c
 }
 func (r *stubRelay) MintToken(sub ed25519.PublicKey, ttl time.Duration, jti string, q *relayauth.Quota, ownerDevice bool) (string, error) {
+	r.mu.Lock()
+	if r.stretch != nil {
+		ttl = r.stretch(ttl, q)
+	}
+	r.mu.Unlock()
 	return r.client().MintToken(relayauth.EncodeKey(sub), r.base, relayclient.TokenOptions{TTL: ttl, JTI: jti, Quota: q, OwnerDevice: ownerDevice})
 }
 

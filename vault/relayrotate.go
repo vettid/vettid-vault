@@ -534,7 +534,7 @@ func (m *Manager) newPendingRelay(seed []byte, marks, named *RotationOwed, now t
 	m.keys.pendingRelay = ed25519.NewKeyFromSeed(seed)
 	m.rk.pending, m.rk.fails, m.rk.next = nil, 0, time.Time{}
 	for _, p := range m.relayRecipients() {
-		m.mintHeld(pr, m.keys.pendingRelay, p, false, now)
+		m.mintHeld(pr, m.keys.pendingRelay, p, now)
 	}
 	m.dirty = true
 }
@@ -551,10 +551,8 @@ func (m *Manager) dropPendingRelay() {
 }
 
 // mintHeld mints p's standing token (and reconnect token, for a
-// connection) on key, pr's, and holds them in pr. fresh: iat now,
-// never backdated (a mailbox the relay created afresh, RELAY-PROTOCOL
-// §6.10).
-func (m *Manager) mintHeld(pr *PendingRelay, key ed25519.PrivateKey, p *Peer, fresh bool, now time.Time) {
+// connection) on key, pr's, and holds them in pr.
+func (m *Manager) mintHeld(pr *PendingRelay, key ed25519.PrivateKey, p *Peer, now time.Time) {
 	h := &HeldTokens{}
 	if old := pr.Held[p.ID]; old != nil {
 		h = old
@@ -563,11 +561,11 @@ func (m *Manager) mintHeld(pr *PendingRelay, key ed25519.PrivateKey, p *Peer, fr
 		pr.Held = map[string]*HeldTokens{} // read back without recipients (omitempty)
 	}
 	pr.Held[p.ID] = h
-	if tok, it, err := m.mintOnKey(key, fresh, p, TokStanding, now); err == nil {
+	if tok, it, err := m.mintOnKey(key, p, TokStanding, now); err == nil {
 		h.Standing, h.Issued = tok, replaceIssued(h.Issued, it)
 	}
 	if p.Kind == KindConnection {
-		if tok, it, err := m.mintOnKey(key, fresh, p, TokReconnect, now); err == nil {
+		if tok, it, err := m.mintOnKey(key, p, TokReconnect, now); err == nil {
 			h.Reconnect, h.Issued = tok, replaceIssued(h.Issued, it)
 		}
 	}
@@ -575,8 +573,10 @@ func (m *Manager) mintHeld(pr *PendingRelay, key ed25519.PrivateKey, p *Peer, fr
 
 // mintOnKey mints a standing or reconnect token for p on key, with the
 // lifetime and quota of its kind (§7.1, §6.6), as mintStanding and
-// mintReconnect do on the current key.
-func (m *Manager) mintOnKey(key ed25519.PrivateKey, fresh bool, p *Peer, kind string, now time.Time) (string, IssuedToken, error) {
+// mintReconnect do on the current key. iat is backdated as relayclient's
+// (RELAY-PROTOCOL §5.2), for a mailbox made afresh too: freshMailboxWait
+// counts the backdate, and a vault clock ahead of the relay's needs it.
+func (m *Manager) mintOnKey(key ed25519.PrivateKey, p *Peer, kind string, now time.Time) (string, IssuedToken, error) {
 	ttl := m.standingTTL(p.Kind)
 	var quota *relayauth.Quota
 	if kind == TokReconnect {
@@ -585,10 +585,7 @@ func (m *Manager) mintOnKey(key ed25519.PrivateKey, fresh bool, p *Peer, kind st
 	} else if p.Kind == KindConnection {
 		quota = &relayauth.Quota{Msgs: i64(PeerQuotaMsgs), Bytes: i64(PeerQuotaBytes)}
 	}
-	iat := now.UTC().Truncate(time.Second)
-	if !fresh {
-		iat = iat.Add(-tokenBackdate) // as relayclient (RELAY-PROTOCOL §5.2)
-	}
+	iat := now.UTC().Truncate(time.Second).Add(-tokenBackdate) // as relayclient (RELAY-PROTOCOL §5.2)
 	jti := m.newID(now)
 	sub := relayauth.EncodeKey(p.Relay.PK)
 	tok, err := relayauth.MintToken(key, relayauth.Claims{Iss: relayauth.MailboxID(pubOf(key)), Sub: sub, Aud: m.relayBase(),
@@ -697,7 +694,8 @@ func (m *Manager) relayKeyCall(ctx context.Context) (out relayOutcome, created, 
 		// has creates nothing (RELAY-PROTOCOL §6.1); a failure keeps the
 		// limits the vault has. A 201 here means the relay created the
 		// mailbox afresh after all (the successor gone again): every held
-		// token is minted again, never backdated (RELAY-PROTOCOL §6.10).
+		// token is minted again after freshMailboxWait (RELAY-PROTOCOL
+		// §6.10).
 		if lim, c, rerr := pending.RegisterCreated(ctx); rerr == nil {
 			m.limits, created = lim, c
 		}
@@ -731,12 +729,15 @@ func (m *Manager) relayKeyCall(ctx context.Context) (out relayOutcome, created, 
 // The wait is that 90 seconds, plus the 90 seconds of skew RELAY-PROTOCOL
 // §4.1's freshness window allows between the vault's clock and the
 // relay's (a vault clock behind the relay's by up to that much still
-// mints after the tombstone's bound), plus a second for iat's truncation
-// to whole seconds. Minting at once with a later iat would not do: the
-// relay checks iat <= now strictly (RELAY-PROTOCOL §5.3 step 5). A
-// reading of this release (decision of 2026-11-13; the spec should
-// confirm).
-const freshMailboxWait = freshMailboxTombstone + collectedToWindow + time.Second
+// mints after the tombstone's bound), plus the 60 seconds every token's
+// iat is backdated (RELAY-PROTOCOL §5.2: the held tokens, mintStanding
+// and the unlock tokens of the answer that completes the key alike, so
+// that a vault clock ahead of the relay's by up to that much is not
+// refused), plus a second for iat's truncation to whole seconds: 241
+// seconds. Minting at once with a later iat would not do: the relay
+// checks iat <= now strictly (RELAY-PROTOCOL §5.3 step 5). A reading of
+// this release (the spec should confirm).
+const freshMailboxWait = freshMailboxTombstone + collectedToWindow + tokenBackdate + time.Second
 
 // freshMailboxTombstone is RELAY-PROTOCOL §6.10's 90 seconds after a
 // deletion before which a mailbox made again refuses a token's iat.
@@ -807,6 +808,16 @@ func (m *Manager) relayKeyAttempt(ctx context.Context, atUnlock bool) bool {
 	case m.freshWaitRuns(pr):
 		return false // the wait after a mailbox created afresh, at an unlock too
 	}
+	if !pr.Created.IsZero() && m.stateBehind {
+		// It fails closed: the answer's time of a mailbox made afresh is
+		// stored before the key is completed. Unstored, a lock or a restart
+		// would forget the wait, and an attempt then (a repeated rotate
+		// within the grace, answered 200) would complete it with tokens the
+		// relay refuses.
+		if m.persist(ctx, false) != nil {
+			return false
+		}
+	}
 	// §3.4.2 RK14 step 1: the anchor, in a write of its own just before
 	// the first attempt away from the current key. Nothing is sent until
 	// it is stored.
@@ -838,6 +849,8 @@ func (m *Manager) relayKeyAttempt(ctx context.Context, atUnlock bool) bool {
 			// own, so that a lock or a restart waits too. The key stays
 			// pending, nothing announced; the attempt after the wait
 			// completes it.
+			// A write that fails leaves the state behind (stateBehind): the
+			// key is not completed until a write stores the wait.
 			pr.Created, pr.Refused, pr.RetryAfter = now.UTC(), "", time.Time{}
 			m.dirty = true
 			m.rk.fails, m.rk.next = 0, now.Add(freshMailboxWait)
@@ -966,7 +979,9 @@ func (m *Manager) relayKeyBeforeBundle(ctx context.Context) (code string, wait t
 	default:
 		wait = relayRetryWait(max(m.rk.fails, 1))
 	}
-	return CodeRetry, wait, errRelayKeyUnanswered
+	// At least a second: the full jitter starts at 0, and retry_after is
+	// whole seconds rounded up.
+	return CodeRetry, max(wait, time.Second), errRelayKeyUnanswered
 }
 
 // relayMailboxUnknown is the collect loop's mailbox_unknown on the current
@@ -1065,18 +1080,18 @@ func (m *Manager) makePendingCurrent(created bool, now time.Time) bool {
 		h := pr.Held[p.ID]
 		sub := relayauth.EncodeKey(p.Relay.PK)
 		if h == nil || created {
-			m.mintHeld(pr, m.keys.relay, p, created, now)
+			m.mintHeld(pr, m.keys.relay, p, now)
 			h = pr.Held[p.ID]
 		} else {
 			if t, ok := issuedOf(h.Issued, TokStanding); !ok || t.Sub != sub ||
 				t.Exp.Sub(now) < StandingRemintBelow && m.standingTTL(p.Kind) > StandingRemintBelow {
-				if tok, it, err := m.mintOnKey(m.keys.relay, false, p, TokStanding, now); err == nil {
+				if tok, it, err := m.mintOnKey(m.keys.relay, p, TokStanding, now); err == nil {
 					h.Standing, h.Issued = tok, replaceIssued(h.Issued, it)
 				}
 			}
 			if p.Kind == KindConnection {
 				if t, ok := issuedOf(h.Issued, TokReconnect); !ok || t.Sub != sub || handshake.ReconnectRemintDue(t.Exp, now) {
-					if tok, it, err := m.mintOnKey(m.keys.relay, false, p, TokReconnect, now); err == nil {
+					if tok, it, err := m.mintOnKey(m.keys.relay, p, TokReconnect, now); err == nil {
 						h.Reconnect, h.Issued = tok, replaceIssued(h.Issued, it)
 					}
 				}

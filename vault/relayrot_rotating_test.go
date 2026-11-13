@@ -28,6 +28,8 @@ type rotWorld struct {
 	// registration (Register and RegisterCreated); signers the mailbox of
 	// the key that signed each deposit; deleted the mailboxes deleted.
 	rotates, registers, signers, deleted []string
+	// now is the vault's clock, which the relay client mints tokens by.
+	now func() time.Time
 	// blobSigners: the mailbox of the key that signed each blob upload;
 	// blobs the blobs of each mailbox; blobDeletes "mailbox/id" per
 	// deletion; revokes "mailbox:kind:value" per revocation; wsAsked the
@@ -232,7 +234,11 @@ func (r *rotRelay) PutBlob(ctx context.Context, url, mailbox, token string, data
 }
 
 func (r *rotRelay) MintToken(sub ed25519.PublicKey, ttl time.Duration, jti string, q *relayauth.Quota, ownerDevice bool) (string, error) {
-	return relayclient.New(r.base, r.key).MintToken(relayauth.EncodeKey(sub), r.base, relayclient.TokenOptions{TTL: ttl, JTI: jti, Quota: q, OwnerDevice: ownerDevice})
+	c := relayclient.New(r.base, r.key)
+	if r.w.now != nil {
+		c.Now = r.w.now
+	}
+	return c.MintToken(relayauth.EncodeKey(sub), r.base, relayclient.TokenOptions{TTL: ttl, JTI: jti, Quota: q, OwnerDevice: ownerDevice})
 }
 
 func (r *rotRelay) DeleteMailbox(context.Context) error {
@@ -276,6 +282,7 @@ func newRotFx(t *testing.T) *rotFx {
 		defer fx.cmu.Unlock()
 		return fx.vclk
 	}
+	fx.w.now = o.Now
 	o.Relay = func(base string, key ed25519.PrivateKey) Relay {
 		d.fixture.relay = &stubRelay{base: base, key: key}
 		return &rotRelay{stubRelay: d.fixture.relay, key: key, w: fx.w}

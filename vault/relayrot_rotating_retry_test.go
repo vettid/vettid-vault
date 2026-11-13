@@ -281,7 +281,7 @@ func TestRelayRotAfterTheGraceRegisters(t *testing.T) {
 		fx.do(func(m *Manager) {
 			tok := m.st.Relay.Recipients["c1"].Standing
 			c, err := parseOwnToken(m, tok)
-			if tok == held || err != nil || !c.Iat.Equal(fx.clk.Truncate(time.Second)) || c.Iat.Before(answered.Add(90*time.Second)) {
+			if tok == held || err != nil || !c.Iat.Equal(fx.clk.Truncate(time.Second).Add(-tokenBackdate)) || c.Iat.Before(answered.Add(90*time.Second)) {
 				t.Fatalf("fresh %v: re-minted %v, iat %v (answered %v) %v", fresh, tok != held, c.Iat, answered, err)
 			}
 		})

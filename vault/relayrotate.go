@@ -693,11 +693,13 @@ func (m *Manager) relayKeyCall(ctx context.Context) (out relayOutcome, created, 
 	if _, err = rot.Rotate(ctx, m.keys.pendingRelay); err == nil {
 		// The new mailbox's limits: registering a key the relay already
 		// has creates nothing (RELAY-PROTOCOL §6.1); a failure keeps the
-		// limits the vault has.
-		if lim, _, rerr := pending.RegisterCreated(ctx); rerr == nil {
-			m.limits = lim
+		// limits the vault has. A 201 here means the relay created the
+		// mailbox afresh after all (the successor gone again): every held
+		// token is minted again, never backdated (RELAY-PROTOCOL §6.10).
+		if lim, c, rerr := pending.RegisterCreated(ctx); rerr == nil {
+			m.limits, created = lim, c
 		}
-		return relayDone, false, false, nil
+		return relayDone, created, false, nil
 	}
 	if RelayCode(err) != CodeMailboxUnknown {
 		if ctx.Err() == nil && definiteRefusal(err) {

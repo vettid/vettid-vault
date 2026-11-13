@@ -65,9 +65,10 @@ func bundleNames(b []byte, mb string) bool { return mb != "" && bytes.Contains(b
 // open goes on, its vault_bundle naming the gone mailbox, and the phone
 // cannot pair there. Its lost-ok unlock makes the vault's one attempt of
 // that unlock before the bundle: still no answer, the unlock is answered
-// retry (no recovery attempt spent); once the relay answers, the next
-// unlock completes the key (and the next key owed) and its bundle names
-// the new mailbox, which the phone pairs with: within its two tries.
+// retry (no recovery attempt spent); once the relay answers, the key
+// waits freshMailboxWait (its mailbox may be made afresh), and the unlock
+// after it completes the key (and the next key owed): its bundle names
+// the new mailbox, which the phone pairs with.
 func TestRelayRotInheritedUnansweredAtTheOpenIsNotHeldByThePhone(t *testing.T) {
 	io := newInheritedOpen(t, func(rw *rotWorld, k, _ string) {
 		delete(rw.live, k)
@@ -92,14 +93,20 @@ func TestRelayRotInheritedUnansweredAtTheOpenIsNotHeldByThePhone(t *testing.T) {
 	if m, uo := io.f.phoneUnlockOut(); m != nil || uo.OK || uo.Code != CodeRetry || len(uo.VaultBundle) != 0 {
 		t.Fatalf("unlock with the relay failing: %+v", uo)
 	}
-	// Second try: the relay answers the inherited key (its registration);
-	// the next key owed, stored by its second write, gets a 503. The
-	// attempt is made before the bundle, which names the new current
-	// mailbox.
+	// Second try: the relay answers the inherited key's registration,
+	// which may have made its mailbox afresh: the key waits
+	// freshMailboxWait, and the unlock is answered retry again.
+	io.f.clock = io.f.clock.Add(time.Hour)
+	if m, uo := io.f.phoneUnlockOut(); m != nil || uo.OK || uo.Code != CodeRetry {
+		t.Fatalf("unlock within the wait of a mailbox made afresh: %+v", uo)
+	}
+	// Third try, after the wait: the key is made current; the next key
+	// owed, stored by its second write, gets a 503. The attempt is made
+	// before the bundle, which names the new current mailbox.
 	io.rw.mu.Lock()
 	io.rw.rotate = []error{nil, relayErr(503, "")}
 	io.rw.mu.Unlock()
-	io.f.clock = io.f.clock.Add(time.Hour)
+	io.f.clock = io.f.clock.Add(freshMailboxWait)
 	m, uo := io.f.phoneUnlock(t)
 	defer m.Crash()
 	rs = ownRelayState(m)
@@ -131,6 +138,10 @@ func TestRelayRotInheritedUnansweredAtTheOpenRetriedSooner(t *testing.T) {
 		rw.register = []error{relayErr(429, "rate_limited")}
 	})
 	rot0, reg0 := io.rw.log()
+	if err := io.m.ProcessBatch(context.Background(), &fakeCollector{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	io.f.clock = io.f.clock.Add(freshMailboxWait) // registered: the wait of a mailbox made afresh
 	if err := io.m.ProcessBatch(context.Background(), &fakeCollector{}, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -187,10 +198,13 @@ func TestRelayRotRecoveryOwnKeyAfterMailboxUnknown(t *testing.T) {
 	if rot, reg := rw.log(); len(rot) != 1 || len(reg) != len(reg0)+1 || reg[len(reg)-1] != own {
 		t.Fatalf("mailbox_unknown made no attempt: %v %v", rot, reg)
 	}
-	// The sooner retry, once its wait has run.
-	f.clock = f.clock.Add(2 * time.Minute)
-	if err := m.ProcessBatch(context.Background(), &fakeCollector{}, nil); err != nil {
-		t.Fatal(err)
+	// The sooner retry, once its wait has run, then the wait of a mailbox
+	// made afresh.
+	for _, d := range []time.Duration{2 * time.Minute, freshMailboxWait} {
+		f.clock = f.clock.Add(d)
+		if err := m.ProcessBatch(context.Background(), &fakeCollector{}, nil); err != nil {
+			t.Fatal(err)
+		}
 	}
 	rs := ownRelayState(m)
 	if rs.Pending != nil || rs.Mailbox != own || !recoveryInvitePending(m) {

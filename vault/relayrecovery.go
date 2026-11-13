@@ -17,7 +17,9 @@ import (
 // step-2 write, and writes nothing before that write:
 //   - the rotate (or registration) succeeds: the step-2 write is that key's
 //     second write, and the recovery's own rotation then stores its new key
-//     as pending;
+//     as pending; a registration past the grace (a mailbox that may have
+//     been created afresh) leaves the key pending instead, with the time
+//     of the answer, until freshMailboxWait has run;
 //   - no definite answer: the key stays pending, and the recovery's
 //     rotation owes a relay-key rotation, as any rotation made while a key
 //     is pending. Its attempts never wait for the recovered phone (it is
@@ -62,6 +64,12 @@ func (m *Manager) inheritedKeyAtOpen(ctx context.Context, p RecoveryOpenParams, 
 		m.relayKeyFailedAt(now)
 		return
 	}
+	if !pr.Created.IsZero() && now.Before(pr.Created.Add(freshMailboxWait)) {
+		// The wait after a mailbox created afresh runs: no attempt, as
+		// for a retry_after.
+		m.relayKeyFailedAt(now)
+		return
+	}
 	hadAnchor := !m.st.Relay.Anchor.IsZero()
 	out, created, byRotate, err := m.relayKeyCall(ctx)
 	if !hadAnchor && !(out == relayRefused && byRotate && relaysOwnRefusal(err)) {
@@ -69,8 +77,16 @@ func (m *Manager) inheritedKeyAtOpen(ctx context.Context, p RecoveryOpenParams, 
 	}
 	m.dirty = true
 	switch {
+	case out == relayDone && created && pr.Created.IsZero():
+		// A mailbox created afresh: the key stays pending until
+		// freshMailboxWait has run (relayKeyAttempt), the answer's time
+		// stored with it by the step-2 write; the recovery's rotation owes
+		// a relay-key rotation, as with no answer.
+		pr.Created, pr.Refused, pr.RetryAfter = now.UTC(), "", time.Time{}
+		m.rk.next = now.Add(freshMailboxWait)
+		return
 	case out == relayDone:
-		if m.makePendingCurrent(created, now) {
+		if m.makePendingCurrent(created || !pr.Created.IsZero(), now) {
 			return
 		}
 	case out == relayRefused && byRotate:

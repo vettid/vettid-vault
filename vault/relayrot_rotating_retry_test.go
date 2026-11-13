@@ -234,7 +234,11 @@ func TestRelayRotAnchorClearedOnlyByTheRelaysOwnRefusal(t *testing.T) {
 // After the grace the rotate is answered mailbox_unknown and the stored
 // pending key is registered: a 200 continues with step 3; a 201 (a fresh
 // mailbox) re-mints every held token with iat at that time, not
-// backdated.
+// backdated. Either may be a mailbox made afresh at an id with a
+// tombstone (a 200 can follow this vault's own lost 201): the key stays
+// pending, nothing announced, until freshMailboxWait after the answer,
+// and the second write then re-mints every held token (RELAY-PROTOCOL
+// §6.10).
 func TestRelayRotAfterTheGraceRegisters(t *testing.T) {
 	for _, fresh := range []bool{false, true} {
 		fx := newRotFx(t)
@@ -252,6 +256,18 @@ func TestRelayRotAfterTheGraceRegisters(t *testing.T) {
 		fx.w.mu.Unlock()
 		fx.setClk(fx.clk.Add(2 * time.Minute))
 		fx.batch()
+		answered := fx.clk
+		if pr := fx.pending(); fx.mailbox() == pmb || pr == nil || !pr.Created.Equal(answered) || pr.Held["c1"].Standing != held {
+			t.Fatalf("fresh %v: made current before the wait", fresh)
+		}
+		fx.setClk(answered.Add(freshMailboxWait - time.Second))
+		fx.batch()
+		if fx.mailbox() == pmb {
+			t.Fatalf("fresh %v: made current before the wait ran", fresh)
+		}
+		fx.restart() // the wait is stored with the key
+		fx.setClk(answered.Add(freshMailboxWait))
+		fx.batch()
 		_, regs := fx.w.log()
 		if fx.mailbox() != pmb || regs[len(regs)-1] != pmb {
 			t.Fatalf("fresh %v: mailbox %s, registers %v", fresh, fx.mailbox(), regs)
@@ -263,14 +279,9 @@ func TestRelayRotAfterTheGraceRegisters(t *testing.T) {
 		}
 		fx.do(func(m *Manager) {
 			tok := m.st.Relay.Recipients["c1"].Standing
-			if (tok != held) != fresh {
-				t.Fatalf("fresh %v: held token re-minted %v", fresh, tok != held)
-			}
-			if fresh {
-				c, err := parseOwnToken(m, tok)
-				if err != nil || !c.Iat.Equal(fx.clk.Truncate(time.Second)) {
-					t.Fatalf("fresh token iat %v (now %v) %v", c.Iat, fx.clk, err)
-				}
+			c, err := parseOwnToken(m, tok)
+			if tok == held || err != nil || !c.Iat.Equal(fx.clk.Truncate(time.Second)) || c.Iat.Before(answered.Add(90*time.Second)) {
+				t.Fatalf("fresh %v: re-minted %v, iat %v (answered %v) %v", fresh, tok != held, c.Iat, answered, err)
 			}
 		})
 	}
@@ -308,8 +319,13 @@ func TestRelayRotMailboxUnknownStartsTheRotate(t *testing.T) {
 	if err := fx.m.relayMailboxUnknown(context.Background()); err != nil {
 		t.Fatal(err)
 	}
+	if pr := fx.pending(); pr == nil || pr.Created.IsZero() {
+		t.Fatal("mailbox_unknown did not register the pending key")
+	}
+	fx.setClk(fx.clk.Add(freshMailboxWait))
+	fx.batch()
 	if fx.mailbox() != pmb {
-		t.Fatal("mailbox_unknown did not complete the pending key")
+		t.Fatal("the pending key not completed after the wait")
 	}
 }
 

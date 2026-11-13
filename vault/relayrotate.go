@@ -679,8 +679,12 @@ func retryAfterOf(err error) time.Duration {
 
 // relayKeyCall makes one attempt: the rotate signed by the current key
 // with the pending key; on mailbox_unknown (past the grace) the
-// registration of the stored pending key. created: the registration was
-// answered 201 (a fresh mailbox). byRotate: a refusal was the rotate's.
+// registration of the stored pending key. created: the mailbox may have
+// been created afresh, at an id that may carry a tombstone (RELAY-PROTOCOL
+// §6.10): every registration past the grace that succeeds (a 201, or a 200
+// that may follow this vault's own 201 whose answer or record was lost),
+// and a 201 to the registration after a rotate. byRotate: a refusal was
+// the rotate's.
 func (m *Manager) relayKeyCall(ctx context.Context) (out relayOutcome, created, byRotate bool, err error) {
 	rot, ok := m.relay.(RelayRotator)
 	pending, ok2 := m.pendingRelayClient().(RelayRotator)
@@ -706,16 +710,27 @@ func (m *Manager) relayKeyCall(ctx context.Context) (out relayOutcome, created, 
 	}
 	// §3.4.2 RK14 step 1: the current mailbox's collects end, for good.
 	m.mailboxGone(m.st.Relay.Mailbox, m.now())
-	lim, created, err := pending.RegisterCreated(ctx)
+	lim, _, err := pending.RegisterCreated(ctx)
 	if err == nil {
 		m.limits = lim
-		return relayDone, created, false, nil
+		return relayDone, true, false, nil
 	}
 	if ctx.Err() == nil && definiteRefusal(err) {
 		return relayRefused, false, false, err
 	}
 	return relayNoAnswer, false, false, err
 }
+
+// freshMailboxWait is how long after the answer that created the pending
+// key's mailbox afresh the vault waits before it mints that mailbox's
+// tokens (the second write, every held token minted again with iat at
+// that time). RELAY-PROTOCOL §6.10: a mailbox made again at an id that
+// had a tombstone refuses every token with iat before the deletion plus
+// 90 seconds; the deletion came before the answer, so the answer plus 90
+// seconds is never earlier. The extra second covers iat's truncation to
+// whole seconds. Minting at once with a later iat would not do: the relay
+// checks iat <= now strictly (RELAY-PROTOCOL §5.3 step 5).
+const freshMailboxWait = 91 * time.Second
 
 // relayKeyStep completes a pending relay key after a state write: at the
 // unlock (one attempt; the unlock goes on whatever its answer), after the
@@ -774,6 +789,8 @@ func (m *Manager) relayKeyAttempt(ctx context.Context, atUnlock bool) bool {
 		// The sooner retries' wait (full jitter) runs: no attempt may be
 		// made, before a collect either (beforeCollect).
 		return false
+	case !pr.Created.IsZero() && now.Before(pr.Created.Add(freshMailboxWait)):
+		return false // the wait after a mailbox created afresh, at an unlock too
 	}
 	// §3.4.2 RK14 step 1: the anchor, in a write of its own just before
 	// the first attempt away from the current key. Nothing is sent until
@@ -796,7 +813,19 @@ func (m *Manager) relayKeyAttempt(ctx context.Context, atUnlock bool) bool {
 	out, created, byRotate, err := m.relayKeyCall(ctx)
 	switch out {
 	case relayDone:
-		if !m.makePendingCurrent(created, now) {
+		if created && pr.Created.IsZero() {
+			// A mailbox created afresh: its tokens wait (freshMailboxWait),
+			// the time of the answer stored with the key, in a write of its
+			// own, so that a lock or a restart waits too. The key stays
+			// pending, nothing announced; the attempt after the wait
+			// completes it.
+			pr.Created, pr.Refused, pr.RetryAfter = now.UTC(), "", time.Time{}
+			m.dirty = true
+			m.rk.fails, m.rk.next = 0, now.Add(freshMailboxWait)
+			_ = m.persist(ctx, false)
+			return false
+		}
+		if !m.makePendingCurrent(created || !pr.Created.IsZero(), now) {
 			m.rk.next = now.Add(relayRetryWait(1))
 			return false
 		}

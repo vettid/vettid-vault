@@ -267,6 +267,10 @@ type PendingRelay struct {
 	// inherited): its attempts wait for that recovery's phone to pair
 	// while the current mailbox lives (recoveryWaits).
 	Recovery string `json:"recovery,omitempty"`
+	// Created is when the relay answered a registration that may have
+	// created the key's mailbox afresh (relayKeyCall): the second write
+	// waits until freshMailboxWait after it. Not secret.
+	Created time.Time `json:"created,omitzero"`
 }
 
 // HeldTokens are one recipient's tokens for a pending relay key, and their

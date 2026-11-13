@@ -176,3 +176,32 @@ func TestRelayRotInheritedFreshKeyRefusedAtTheOpen(t *testing.T) {
 		t.Fatal("registered the gone mailbox's key")
 	}
 }
+
+// The open's attempt registers the inherited key past the grace: its
+// mailbox may have been made afresh at an id with a tombstone, so the key
+// stays pending with the answer's time (stored by the step-2 write) and
+// is made current, every held token minted again, only once
+// freshMailboxWait has run after it.
+func TestRelayRotInheritedRegisteredAtTheOpenWaits(t *testing.T) {
+	io := newInheritedOpen(t, func(rw *rotWorld, k, _ string) { delete(rw.live, k) })
+	rs := ownRelayState(io.m)
+	if io.m.pendingMailbox() != io.p || rs.Pending.Created.IsZero() || !io.registered(io.p) {
+		t.Fatalf("after the open: pending %s, relay %+v", io.m.pendingMailbox(), rs)
+	}
+	answered := rs.Pending.Created
+	if err := io.m.ProcessBatch(context.Background(), &fakeCollector{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if io.m.pendingMailbox() != io.p {
+		t.Fatal("made current within the wait")
+	}
+	io.f.clock = answered.Add(freshMailboxWait)
+	if err := io.m.ProcessBatch(context.Background(), &fakeCollector{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	// Made current (and, the recovery's rotation having owed one, the
+	// next key after it).
+	if rs := ownRelayState(io.m); len(rs.Old) < 2 || rs.Old[1].Mailbox != io.p && rs.Mailbox != io.p {
+		t.Fatalf("not made current after the wait: %+v", rs)
+	}
+}

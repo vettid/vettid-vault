@@ -7,7 +7,8 @@ import (
 
 // A rotate that succeeds and a registration after it answered 201 (the
 // relay created the mailbox afresh after all): every held token is minted
-// again with iat at that time, never backdated (RELAY-PROTOCOL §6.10).
+// again, never backdated, once freshMailboxWait has run after that answer
+// (RELAY-PROTOCOL §6.10).
 func TestRelayRotRegisteredAfreshAfterTheRotate(t *testing.T) {
 	fx := newRotFx(t)
 	fx.w.rotate = []error{relayErr(503, "")}
@@ -23,13 +24,19 @@ func TestRelayRotRegisteredAfreshAfterTheRotate(t *testing.T) {
 	}
 	fx.setClk(fx.clk.Add(2 * time.Minute))
 	fx.batch()
+	answered := fx.clk
+	if pr := fx.pending(); fx.mailbox() == pmb || pr == nil || !pr.Created.Equal(answered) {
+		t.Fatal("made current before the wait after a mailbox created afresh")
+	}
+	fx.setClk(answered.Add(freshMailboxWait))
+	fx.batch()
 	if fx.mailbox() != pmb {
 		t.Fatalf("mailbox %s, want %s", fx.mailbox(), pmb)
 	}
 	fx.do(func(m *Manager) {
 		tok := m.st.Relay.Recipients["c1"].Standing
 		c, err := parseOwnToken(m, tok)
-		if tok == held || err != nil || !c.Iat.Equal(fx.clk.Truncate(time.Second)) {
+		if tok == held || err != nil || !c.Iat.Equal(fx.clk.Truncate(time.Second)) || c.Iat.Before(answered.Add(90*time.Second)) {
 			t.Fatalf("held token re-minted %v, iat %v (now %v) %v", tok != held, c.Iat, fx.clk, err)
 		}
 	})

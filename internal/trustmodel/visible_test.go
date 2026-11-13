@@ -213,6 +213,16 @@ func (w *World) rapidRotations(a, b PID) bool {
 // is refused quota_exceeded (§3.4.1 "The reconnect bound").
 const resHonestStaleQuota = "rapid rotations: an honest pair stale by quota_exceeded after 3 or more key changes, on either side or both, in quick succession (§3.4.1 Residuals, 0.88.2)"
 
+// resMissedGrace: a relay-key rotation's old mailbox ended (its grace, 14
+// days with GRACE14) with a message a peer deposited still in it, in a run
+// where a party was locked longer than U = 4 days at a stretch. The
+// liveness argument (§3.4.1, A3; §3.4.2 RK15) assumes each side present
+// every U <= 4 days, so every message in an old mailbox is collected
+// within its grace; M2's own bound (no lock longer than T = 14 days) is
+// looser and equals the grace. §3.4.2 RK14 states the outcome when both
+// sides' old mailboxes end (stale, relay_moved).
+const resMissedGrace = "an old mailbox's grace ended with a peer's message in it while a side was away longer than U (§3.4.1 A3; §3.4.2 RK14)"
+
 // noteLocked: time d passed; real parties locked through it add to their
 // stretch (M2).
 func (w *World) noteLocked(d int64) {
@@ -267,6 +277,22 @@ func (w *World) checkHonestStale() {
 				}
 				w.statWait("M2", a.ID, b.ID, strings.Join(refs, "; "))
 				w.violate("M2", "%s: an honest pair ends stale by quota_exceeded without 3 rotations in quick succession (%s)", pairName(w, a.ID, b.ID), strings.Join(refs, "; "))
+				continue
+			}
+			if w.fDue[pairKey(a.ID, b.ID)] {
+				// finding F applies to the pair (a vault and its device):
+				// the device exception, as I1 exempts it
+				w.exempt("M2", resDeviceF)
+				w.statWait("M2 (device F)", a.ID, b.ID, strings.Join(refs, "; "))
+				continue
+			}
+			if w.missedGrace && w.maxLock > 4*day {
+				// outside the liveness argument's A3: a mailbox's grace
+				// ended with a peer's message in it while a side was away
+				// longer than U (RK14 states the outcome when both sides'
+				// old mailboxes end: relay_moved)
+				w.exempt("M2", resMissedGrace)
+				w.statWait("M2 (missed-grace residual)", a.ID, b.ID, strings.Join(refs, "; "))
 				continue
 			}
 			w.statWait("M2", a.ID, b.ID, strings.Join(refs, "; "))

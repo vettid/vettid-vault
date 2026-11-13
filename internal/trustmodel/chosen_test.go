@@ -152,7 +152,7 @@ const tsWindow = 16 * day
 // with its ts kept (the S2 re-deposit of an hs.fin, built without one)
 // counts.
 func (w *World) noteAuth(q *Party, r *PeerRec, M *Msg) {
-	if q.Copy {
+	if q.Copy || !w.ch("S1PAUSE") {
 		return
 	}
 	if M.Kind == KInit && M.Epoch == 0 {
@@ -353,6 +353,12 @@ func (q *Party) followRelayThen(r *PeerRec, L []RLink, pos Pos, then func()) boo
 		r.Earlier = append(r.Earlier, Earlier{Key: l.Old, Cut: pos, Until: until})
 		r.RChain = append(r.RChain, l)
 		passed = append(passed, l.Old)
+		if by, ok := q.w.rlinkBy[l]; ok && !q.Copy && q.w.party(by.By).Copy {
+			// ground truth: Q follows the old copy's own relay rotation as
+			// P's (§3.4.1 Residuals, bullets 2 and 3), as followIK does
+			// for an identity link
+			q.w.markDead(q.ID, r.ID, resCopyRotated, "followed the copy's relay link")
+		}
 	}
 	r.Relay = L[len(L)-1].New
 	r.Toks = slices.DeleteFunc(r.Toks, func(t Token) bool { return t.Iss != r.Relay })
@@ -819,18 +825,29 @@ func (r *PeerRec) noteAccKey(M *Msg, sender Key) {
 // once Q has accepted, under that epoch or a later one, a message from a
 // relay key of P's later than m's sender.
 func (q *Party) n2(r *PeerRec, m *RMsg) bool {
+	ok, closed := q.n2Pass(r, m)
+	if closed {
+		q.w.stat("N2: pass closed (a later key accepted under this epoch or a later one)")
+	}
+	if ok {
+		q.w.stat("N2: " + kindName[m.P.Kind] + " passes the cut-off")
+	}
+	return ok
+}
+
+// n2Pass is n2 without side effects (steps14 asks it too); closed: the
+// pass had closed for the message's epoch.
+func (q *Party) n2Pass(r *PeerRec, m *RMsg) (ok, closed bool) {
 	M := m.P
 	if !q.w.ch("N2") || q.Device || r.Device {
-		return false
+		return false, false
 	}
 	ep, rk := msgEpoch(M), r.relayRank(m.Sender)
 	for _, a := range r.AccKeys {
 		if a.Ep >= ep && a.Rank > rk {
-			q.w.stat("N2: pass closed (a later key accepted under this epoch or a later one)")
-			return false
+			return false, true
 		}
 	}
-	ok := false
 	switch M.Kind {
 	case KConfirm:
 		ep := r.epoch(M.Epoch)
@@ -840,10 +857,7 @@ func (q *Party) n2(r *PeerRec, m *RMsg) bool {
 			ok = ok || (a.ID == M.HS && a.PeerIK == r.IK && M.Sig == a.PeerIK)
 		}
 	}
-	if ok {
-		q.w.stat("N2: " + kindName[M.Kind] + " passes the cut-off")
-	}
-	return ok
+	return ok, false
 }
 
 // refusedReconnect: RK10, a definite refusal of my reconnect hs.init.

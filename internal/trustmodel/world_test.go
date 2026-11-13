@@ -108,6 +108,7 @@ type World struct {
 	s1Pause     map[[2]PID][][2]int64       // (P, Q): S1's pause intervals (7.10 b)
 	revokedRC   map[[2]PID]bool             // (P, Q): P's rule U revoked reconnect tokens it issued to Q's earlier key
 	gapOpen     map[[2]PID]int64            // (P, Q): P ended the pair stale by S1 while Q waits (7.16.2), since
+	missedGrace bool                        // an old mailbox ended with a real peer's message in it (M2, resMissedGrace)
 	dedupeEnded map[[2]int]bool             // (party, inner id): its dedupe ended 60 days after a telling (RK14)
 }
 
@@ -611,6 +612,10 @@ func (p *Party) flush() {
 			continue // S1: held until Q's token for my current key arrives
 		}
 		if e.M.Kind == KUpdate {
+			if r.KeyFor == p.st.Relay && p.keyRank(e.Target) < 0 && e.Target != pendKey(p) {
+				e.Ended = true // acknowledged, and its target key is gone (deleted): nothing to announce
+				continue
+			}
 			if r.KeyFor == p.st.Relay && p.keyRank(e.Target) >= 0 {
 				e.Ended = true // the recipient has acknowledged: nothing to announce
 				continue

@@ -192,6 +192,10 @@ func (q *Party) steps14(r *PeerRec, m *RMsg, pos Pos) bool {
 			if !q.allFollowed(r, M.Rot) {
 				return false
 			}
+		case KConfirm, KFin:
+			if ok, _ := q.n2Pass(r, m); !ok {
+				return false // RK7: the pass lets it through to Table B
+			}
 		default:
 			return false
 		}

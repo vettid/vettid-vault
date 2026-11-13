@@ -231,6 +231,11 @@ func (r *Relay) advance() {
 					r.w.probeFate[m.P.Probe] = "deleted with the old mailbox"
 				}
 			}
+			for _, m := range b.msgs {
+				if o := r.w.keyOwner(k); o >= 0 && m.Actor != o && !r.w.party(m.Actor).Copy {
+					r.w.missedGrace = true // M2: outside A3 (resMissedGrace)
+				}
+			}
 			delete(r.boxes, k)
 			r.tomb[k] = b.deleteAt + freshWindow
 			r.w.waitGraceEnd(k)

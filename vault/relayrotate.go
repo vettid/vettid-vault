@@ -325,8 +325,9 @@ func (m *Manager) ownRelays() []Relay {
 // key to the current mailbox and every old one kept. An old key revokes
 // only during its grace (§3.4 (a)): not once RK14 step 1 has ended its
 // mailbox's collects or its stop is due (13 days after its anchor, before
-// the relay's grace ends). An old mailbox already gone (mailbox_unknown)
-// took its tokens with it.
+// the relay's grace ends). Skipping a stopped old key is safe only
+// because nothing deposited there after its stop is ever collected. An
+// old mailbox already gone (mailbox_unknown) took its tokens with it.
 func (m *Manager) revoke(ctx context.Context, kind, value string) error {
 	if !m.relayRotation() || len(m.st.Relay.Old) == 0 {
 		return m.relay.Revoke(ctx, kind, value)

@@ -908,26 +908,45 @@ var errRelayKeyUnanswered = errors.New("vault: the relay key's attempt got no de
 // bundle (§11.14.6 "A lost ok") then names the mailbox the attempt made
 // current, not the gone one. relayKeyAtUnlock makes no second attempt.
 // A key that stays pending, not refused, after it (no definite answer, a
-// retry_after still running) answers the unlock "retry" (code): the phone
-// unlocks again later, which spends no recovery attempt. A refused key
-// goes on as before (the refused state). Called in the unlock, with the
-// state read and the relay set, before the unlock's own write; the
-// attempt's writes are those of any attempt (the anchor's own write, the
-// second write), under the DEK the unlock opened (persist).
-func (m *Manager) relayKeyBeforeBundle(ctx context.Context) (string, error) {
+// retry_after or freshMailboxWait still running) answers the unlock
+// "retry" (code), with the time after which another attempt may be made
+// (wait): the phone unlocks again then, which spends no recovery attempt.
+// A refused key goes on as before (the refused state).
+//
+// "retry" only while nothing is stored: an attempt that wrote the state
+// (the anchor's own write, a stop on mailbox_unknown, a retry_after, the
+// answer of a mailbox made afresh) is answered ok, its bundle naming the
+// current mailbox, so that nothing the unlock did is stored without its
+// ok (the unlock's events, the host's reports); Start then retries. The
+// attempt's writes are those of any attempt, made through persist under
+// the DEK the unlock opened.
+func (m *Manager) relayKeyBeforeBundle(ctx context.Context) (code string, wait time.Duration, err error) {
 	pr := m.st.Relay.Pending
 	if !m.relayRotation() || pr == nil || m.st.Relay.Collect.Stopped.IsZero() {
-		return "", nil
+		return "", 0, nil
 	}
+	seq := m.st.StateSeq
 	m.relayKeyStep(ctx, true)
 	m.rk.unlockTried = true
 	if m.st == nil || m.locked {
-		return CodeRetry, ErrSplitBrain
+		return CodeRetry, 0, ErrSplitBrain
 	}
-	if pr := m.st.Relay.Pending; pr != nil && pr.Refused == "" && !m.st.Relay.Collect.Stopped.IsZero() {
-		return CodeRetry, errRelayKeyUnanswered
+	pr = m.st.Relay.Pending
+	if pr == nil || pr.Refused != "" || m.st.Relay.Collect.Stopped.IsZero() || m.st.StateSeq != seq {
+		return "", 0, nil
 	}
-	return "", nil
+	now := m.now()
+	switch {
+	case now.Before(pr.RetryAfter):
+		wait = pr.RetryAfter.Sub(now)
+	case !pr.Created.IsZero() && now.Before(pr.Created.Add(freshMailboxWait)):
+		wait = pr.Created.Add(freshMailboxWait).Sub(now)
+	case now.Before(m.rk.next):
+		wait = m.rk.next.Sub(now)
+	default:
+		wait = relayRetryWait(max(m.rk.fails, 1))
+	}
+	return CodeRetry, wait, errRelayKeyUnanswered
 }
 
 // relayMailboxUnknown is the collect loop's mailbox_unknown on the current

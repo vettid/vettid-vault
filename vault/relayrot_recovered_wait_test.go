@@ -7,6 +7,12 @@ import (
 	"encoding/json"
 	"testing"
 	"time"
+
+	"github.com/vettid/vettid-relay/relayauth"
+	"github.com/vettid/vettid-relay/relayclient"
+
+	"github.com/vettid/vettid-vault/vms/handshake"
+	"github.com/vettid/vettid-vault/vms/strictjson"
 )
 
 // The recovered phone's wait (recoveryWaits, a reading of this release):
@@ -90,15 +96,22 @@ func TestRelayRotInheritedUnansweredAtTheOpenIsNotHeldByThePhone(t *testing.T) {
 	io.rw.mu.Lock()
 	io.rw.register = []error{relayErr(503, "")}
 	io.rw.mu.Unlock()
-	if m, uo := io.f.phoneUnlockOut(); m != nil || uo.OK || uo.Code != CodeRetry || len(uo.VaultBundle) != 0 {
+	if m, uo := io.f.phoneUnlockOut(); m != nil || uo.OK || uo.Code != CodeRetry || len(uo.VaultBundle) != 0 ||
+		uo.RetryAfter < 0 || uo.RetryAfter > time.Minute {
 		t.Fatalf("unlock with the relay failing: %+v", uo)
 	}
 	// Second try: the relay answers the inherited key's registration,
 	// which may have made its mailbox afresh: the key waits
-	// freshMailboxWait, and the unlock is answered retry again.
+	// freshMailboxWait. That answer's time is stored, so the unlock is
+	// answered ok (nothing it stored goes without its ok), its bundle
+	// still naming the gone mailbox.
 	io.f.clock = io.f.clock.Add(time.Hour)
-	if m, uo := io.f.phoneUnlockOut(); m != nil || uo.OK || uo.Code != CodeRetry {
-		t.Fatalf("unlock within the wait of a mailbox made afresh: %+v", uo)
+	m, uo := io.f.phoneUnlock(t)
+	if rs := ownRelayState(m); rs.Pending == nil || rs.Pending.Created.IsZero() || !bundleNames(uo.VaultBundle, io.k) {
+		t.Fatalf("the second unlock: %+v", rs)
+	}
+	if err := m.Lock(context.Background()); err != nil {
+		t.Fatal(err)
 	}
 	// Third try, after the wait: the key is made current; the next key
 	// owed, stored by its second write, gets a 503. The attempt is made
@@ -107,7 +120,7 @@ func TestRelayRotInheritedUnansweredAtTheOpenIsNotHeldByThePhone(t *testing.T) {
 	io.rw.rotate = []error{nil, relayErr(503, "")}
 	io.rw.mu.Unlock()
 	io.f.clock = io.f.clock.Add(freshMailboxWait)
-	m, uo := io.f.phoneUnlock(t)
+	m, uo = io.f.phoneUnlock(t)
 	defer m.Crash()
 	rs = ownRelayState(m)
 	if rs.Mailbox != io.p || rs.Pending == nil || !io.registered(io.p) {
@@ -127,7 +140,110 @@ func TestRelayRotInheritedUnansweredAtTheOpenIsNotHeldByThePhone(t *testing.T) {
 	if io.f.used() != used {
 		t.Fatalf("the unlocks spent recovery attempts: %d, before %d", io.f.used(), used)
 	}
+	checkPhoneBundle(t, m, uo)
+	// (pairRecoveredPhone stands in for the phone's first handshake: it
+	// writes the device record directly; the bundle and the token the
+	// phone would pair with are checked against the vault above.)
 	pairRecoveredPhone(t, m, io.f.phone)
+}
+
+// checkPhoneBundle checks a lost-ok unlock's bundle and token against the
+// vault's current relay key and mailbox: the address the phone's first
+// hs.init goes to, and the token it deposits with.
+func checkPhoneBundle(t *testing.T, m *Manager, uo *AltUnlockOutcome) {
+	t.Helper()
+	bo, err := strictjson.ParseObject(uo.VaultBundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pr, err := handshake.ParsePrincipal(bo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	cur, pub := m.st.Relay.Mailbox, pubOf(m.keys.relay)
+	if pr.Relay.Mailbox != cur || !bytes.Equal(pr.Relay.PK, pub) || pr.Relay.URL != m.st.Relay.URL {
+		t.Fatalf("bundle relay %+v, vault's %s", pr.Relay, cur)
+	}
+	c, err := relayauth.ParseToken(uo.Token, pub)
+	if err != nil || c.Iss != cur || c.Aud != m.relayBase() {
+		t.Fatalf("token for %q (aud %q): %v; vault's mailbox %s", c.Iss, c.Aud, err, cur)
+	}
+}
+
+// A lost-ok unlock that confirms a release move makes no relay-key
+// attempt before its bundle: only its ok completes the move (the old
+// header deleted), so it is answered ok, with the vault's address as it
+// stands; Start's attempt follows.
+func TestRelayRotPhoneUnlockConfirmingAMoveIsAnsweredOK(t *testing.T) {
+	io := newInheritedOpen(t, func(rw *rotWorld, k, _ string) {
+		delete(rw.live, k)
+		rw.register = []error{relayErr(503, "")}
+	})
+	io.m.mu.Lock()
+	io.m.st.ReleaseMove = &ReleaseMove{To: testRelease.PCR0, ToRelease: testRelease.Number, From: "earlier-release", ApprovedBy: "dev1"}
+	io.m.dirty = true
+	if err := io.m.persist(context.Background(), false); err != nil {
+		t.Fatal(err)
+	}
+	io.m.mu.Unlock()
+	if err := io.m.Lock(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	io.rw.mu.Lock()
+	io.rw.register = []error{relayErr(503, "")}
+	io.rw.mu.Unlock()
+	rot0, reg0 := io.rw.log()
+	m, uo := io.f.phoneUnlock(t)
+	defer m.Crash()
+	if rot, reg := io.rw.log(); len(rot) != len(rot0) || len(reg) != len(reg0) {
+		t.Fatalf("an attempt before the bundle: %v %v", rot[len(rot0):], reg[len(reg0):])
+	}
+	m.mu.Lock()
+	move := m.st.ReleaseMove
+	m.mu.Unlock()
+	if move != nil || !bundleNames(uo.VaultBundle, io.k) {
+		t.Fatalf("move %+v", move)
+	}
+	if err := m.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if rot, _ := io.rw.log(); len(rot) == len(rot0) {
+		t.Fatal("Start made no attempt")
+	}
+}
+
+// A lost-ok unlock while a retry_after runs makes no attempt and writes
+// nothing: it is answered retry, with the time the retry_after has left.
+func TestRelayRotPhoneUnlockRetryCarriesTheRetryAfter(t *testing.T) {
+	io := newInheritedOpen(t, func(rw *rotWorld, k, _ string) {
+		delete(rw.live, k)
+		rw.register = []error{&relayclient.Error{Status: 429, Code: "rate_limited", RetryAfter: 600}}
+	})
+	if err := io.m.Lock(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	// The phone's first unlock: its attempt gets the 429 again, whose
+	// retry_after is stored with the key.
+	io.rw.mu.Lock()
+	io.rw.register = []error{&relayclient.Error{Status: 429, Code: "rate_limited", RetryAfter: 600}}
+	io.rw.mu.Unlock()
+	m, _ := io.f.phoneUnlock(t) // that attempt stored the retry_after: answered ok
+	m.mu.Lock()
+	ra := m.st.Relay.Pending.RetryAfter
+	m.mu.Unlock()
+	if ra.IsZero() {
+		t.Fatal("no retry_after stored")
+	}
+	if err := m.Lock(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	io.f.clock = io.f.clock.Add(time.Minute)
+	m, uo := io.f.phoneUnlockOut()
+	if m != nil || uo.Code != CodeRetry || uo.RetryAfter != ra.Sub(io.f.clock) {
+		t.Fatalf("unlock while the retry_after runs: %+v (left %v)", uo, ra.Sub(io.f.clock))
+	}
 }
 
 // The same at the open's own run: its sooner retries complete the

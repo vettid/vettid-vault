@@ -493,6 +493,7 @@ func (m *Manager) releaseRules(ctx context.Context, p AltUnlockParams, key *Unlo
 		old := pending.From
 		st.ReleaseMove = nil
 		st.SealedRelease = own.PCR0
+		m.moveDecided = true
 		mm, o := m.resume(ctx, p, out, now)
 		if o.OK && old != "" && old != own.PCR0 {
 			deleteHeader(ctx, p.Store, p.VaultID, old)
@@ -510,6 +511,7 @@ func (m *Manager) releaseRules(ctx context.Context, p AltUnlockParams, key *Unlo
 				key.Attestation = nb
 				target := pending.To
 				st.ReleaseMove = nil
+				m.moveDecided = true
 				out.Update = &UpdateOutcome{To: own.PCR0, Result: UpdateAbandoned}
 				mm, o := m.resume(ctx, p, out, now)
 				if o.OK {
@@ -782,11 +784,19 @@ func (m *Manager) resume(ctx context.Context, p AltUnlockParams, out *AltUnlockO
 	} else if m.limits, err = m.relay.Register(ctx); err != nil {
 		return fail(CodeRetry, err)
 	}
-	if !p.pinOnly && m.recoveredInvite(p.DeviceIK) != nil {
-		if code, err := m.relayKeyBeforeBundle(ctx); code != "" {
+	// §3.4, §11.14.6 "A lost ok": the recovered phone's bundle names the
+	// mailbox the unlock's relay-key attempt made current. Not in an
+	// unlock whose answer carries what only an ok reports (a release move
+	// confirmed or abandoned, an update refused, a recovery cancelled, a
+	// DEK replacement promoted, completed or dropped): Start's attempt
+	// covers it, and the phone's next unlock carries the new address.
+	if !p.pinOnly && m.recoveredInvite(p.DeviceIK) != nil && !m.moveDecided && out.Update == nil && !out.RecoveryCancelled &&
+		m.repl == nil && !m.nextCleared {
+		if code, wait, err := m.relayKeyBeforeBundle(ctx); code != "" {
 			if m.st == nil {
 				return nil, out.fail(code, err) // zeroized (a split brain)
 			}
+			out.RetryAfter = wait
 			return fail(code, err)
 		}
 	}

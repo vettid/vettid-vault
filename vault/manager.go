@@ -336,6 +336,9 @@ type Manager struct {
 	// rk is the runtime of the vault's own relay-key rotation (§3.4;
 	// relayrotate.go).
 	rk relayKeyRun
+	// moveDecided: this unlock confirms or abandons a release move, which
+	// only its ok answer completes (the old header deleted, moved).
+	moveDecided bool
 
 	sessions map[string]*handshake.Keyring
 	awaiting map[string]*handshake.Responder

@@ -870,11 +870,28 @@ func (m *Manager) peer(id string) *Peer {
 // become a request that awaits approval (0.10.3).
 func (m *Manager) handleFin(ctx context.Context, id string, raw []byte, sender ed25519.PublicKey, now time.Time) disposition {
 	aw, r := m.st.Awaiting[id], m.awaiting[id]
-	if aw.New == nil && m.tableAHandshake(m.peer(aw.PeerID), sender, now) {
+	// §3.4.2 RK7: an hs.fin to this open answer from an earlier key after
+	// its cut-off passes to Table B when the answer's pinned ik is the
+	// current one and its pass is not closed; sig_I must then verify.
+	rk7 := m.rk7FinPasses(m.peer(aw.PeerID), aw, sender)
+	if aw.New == nil && !rk7 && m.tableAHandshake(m.peer(aw.PeerID), sender, now) {
 		return ackAfterFlush // §3.4.1 Table A: refused, the answer kept (S2)
 	}
-	fr, err := r.HandleFin(raw, m.unpinnedSender(aw.New == nil, aw.PeerID, r.CollectSender(), sender), now)
+	if rk7 && !m.peer(aw.PeerID).keepsRelayKey(r.CollectSender()) {
+		m.refusePeerKey(m.peer(aw.PeerID), "superseded_relay", now)
+		return ackAfterFlush
+	}
+	from := m.unpinnedSender(aw.New == nil, aw.PeerID, r.CollectSender(), sender)
+	if rk7 {
+		from = r.CollectSender() // both keys the vault keeps for the peer; acceptFrom judged the sender
+	}
+	fr, err := r.HandleFin(raw, from, now)
 	switch {
+	case rk7 && err != nil && !errors.Is(err, handshake.ErrType) && !errors.Is(err, handshake.ErrSASCommit):
+		// sig_I does not verify (or the hs.fin is otherwise bad): RK7's
+		// condition fails, so Table A's row refuses it, the answer kept.
+		m.refusePeerKey(m.peer(aw.PeerID), "superseded_relay", now)
+		return ackAfterFlush
 	case errors.Is(err, handshake.ErrType):
 		// A message in the new epoch that arrived before hs.fin: the epoch
 		// is not established yet, so leave it unacked for redelivery.
@@ -906,8 +923,10 @@ func (m *Manager) handleFin(ctx context.Context, id string, raw []byte, sender e
 	if !p.suspended() {
 		m.noteFeatures(p, fr.Inner.Features) // 0.86.0, §10.8
 	}
+	fid := fr.Epoch.ID()
 	if aw.Reconnect != nil {
 		m.finishReconnect(p, aw, fr, now)
+		m.rk7Established(p, fid[:], sender)
 		return ackAfterFlush
 	}
 	if aw.Replaced {
@@ -929,6 +948,7 @@ func (m *Manager) handleFin(ctx context.Context, id string, raw []byte, sender e
 	m.responderEstablish(p, aw, fr, now, func(o actOpts) {
 		m.activate(p, fr.Epoch, aw.Purpose, aw.Issued, "", chainOr(aw.OwnChain, len(m.st.Rotations)), o, now)
 	})
+	m.rk7Established(p, fid[:], sender)
 	return ackAfterFlush
 }
 

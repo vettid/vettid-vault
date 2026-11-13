@@ -85,7 +85,7 @@ func TestRelayFollowRecordsEarlierKeysAndCutoffs(t *testing.T) {
 		{k0, "m-0099", relayEarlierBefore},
 		{k1, "m-0050", relayEarlierBefore},
 		{k0, "m-0101", relayEarlierAfter},
-		{k1, "m-0100", relayEarlierAfter}, // the cut-off itself is not before it
+		{k1, "m-0100", relayEarlierBefore}, // the cut-off itself counts as before it (§3.4.2 RK8)
 		{rkKey(0x44), "m-0001", relayForeign},
 	} {
 		m.msgID = c.id
@@ -147,7 +147,7 @@ func TestRelayCutoffBeforeAndAfter(t *testing.T) {
 		before  bool
 	}{
 		{"same mailbox, smaller msg_id, later deposited_at", at.Add(time.Hour), "01JB000000000000000000000A", "own", true},
-		{"same mailbox, same msg_id", at, "01JB000000000000000000000M", "own", false},
+		{"same mailbox, same msg_id (the cut-off itself, RK8)", at, "01JB000000000000000000000M", "own", true},
 		{"same mailbox, larger msg_id, earlier deposited_at", at.Add(-time.Hour), "01JB000000000000000000000Z", "own", false},
 		{"same mailbox, no msg_id", at.Add(-time.Hour), "", "own", false},
 		{"other mailbox, earlier", at.Add(-time.Second), "01JB00000000000000000000ZZ", "old", true},

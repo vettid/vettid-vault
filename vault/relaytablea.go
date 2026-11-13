@@ -24,18 +24,26 @@ import (
 //     (ignored; R29-K9 is still judged). A refused hs.resp or hs.fin keeps
 //     its handshake (S2).
 //
-// Not here yet: §3.4.2 RK7 (hs.confirm and an hs.fin to an open answer pass
-// the cut-off) and RK8 (a reconnect carrying relay links); until they are
-// built those are refused (superseded_relay) after the cut-off.
+// Between two vaults the row "Earlier, after its cut-off" has §3.4.2's
+// exceptions: RK7 (an hs.confirm here, an hs.fin to an open answer in
+// handleFin; relayrk7.go) and RK8 (a reconnect hs.init or hs.resp whose
+// relay links connect its sender to the key it announces; relayrk8.go).
 
 // tableARefuses applies Table A to a session-mode message from p deposited
 // with sender (dispatch), after step 3. It reports whether the message was
 // refused (acked, dropped, audited drop.peer_key superseded_relay).
-func (m *Manager) tableARefuses(p *Peer, in *envelope.Inner, sender ed25519.PublicKey, now time.Time) bool {
+func (m *Manager) tableARefuses(p *Peer, in *envelope.Inner, ep *handshake.Epoch, sender ed25519.PublicKey, now time.Time) bool {
 	if m.relayStateOf(p, sender) != relayEarlierAfter {
 		return false
 	}
 	switch in.Type {
+	case handshake.TypeConfirm:
+		if ep != nil {
+			id := ep.ID()
+			if m.rk7ConfirmPasses(p, id[:], sender) {
+				return false // RK7: passed on (beforeAccept confirms the epoch)
+			}
+		}
 	case peerwire.TypeRelayAddressUpdate, tokenIssuedType:
 		return false // relay.token.issued: its tokens only (dispatch, after beforeAccept)
 	case "identity.rotate":

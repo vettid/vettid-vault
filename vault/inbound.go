@@ -470,7 +470,7 @@ func (m *Manager) dispatch(ctx context.Context, p *Peer, in *envelope.Inner, ep 
 	if m.evidenceFirst(p, in, now) {
 		return ackAfterFlush
 	}
-	if m.opt.RelayKeyRotation && m.tableARefuses(p, in, sender, now) {
+	if m.opt.RelayKeyRotation && m.tableARefuses(p, in, ep, sender, now) {
 		return ackAfterFlush // §3.4.1 acceptFrom step 4, Table A: an earlier key after its cut-off
 	}
 	if m.ruleTDefers(p, in, now) {
@@ -478,6 +478,10 @@ func (m *Manager) dispatch(ctx context.Context, p *Peer, in *envelope.Inner, ep 
 	}
 	if m.beforeAccept(p, ep, in, now) {
 		return ackAfterFlush
+	}
+	if ep != nil {
+		id := ep.ID()
+		m.rk7Accepted(p, id[:], sender) // §3.4.2 RK7: accepted under ep from sender
 	}
 	if m.opt.RelayKeyRotation && in.Type == tokenIssuedType && m.relayStateOf(p, sender) == relayEarlierAfter {
 		// §3.4.1 Table A, "Earlier, after its cut-off": relay.token.issued

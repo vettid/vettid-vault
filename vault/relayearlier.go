@@ -107,14 +107,16 @@ func (m *Manager) relayStateOf(p *Peer, sender []byte) relayKeyState {
 // "Cut-off"): in the mailbox the cut-off was collected from, its msg_id
 // is smaller than the cut-off's; in another mailbox, its deposited_at is
 // not later than the cut-off's (the residual "same deposited_at" counts
-// as before). A position that is not known (no msg_id) is after: fail
-// closed.
+// as before). The message at the cut-off itself counts as before it
+// (§3.4.2 RK8: the hs.fin or hs.resp that made the follow "is the
+// cut-off, and it counts as before it"; an update is never judged again).
+// A position that is not known (no msg_id) is after: fail closed.
 func (e *EarlierRelay) beforeCutoff(at time.Time, msgID, mailbox string) bool {
 	if mailbox == e.CutMailbox {
 		if msgID == "" || e.CutMsg == "" {
 			return false
 		}
-		return msgIDBefore(msgID, e.CutMsg)
+		return msgID == e.CutMsg || msgIDBefore(msgID, e.CutMsg)
 	}
 	if at.IsZero() || e.CutAt.IsZero() {
 		return false
@@ -213,6 +215,7 @@ func (m *Manager) pruneEarlierRelays(now time.Time) {
 				p.EarlierRelays = nil
 			}
 			pruneRelaySeen(p)
+			pruneRelayClosures(p)
 			m.dirty = true
 		}
 	}

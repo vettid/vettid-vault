@@ -204,12 +204,15 @@ func TestTableAEarlierHsRespKeepsTheHandshake(t *testing.T) {
 	}
 }
 
-// An hs.fin to side 0's answer: after the cut-off refused
-// (superseded_relay) with the answer kept; before it, established.
+// An hs.fin to side 0's answer that §3.4.2 RK7 does not pass (the answer
+// pinned an ik the hs.init's links reach, not the current one): after the
+// cut-off refused (superseded_relay) with the answer kept; before it,
+// established.
 func TestTableAEarlierHsFinKeepsTheAnswer(t *testing.T) {
 	f := newR29Fx(t)
 	f.longTokens()
-	f.rekey(1)
+	f.rotate(1) // its rekey carries the link; the answer pins the new ik
+	f.lose(1, 0, kRotate)
 	if f.deliver(1, 0, kHSInit) != 1 || f.deliver(0, 1, kHSResp) != 1 {
 		t.Fatal("setup: no rekey")
 	}

@@ -213,19 +213,23 @@ func (w *World) rapidRotations(a, b PID) bool {
 // is refused quota_exceeded (§3.4.1 "The reconnect bound").
 const resHonestStaleQuota = "rapid rotations: an honest pair stale by quota_exceeded after 3 or more key changes, on either side or both, in quick succession (§3.4.1 Residuals, 0.88.2)"
 
+// presenceU is A3's U: each vault is present at least every 4 days.
+const presenceU = 4 * day
+
 // resMissedGrace: one side of the pair is a vault whose old mailbox ended
-// at its grace (14 days with GRACE14) with the other side's message still
-// in it, a message the relay had given the vault and the vault had not
-// acked, while the vault had been locked, at a stretch, for longer than
-// the grace less U (A3's 4 days). That is outside A3 (each side present
-// every U): the vault was present for less than one U of the grace. The
-// outcome is §3.4.1's residual "Both sides' old mailboxes end" (and "Both
-// sides rotated, and X cannot resend its update"). Every pair it covers
-// at 10,000 runs is a vault that collected the peer's update minutes
-// after it arrived, crashed before the write, and stayed locked for the
-// rest of the grace. (The threshold is not the grace itself: M2 is not
-// checked at all in a run with a lock longer than T = 14 days, the grace.)
-const resMissedGrace = "a vault given the peer's message, not acking it, and locked for all but less than U of the grace when its old mailbox ended: outside A3 (§3.4.1 Residuals, both sides' old mailboxes end)"
+// at its grace with the other side's message still in it, a message the
+// relay had given the vault and the vault had not acked, while the vault
+// had been locked, at a stretch, for longer than the grace less U (and
+// never less than U). The vault was present for less than one U of the
+// grace: a lock longer than A3 allows, which §3.4.1 "Liveness between
+// honest vaults" lists among the cases that end stale instead of
+// converging ("any lock longer than A3 allows", VAULT-MESSAGING 0.90.3).
+// Every pair it covers at 10,000 runs is a vault that collected the
+// peer's update minutes after it arrived, crashed before the write, and
+// stayed locked for the rest of the grace. (The threshold is not the grace
+// itself: M2 is not checked at all in a run with a lock longer than T =
+// 14 days, the grace with GRACE14.)
+const resMissedGrace = "a vault given the peer's message, not acking it, and locked for all but less than U of the grace when its old mailbox ended: a lock longer than A3 allows (§3.4.1 Liveness between honest vaults)"
 
 // missedGraceFor: resMissedGrace applies to the pair (a, b).
 func (w *World) missedGraceFor(a, b PID) bool {
@@ -236,7 +240,7 @@ func (w *World) missedGraceFor(a, b PID) bool {
 		} else if g.Owner != b {
 			continue
 		}
-		if g.Lock > w.grace()-4*day && slices.Contains(g.From, other) {
+		if g.Lock > max(w.grace()-presenceU, presenceU) && slices.Contains(g.From, other) {
 			return true
 		}
 	}
@@ -307,10 +311,10 @@ func (w *World) checkHonestStale() {
 				continue
 			}
 			if w.missedGraceFor(a.ID, b.ID) {
-				// outside A3: a vault of the pair, given the other's
-				// message and not acking it, was locked for all but less
-				// than U of the grace when its old mailbox ended (§3.4.1
-				// Residuals: both sides' old mailboxes end)
+				// a lock longer than A3 allows: a vault of the pair, given
+				// the other's message and not acking it, was locked for
+				// all but less than U of the grace when its old mailbox
+				// ended (§3.4.1 "Liveness between honest vaults")
 				w.exempt("M2", resMissedGrace)
 				w.statWait("M2 (missed-grace residual)", a.ID, b.ID, strings.Join(refs, "; "))
 				continue

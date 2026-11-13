@@ -796,7 +796,10 @@ func (m *Manager) resume(ctx context.Context, p AltUnlockParams, out *AltUnlockO
 			if m.st == nil {
 				return nil, out.fail(code, err) // zeroized (a split brain)
 			}
+			// The floors the phone keeps from answers (§11.4, §13.2): what the
+			// attempt wrote, as any answer after a write carries it.
 			out.RetryAfter = wait
+			out.StateSeq, out.HeaderSeq = m.st.StateSeq, m.hdr.HeaderSeq
 			return fail(code, err)
 		}
 	}

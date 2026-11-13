@@ -683,8 +683,9 @@ func retryAfterOf(err error) time.Duration {
 // been created afresh, at an id that may carry a tombstone (RELAY-PROTOCOL
 // §6.10): every registration past the grace that succeeds (a 201, or a 200
 // that may follow this vault's own 201 whose answer or record was lost),
-// and a 201 to the registration after a rotate. byRotate: a refusal was
-// the rotate's.
+// and a 201 to the registration after a rotate. byRotate: the answer was
+// the rotate's (a refusal of it, or its success, after which a created
+// mailbox is told by a 201 itself).
 func (m *Manager) relayKeyCall(ctx context.Context) (out relayOutcome, created, byRotate bool, err error) {
 	rot, ok := m.relay.(RelayRotator)
 	pending, ok2 := m.pendingRelayClient().(RelayRotator)
@@ -700,7 +701,7 @@ func (m *Manager) relayKeyCall(ctx context.Context) (out relayOutcome, created, 
 		if lim, c, rerr := pending.RegisterCreated(ctx); rerr == nil {
 			m.limits, created = lim, c
 		}
-		return relayDone, created, false, nil
+		return relayDone, created, true, nil
 	}
 	if RelayCode(err) != CodeMailboxUnknown {
 		if ctx.Err() == nil && definiteRefusal(err) {
@@ -730,7 +731,18 @@ func (m *Manager) relayKeyCall(ctx context.Context) (out relayOutcome, created, 
 // seconds is never earlier. The extra second covers iat's truncation to
 // whole seconds. Minting at once with a later iat would not do: the relay
 // checks iat <= now strictly (RELAY-PROTOCOL §5.3 step 5).
+//
+// It assumes the vault's clock is not behind the relay's by more than the
+// margin it leaves: the second, plus however long the answer came after
+// the deletion. RELAY-PROTOCOL §4.1's freshness window bounds the skew of
+// a signed request only to 90 seconds, so a vault clock behind the
+// relay's within that window could still mint too early.
 const freshMailboxWait = 91 * time.Second
+
+// freshWaitRuns reports whether pr waits for its mailbox made afresh.
+func (m *Manager) freshWaitRuns(pr *PendingRelay) bool {
+	return pr != nil && !pr.Created.IsZero() && m.now().Before(pr.Created.Add(freshMailboxWait))
+}
 
 // relayKeyStep completes a pending relay key after a state write: at the
 // unlock (one attempt; the unlock goes on whatever its answer), after the
@@ -789,7 +801,7 @@ func (m *Manager) relayKeyAttempt(ctx context.Context, atUnlock bool) bool {
 		// The sooner retries' wait (full jitter) runs: no attempt may be
 		// made, before a collect either (beforeCollect).
 		return false
-	case !pr.Created.IsZero() && now.Before(pr.Created.Add(freshMailboxWait)):
+	case m.freshWaitRuns(pr):
 		return false // the wait after a mailbox created afresh, at an unlock too
 	}
 	// §3.4.2 RK14 step 1: the anchor, in a write of its own just before
@@ -813,7 +825,11 @@ func (m *Manager) relayKeyAttempt(ctx context.Context, atUnlock bool) bool {
 	out, created, byRotate, err := m.relayKeyCall(ctx)
 	switch out {
 	case relayDone:
-		if created && pr.Created.IsZero() {
+		if created && (pr.Created.IsZero() || byRotate) {
+			// (A 201 after a rotate, the wait already stored: the mailbox
+			// was made afresh again, and the wait starts again. Past the
+			// grace a registration cannot tell a 200 from a 201, so a
+			// stored wait stands there.)
 			// A mailbox created afresh: its tokens wait (freshMailboxWait),
 			// the time of the answer stored with the key, in a write of its
 			// own, so that a lock or a restart waits too. The key stays
@@ -884,7 +900,8 @@ func (m *Manager) relayKeyFailed(now time.Time) {
 // unlock's attempt), and audits identity.rotation_failed when this
 // unlock's own attempt does not complete it: it fails, gets no answer, or
 // is not made because a retry_after still runs. A key that waits for the
-// recovered phone (recoveryWaits) is not audited: nothing failed.
+// recovered phone (recoveryWaits), or for its mailbox made afresh
+// (freshMailboxWait), is not audited: the relay has not failed it.
 func (m *Manager) relayKeyAtUnlock(ctx context.Context) {
 	if !m.relayRotation() {
 		return
@@ -892,7 +909,8 @@ func (m *Manager) relayKeyAtUnlock(ctx context.Context) {
 	if !m.rk.unlockTried { // made before the recovered phone's bundle
 		m.relayKeyStep(ctx, true)
 	}
-	if m.st == nil || m.rk.left == "" || m.st.Relay.Pending == nil || m.pendingMailbox() != m.rk.left || m.recoveryWaits(m.st.Relay.Pending) {
+	if m.st == nil || m.rk.left == "" || m.st.Relay.Pending == nil || m.pendingMailbox() != m.rk.left || m.recoveryWaits(m.st.Relay.Pending) ||
+		m.freshWaitRuns(m.st.Relay.Pending) {
 		return
 	}
 	m.relayKeyFailed(m.now())
@@ -910,36 +928,35 @@ var errRelayKeyUnanswered = errors.New("vault: the relay key's attempt got no de
 // A key that stays pending, not refused, after it (no definite answer, a
 // retry_after or freshMailboxWait still running) answers the unlock
 // "retry" (code), with the time after which another attempt may be made
-// (wait): the phone unlocks again then, which spends no recovery attempt.
-// A refused key goes on as before (the refused state).
+// (wait): an ok would hand the phone the gone mailbox again and spend one
+// of its tries; a retry spends nothing. A refused key goes on as before
+// (the refused state).
 //
-// "retry" only while nothing is stored: an attempt that wrote the state
-// (the anchor's own write, a stop on mailbox_unknown, a retry_after, the
-// answer of a mailbox made afresh) is answered ok, its bundle naming the
-// current mailbox, so that nothing the unlock did is stored without its
-// ok (the unlock's events, the host's reports); Start then retries. The
-// attempt's writes are those of any attempt, made through persist under
-// the DEK the unlock opened.
+// The attempt may have written the state (the anchor's own write, a stop,
+// a retry_after, the answer of a mailbox made afresh) through persist,
+// under the DEK the unlock opened. The unlocks that would store what
+// only their ok completes make no attempt here (resume); what is left
+// (the unlocked report, the app key and name reports) recurs at every
+// unlock, and the retry locks the vault again.
 func (m *Manager) relayKeyBeforeBundle(ctx context.Context) (code string, wait time.Duration, err error) {
 	pr := m.st.Relay.Pending
 	if !m.relayRotation() || pr == nil || m.st.Relay.Collect.Stopped.IsZero() {
 		return "", 0, nil
 	}
-	seq := m.st.StateSeq
 	m.relayKeyStep(ctx, true)
 	m.rk.unlockTried = true
 	if m.st == nil || m.locked {
 		return CodeRetry, 0, ErrSplitBrain
 	}
 	pr = m.st.Relay.Pending
-	if pr == nil || pr.Refused != "" || m.st.Relay.Collect.Stopped.IsZero() || m.st.StateSeq != seq {
+	if pr == nil || pr.Refused != "" || m.st.Relay.Collect.Stopped.IsZero() {
 		return "", 0, nil
 	}
 	now := m.now()
 	switch {
 	case now.Before(pr.RetryAfter):
 		wait = pr.RetryAfter.Sub(now)
-	case !pr.Created.IsZero() && now.Before(pr.Created.Add(freshMailboxWait)):
+	case m.freshWaitRuns(pr):
 		wait = pr.Created.Add(freshMailboxWait).Sub(now)
 	case now.Before(m.rk.next):
 		wait = m.rk.next.Sub(now)

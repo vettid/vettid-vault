@@ -65,9 +65,8 @@ func (m *Manager) inheritedKeyAtOpen(ctx context.Context, p RecoveryOpenParams, 
 		return
 	}
 	if !pr.Created.IsZero() && now.Before(pr.Created.Add(freshMailboxWait)) {
-		// The wait after a mailbox created afresh runs: no attempt, as
-		// for a retry_after.
-		m.relayKeyFailedAt(now)
+		// The wait after a mailbox created afresh runs: no attempt, and
+		// nothing audited (the relay answered; nothing failed).
 		return
 	}
 	hadAnchor := !m.st.Relay.Anchor.IsZero()
@@ -77,7 +76,7 @@ func (m *Manager) inheritedKeyAtOpen(ctx context.Context, p RecoveryOpenParams, 
 	}
 	m.dirty = true
 	switch {
-	case out == relayDone && created && pr.Created.IsZero():
+	case out == relayDone && created && (pr.Created.IsZero() || byRotate):
 		// A mailbox created afresh: the key stays pending until
 		// freshMailboxWait has run (relayKeyAttempt), the answer's time
 		// stored with it by the step-2 write; the recovery's rotation owes

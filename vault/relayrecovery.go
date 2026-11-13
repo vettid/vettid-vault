@@ -20,7 +20,15 @@ import (
 //     as pending;
 //   - no definite answer: the key stays pending, and the recovery's
 //     rotation owes a relay-key rotation, as any rotation made while a key
-//     is pending;
+//     is pending. Its attempts never wait for the recovered phone (it is
+//     not the recovery's own key, recoveryWaits): they go on at once, at
+//     the sooner retries and at mailbox_unknown. When the open met
+//     mailbox_unknown, the open's vault_bundle names a mailbox that is
+//     gone; the phone's own unlock before its first handshake carries the
+//     vault's address again (resumeLostOK), the new one once the key is
+//     current. A reading of this release (the spec should confirm); the
+//     open is not answered "retry" instead, because an open repeated
+//     before its step 1 is stored spends another of the pair's attempts;
 //   - a refused rotate (the old mailbox lives): the refused key, its tokens
 //     and its refused mark are discarded, and the recovery's rotation
 //     stores its own new key as pending, meeting any relay-key rotation

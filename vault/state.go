@@ -262,6 +262,11 @@ type PendingRelay struct {
 	// Limits are the relay's limits as last registered: an unlock with a
 	// key pending registers no key (§3.4 "Retrying with the same key").
 	Limits *Limits `json:"limits,omitempty"`
+	// Recovery is the id of the recovery whose open stored this key (the
+	// recovery's own relay key, §11.14.6 step 6; never a key the open
+	// inherited): its attempts wait for that recovery's phone to pair
+	// while the current mailbox lives (recoveryWaits).
+	Recovery string `json:"recovery,omitempty"`
 }
 
 // HeldTokens are one recipient's tokens for a pending relay key, and their

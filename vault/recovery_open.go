@@ -537,11 +537,14 @@ func (m *Manager) completeRecoveryR(ctx context.Context, p RecoveryOpenParams, r
 		ref = t
 	}
 	// §3.4 "A recovery's inherited key": a relay key left pending is
-	// completed in one attempt first, before the step-2 write.
+	// completed in one attempt first, before the step-2 write. A relay key
+	// this open stores as pending is the recovery's own (recoveryWaits).
+	m.rk.openRecovery = r.ID
 	m.inheritedKeyAtOpen(ctx, p, now)
 	if err := m.rotateIdentity(now); err != nil {
 		m.record(Activity{Kind: "identity.rotation_failed", Ref: ref, Audit: true, Feed: true, Priority: "high"}, now)
 	}
+	m.rk.openRecovery = ""
 	m.record(Activity{Kind: "recovery.completed", Ref: r.ID, Audit: true, Feed: true}, now)
 	recID := r.ID
 	appKeyFn := m.replacementPromoteFn(rep.next)

@@ -72,6 +72,10 @@ type relayKeyRun struct {
 	// the recovery's relay key (relayrecovery.go).
 	carryNamed *RotationOwed
 	relayMet   bool
+	// openRecovery is the id of the recovery whose open is running: a
+	// relay key stored as pending meanwhile is that recovery's own
+	// (PendingRelay.Recovery).
+	openRecovery string
 	// pending and old are the Relays of the pending key and the old keys
 	// (keys.oldRelay, by index), built when first used.
 	pending Relay
@@ -516,7 +520,7 @@ func (m *Manager) startRelayRotation(seed []byte, byCredential bool, now time.Ti
 // newPendingRelay stores seed as the pending relay key with new tokens for
 // every recipient, held (§3.4 steps 1 and 2).
 func (m *Manager) newPendingRelay(seed []byte, marks, named *RotationOwed, now time.Time) {
-	pr := &PendingRelay{Seed: seed, Held: map[string]*HeldTokens{}, Marks: marks, Named: named}
+	pr := &PendingRelay{Seed: seed, Held: map[string]*HeldTokens{}, Marks: marks, Named: named, Recovery: m.rk.openRecovery}
 	if m.limits != (Limits{}) {
 		lim := m.limits
 		pr.Limits = &lim
@@ -718,18 +722,23 @@ func (m *Manager) relayKeyStep(ctx context.Context, atUnlock bool) {
 	}
 }
 
-// recoveredPhoneUnpaired reports whether a completed recovery's phone has
-// not paired yet. A reading of this release (the spec should confirm): the
-// recovery's pending key is completed only after the phone's first
-// handshake, which checks the vault's relay key and mailbox as the open's
-// vault_bundle gave them, as retryOwedRotation waits for the ik.
-func (m *Manager) recoveredPhoneUnpaired() bool {
-	for _, k := range sortedKeys(m.st.Invites) {
-		if inv := m.st.Invites[k]; inv != nil && inv.CreatedBy == inviteByRecovery {
-			return true
-		}
+// recoveryWaits reports whether the attempts of pr wait for a recovered
+// phone: pr is the key a recovery's open stored as pending (never a key
+// it inherited), that recovery's phone has not paired yet (its invite is
+// pending), and the current mailbox, whose address the open's vault_bundle
+// gave the phone, still lives. A reading of this release (the spec should
+// confirm): the phone's first handshake checks the vault's relay key and
+// mailbox as the open's vault_bundle gave them, as retryOwedRotation waits
+// for the ik. Once that mailbox answered mailbox_unknown the phone cannot
+// reach it, and the key is completed as any other (§3.4 "Retrying with the
+// same key"); the phone's own unlock before its first handshake then
+// carries the new address (resumeLostOK).
+func (m *Manager) recoveryWaits(pr *PendingRelay) bool {
+	if pr == nil || pr.Recovery == "" || !m.st.Relay.Collect.Stopped.IsZero() {
+		return false
 	}
-	return false
+	inv := m.st.Invites[pr.Recovery]
+	return inv != nil && inv.CreatedBy == inviteByRecovery
 }
 
 // relayKeyAttempt makes one attempt if one is due; true when the key was
@@ -739,7 +748,7 @@ func (m *Manager) relayKeyAttempt(ctx context.Context, atUnlock bool) bool {
 		return false
 	}
 	pr := m.st.Relay.Pending
-	if pr == nil || m.st.Deleting != nil || m.rk.stored == "" || m.rk.stored != m.pendingMailbox() || m.recoveredPhoneUnpaired() {
+	if pr == nil || m.st.Deleting != nil || m.rk.stored == "" || m.rk.stored != m.pendingMailbox() || m.recoveryWaits(pr) {
 		return false
 	}
 	now := m.now()
@@ -833,13 +842,14 @@ func (m *Manager) relayKeyFailed(now time.Time) {
 // relayKeyAtUnlock completes a key left pending by an earlier run (the
 // unlock's attempt), and audits identity.rotation_failed when this
 // unlock's own attempt does not complete it: it fails, gets no answer, or
-// is not made because a retry_after still runs.
+// is not made because a retry_after still runs or the key waits for the
+// recovered phone (recoveryWaits).
 func (m *Manager) relayKeyAtUnlock(ctx context.Context) {
 	if !m.relayRotation() {
 		return
 	}
 	m.relayKeyStep(ctx, true)
-	if m.st == nil || m.rk.left == "" || m.st.Relay.Pending == nil || m.pendingMailbox() != m.rk.left || m.recoveredPhoneUnpaired() {
+	if m.st == nil || m.rk.left == "" || m.st.Relay.Pending == nil || m.pendingMailbox() != m.rk.left {
 		return
 	}
 	m.relayKeyFailed(m.now())

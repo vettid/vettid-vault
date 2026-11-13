@@ -39,6 +39,10 @@ type InitiatorConfig struct {
 	DeviceAttest        *altchan.DeviceAttest // purpose app (§6.7)
 	APIKey              []byte                // a transfer's new app: its app key (0.15.0, §6.2)
 	UnlockSecret        []byte                // a transfer's new app: its unlock secret (0.33.0, release R)
+	// RelayLinks (0.90.0 §6.2, §3.4.2 RK8): a reconnect deposited with a
+	// key earlier than Relay.PK carries the signed relay links from the
+	// deposit key up to Relay.PK.
+	RelayLinks []*RelayLink
 
 	// AnonymousSender sets hs.init sender_kid to all-zero instead of the
 	// kid of StaticKEM (§6.2).
@@ -153,6 +157,7 @@ func NewInitiator(cfg InitiatorConfig) (*Initiator, error) {
 		Suites:         cfg.Suites,
 		Profile:        cfg.Profile,
 		Rotations:      cfg.Rotations,
+		RelayLinks:     cfg.RelayLinks,
 		DeviceAttest:   cfg.DeviceAttest,
 		APIKey:         cfg.APIKey,
 		UnlockSecret:   cfg.UnlockSecret,

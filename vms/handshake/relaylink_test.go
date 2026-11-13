@@ -259,8 +259,12 @@ func TestInitRelayLinks(t *testing.T) {
 	}
 	wrong := sampleInit(t, PurposeReconnect)
 	wrong.RelayLinks = relayChain(t, relayKey(0x71), relayKey(0x72)) // ends elsewhere
-	if _, err := wrong.Marshal(); err == nil {
-		t.Fatal("relay_links not ending at from.relay.pk marshalled")
+	if _, err := wrong.Marshal(); !errors.Is(err, ErrRelayLink) || !errors.Is(err, ErrBody) {
+		t.Fatalf("relay_links not ending at from.relay.pk marshalled: %v", err)
+	}
+	wb, _ := json.Marshal([]json.RawMessage{wrong.RelayLinks[0].Marshal()})
+	if _, err := ParseInit(replaceMember(t, b, "relay_links", json.RawMessage(wb))); !errors.Is(err, ErrRelayLink) || !errors.Is(err, ErrBody) {
+		t.Fatalf("hs.init relay_links not ending at from.relay.pk: %v, want ErrBody wrapping ErrRelayLink", err)
 	}
 	if _, err := ParseInit(replaceMember(t, plain, "relay_links", []any{})); !errors.Is(err, ErrRelayLink) || !errors.Is(err, ErrBody) {
 		t.Fatalf("empty relay_links: %v, want ErrBody wrapping ErrRelayLink", err)
@@ -323,8 +327,8 @@ func TestRespRelayLinks(t *testing.T) {
 		t.Fatal("relay without relay_links accepted")
 	}
 	other := RelayAddr{URL: addr.URL, Mailbox: MailboxID(pubOf(k1)), PK: pubOf(k1)}
-	if _, err := ParseResp(replaceMember(t, b, "relay", json.RawMessage(MarshalRelayAddr(other))), PurposeReconnect); err == nil {
-		t.Fatal("relay.pk other than the last link's new accepted")
+	if _, err := ParseResp(replaceMember(t, b, "relay", json.RawMessage(MarshalRelayAddr(other))), PurposeReconnect); !errors.Is(err, ErrRelayLink) || !errors.Is(err, ErrBody) {
+		t.Fatalf("relay.pk other than the last link's new: %v, want ErrBody wrapping ErrRelayLink", err)
 	}
 	badMbx := RelayAddr{URL: addr.URL, Mailbox: MailboxID(pubOf(k1)), PK: pubOf(k2)}
 	if _, err := ParseResp(replaceMember(t, b, "relay", json.RawMessage(MarshalRelayAddr(badMbx))), PurposeReconnect); err == nil {

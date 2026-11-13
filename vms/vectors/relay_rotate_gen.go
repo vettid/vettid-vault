@@ -4,6 +4,9 @@ package vectors
 
 import (
 	"crypto/ed25519"
+	"encoding/base64"
+	"errors"
+	"strings"
 
 	"github.com/vettid/vettid-vault/vms/handshake"
 	"github.com/vettid/vettid-vault/vms/suite"
@@ -34,6 +37,14 @@ type rlCase struct {
 	v, suite         int  // link vAt's; 0: 1 and 2; -1: the member is absent
 	vAt              int  // the link v and suite apply to (default link 0)
 	first, announced *int // key indexes; nil: the chain's own ends
+	// raw, for a form case: the exact relay_links array text, made from
+	// the chain's first link as vms encodes it (relay_links_json carries
+	// it as a string so a malformed form survives the file's encoding)
+	raw func(link string) (string, error)
+	// refusal, for a form case: how vms refuses an update body carrying
+	// it, "malformed" (the body's error alone: §10.1 strict parsing of the
+	// whole message) or "relay_unlinked" (ErrRelayLink inside it: the link)
+	refusal string
 }
 
 func keyIndex(i int) *int { return &i }
@@ -97,13 +108,21 @@ func (c rlCase) render() (obj, error) {
 	} else {
 		o = append(o, member{"reason", c.reason})
 	}
-	return append(o,
+	o = append(o,
 		member{"first_b64", b64(first)},
 		member{"announced_b64", b64(last)},
 		member{"signed_bytes_hex", signed},
-		member{"relay_links", linkObjs},
-		member{"valid", c.valid},
-	), nil
+	)
+	if c.raw != nil {
+		text, err := c.raw(string(links[0].Marshal()))
+		if err != nil {
+			return nil, err
+		}
+		o = append(o, member{"relay_links_json", text}, member{"refusal", c.refusal})
+	} else {
+		o = append(o, member{"relay_links", linkObjs})
+	}
+	return append(o, member{"valid", c.valid}), nil
 }
 
 // genRelayRotate builds relay_rotate.json: signed relay links (VAULT-
@@ -117,12 +136,60 @@ func genRelayRotate() (obj, error) {
 	for i := range long {
 		long[i] = i
 	}
+	// form cases: the valid link 0 -> 1, written another way
+	replace := func(old, new string) func(string) (string, error) {
+		return func(l string) (string, error) {
+			if !strings.Contains(l, old) {
+				return "", errors.New("vectors: form case: " + old + " not found")
+			}
+			return "[" + strings.Replace(l, old, new, 1) + "]", nil
+		}
+	}
+	field := func(l, name string) string { // a member's string value
+		i := strings.Index(l, `"`+name+`":"`) + len(name) + 4
+		return l[i : i+strings.IndexByte(l[i:], '"')]
+	}
+	nonCanonical := func(l string) (string, error) {
+		v := field(l, "old") // 32 bytes: 43 characters, then "="; the last carries 2 zero bits
+		const alpha = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+		c := alpha[strings.IndexByte(alpha, v[42])|1]
+		return "[" + strings.Replace(l, v, v[:42]+string(c)+v[43:], 1) + "]", nil
+	}
+	urlAlphabet := func(l string) (string, error) {
+		for _, name := range []string{"sig_old", "sig_new", "old", "new"} {
+			v := field(l, name)
+			if strings.ContainsAny(v, "+/") {
+				u := strings.NewReplacer("+", "-", "/", "_").Replace(v)
+				return "[" + strings.Replace(l, v, u, 1) + "]", nil
+			}
+		}
+		return "", errors.New("vectors: no + or / to write in the URL alphabet")
+	}
+	shortKey := func(l string) (string, error) {
+		v := field(l, "old")
+		raw, err := base64.StdEncoding.DecodeString(v)
+		if err != nil {
+			return "", err
+		}
+		return "[" + strings.Replace(l, v, b64(raw[:31]), 1) + "]", nil
+	}
+	duplicate := func(l string) (string, error) {
+		v := field(l, "old")
+		return "[" + strings.Replace(l, `"old":"`+v+`"`, `"old":"`+v+`","old":"`+v+`"`, 1) + "]", nil
+	}
 	flip := func(sig func(*handshake.RelayLink) []byte) func([]*handshake.RelayLink) []*handshake.RelayLink {
 		return func(ls []*handshake.RelayLink) []*handshake.RelayLink { sig(ls[0])[0] ^= 1; return ls }
 	}
 	cases := []rlCase{
 		{name: "single", reason: "one link, key 0 -> key 1", valid: true, keys: []int{0, 1}},
 		{name: "chain", reason: "three links, key 0 -> 1 -> 2 -> 3", valid: true, keys: []int{0, 1, 2, 3}},
+		{name: "chain_32", reason: "32 links, key 0 -> 1 -> ... -> 32: the limit", valid: true, keys: long[:33]},
+		{name: "form_v_string", reason: "v is the string \"1\", not the number 1", keys: []int{0, 1}, raw: replace(`"v":1,`, `"v":"1",`), refusal: "relay_unlinked"},
+		{name: "form_v_float", reason: "v is written 1.0, not 1", keys: []int{0, 1}, raw: replace(`"v":1,`, `"v":1.0,`), refusal: "relay_unlinked"},
+		{name: "form_duplicate_member", reason: "the link object has old twice (the same value)", keys: []int{0, 1}, raw: duplicate, refusal: "malformed"},
+		{name: "form_non_canonical_base64", reason: "old's last base64 character has non-zero padding bits (it decodes leniently to the right key)", keys: []int{0, 1}, raw: nonCanonical, refusal: "relay_unlinked"},
+		{name: "form_url_alphabet", reason: "a key or signature in the URL-safe base64 alphabet (- and _)", keys: []int{0, 1}, raw: urlAlphabet, refusal: "relay_unlinked"},
+		{name: "form_key_31_bytes", reason: "old is 31 bytes", keys: []int{0, 1}, raw: shortKey, refusal: "relay_unlinked"},
 		{name: "wrong_signature", reason: "sig_old has its first byte XOR 0x01", keys: []int{0, 1},
 			mutate: flip(func(l *handshake.RelayLink) []byte { return l.SigOld })},
 		{name: "wrong_sig_new", reason: "sig_new has its first byte XOR 0x01 (sig_old is right)", keys: []int{0, 1},
@@ -162,7 +229,7 @@ func genRelayRotate() (obj, error) {
 		out = append(out, o)
 	}
 	return obj{
-		{"description", "VAULT-MESSAGING 0.90.3 §3.4.1 rule U and §6.2 relay_links: signed relay links. Generated by vettid-vault (vms/handshake) for the apps and service vaults to reproduce. All keys are TEST ONLY: key i is the Ed25519 key of seed 32 x (0xb0 + i). A link is {v: 1, suite: 2, old, new, sig_old, sig_new}, keys and signatures in standard base64 with padding; v and suite are not bytes of m (the label binds suite 2); m = \"vettid/vms/2/relay-rotate\" || old (32) || new (32) (signed_bytes_hex, one per link), sig_old = Ed25519(old, m), sig_new = Ed25519(new, m) (deterministic, RFC 8032). A chain is valid when it has 1 to 32 links, each with v 1 and suite 2, old different from new and both signatures verifying, each link's old is the previous link's new, no key appears twice, the first old is first_b64 (the deposit key) and the last new is announced_b64. An invalid case says why in reason."},
+		{"description", "VAULT-MESSAGING 0.90.3 §3.4.1 rule U and §6.2 relay_links: signed relay links. Generated by vettid-vault (vms/handshake) for the apps and service vaults to reproduce. All keys are TEST ONLY: key i is the Ed25519 key of seed 32 x (0xb0 + i). A link is {v: 1, suite: 2, old, new, sig_old, sig_new}, keys and signatures in standard base64 with padding; v and suite are not bytes of m (the label binds suite 2); m = \"vettid/vms/2/relay-rotate\" || old (32) || new (32) (signed_bytes_hex, one per link), sig_old = Ed25519(old, m), sig_new = Ed25519(new, m) (deterministic, RFC 8032). A chain is valid when it has 1 to 32 links, each with v 1 and suite 2, old different from new and both signatures verifying, each link's old is the previous link's new, no key appears twice, the first old is first_b64 (the deposit key) and the last new is announced_b64. An invalid case says why in reason. A form case carries its links as relay_links_json, the exact array text as a string (so that a malformed form survives this file's encoding), in place of relay_links; refusal says how: \"malformed\" when the strict parse of the whole message refuses it (§10.1: a member twice), \"relay_unlinked\" when the link is refused (vms returns the body's error with ErrRelayLink inside); every link in it is refused for its form alone: v and suite are the JSON numbers 1 and 2, no member appears twice, and keys and signatures are canonical standard base64 (padding, zero padding bits) of exactly 32 and 64 bytes."},
 		{"keys", keys},
 		{"cases", out},
 	}, nil

@@ -443,9 +443,11 @@ func (in *Init) validate() error {
 	if len(in.RelayLinks) > 0 {
 		// 0.90.0 §6.2: a reconnect only; 1 to 32 links; the last link's
 		// new is the announced key, from.relay.pk.
-		if in.Purpose != PurposeReconnect || len(in.RelayLinks) > MaxRelayLinks ||
-			!suite.EqualPublic(lastNew(in.RelayLinks), in.From.Relay.PK) {
+		if in.Purpose != PurposeReconnect {
 			return ErrBody
+		}
+		if len(in.RelayLinks) > MaxRelayLinks || !suite.EqualPublic(lastNew(in.RelayLinks), in.From.Relay.PK) {
+			return errors.Join(ErrBody, ErrRelayLink) // relay_unlinked inside the malformed body
 		}
 	}
 	if in.DeviceAttest != nil && in.Purpose != PurposeApp {
@@ -634,9 +636,11 @@ func (r *Resp) validate(p Purpose) error {
 		return ErrBody // 0.90.0 §6.2: relay with relay_links, and only then
 	}
 	if r.Relay != nil {
-		if p != PurposeReconnect || len(r.RelayLinks) > MaxRelayLinks || ValidateRelayAddr(*r.Relay) != nil ||
-			!suite.EqualPublic(lastNew(r.RelayLinks), r.Relay.PK) {
+		if p != PurposeReconnect || ValidateRelayAddr(*r.Relay) != nil {
 			return ErrBody
+		}
+		if len(r.RelayLinks) > MaxRelayLinks || !suite.EqualPublic(lastNew(r.RelayLinks), r.Relay.PK) {
+			return errors.Join(ErrBody, ErrRelayLink) // relay_unlinked inside the malformed body
 		}
 	}
 	return checkSASField(p, r.SASNonce)

@@ -273,6 +273,9 @@ type Manager struct {
 	// msgSender is the collect sender of the message being dispatched
 	// (rule U's end checks, §3.4.1).
 	msgSender ed25519.PublicKey
+	// peerKeyRefusals counts drop.peer_key refusals, so that a message's
+	// handling can tell whether it refused (RK7 records accepted ones only).
+	peerKeyRefusals int
 	// msgJTI is the collect jti of the message being handled (RELAY-PROTOCOL 0.4.0 §6.3): the token it was deposited
 	// under, "" when the relay gave none.
 	msgJTI string

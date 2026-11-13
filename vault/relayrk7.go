@@ -29,6 +29,12 @@ import (
 // happens and never undone, even if its epoch is later destroyed, demoted
 // or ended; the records are kept while the peer has an earlier relay key.
 // Only with Options.RelayKeyRotation; a device's relay key is not covered.
+//
+// What is recorded: a message accepted under an epoch (dispatch, once its
+// handler is done and only if nothing refused it), and the hs.fin that
+// establishes one (rk7Established). An hs.resp records nothing: the epoch
+// it establishes is pending, and the message that confirms it is recorded
+// when it is accepted.
 
 // RelayClosure is one of RK7's records: a message from relay key Key was
 // accepted under Epoch, which was established at position (EstAt, EstMsg).

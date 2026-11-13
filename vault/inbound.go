@@ -480,8 +480,14 @@ func (m *Manager) dispatch(ctx context.Context, p *Peer, in *envelope.Inner, ep 
 		return ackAfterFlush
 	}
 	if ep != nil {
-		id := ep.ID()
-		m.rk7Accepted(p, id[:], sender) // §3.4.2 RK7: accepted under ep from sender
+		// §3.4.2 RK7: accepted under ep from sender, recorded once the
+		// handler is done and only if nothing refused the message.
+		id, n := ep.ID(), m.peerKeyRefusals
+		defer func() {
+			if m.peerKeyRefusals == n {
+				m.rk7Accepted(p, id[:], sender)
+			}
+		}()
 	}
 	if m.opt.RelayKeyRotation && in.Type == tokenIssuedType && m.relayStateOf(p, sender) == relayEarlierAfter {
 		// §3.4.1 Table A, "Earlier, after its cut-off": relay.token.issued

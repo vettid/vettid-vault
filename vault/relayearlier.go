@@ -50,7 +50,7 @@ type RelayConflict struct {
 // MaxRelaySeen bounds Peer.RelaySeen (§3.4.1 rule C: at most 32 seen links
 // per peer; RK12 "within its cap of 32 per peer"). A link past it is not
 // recorded. The identity links' Seen has its own cap of 32 (MaxSeen).
-const MaxRelaySeen = handshake.MaxRelayLinks
+const MaxRelaySeen = 32
 
 // relayKeyState is a message sender's relay-key state (§3.4.1 "Terms").
 type relayKeyState int
@@ -181,13 +181,17 @@ func (m *Manager) followRelayLinks(p *Peer, links []*handshake.RelayLink, to han
 	return nil
 }
 
-// pruneEarlierRelays drops each earlier relay key no token the vault issued
-// to it can still deposit with (§3.4.1 "Relay-key states"), and the seen
-// relay links that no longer start at a key the vault keeps. A token
-// counts until its exp, revoked or not: a revocation takes effect at the
-// relay only once its denylist request is through, and keeping the key
-// longer only keeps its deposits judged by their cut-off instead of
-// refused as foreign.
+// pruneEarlierRelays drops the earlier relay keys no token the vault issued
+// to them can still deposit with (§3.4.1 "Relay-key states"), and the seen
+// relay links that no longer start at a key the vault keeps. It drops from
+// the oldest end only: an entry goes when it and every older one can no
+// longer deposit. A key kept for deposits keeps every later earlier key
+// with its followed link, so that rule C still finds a second successor of
+// any key a kept key's chain passed (an intermediate key the vault never
+// issued a token to, for example). A token counts until its exp, revoked
+// or not: a revocation takes effect at the relay only once its denylist
+// request is through, and keeping the key longer only keeps its deposits
+// judged by their cut-off instead of refused as foreign.
 func (m *Manager) pruneEarlierRelays(now time.Time) {
 	if !m.opt.RelayKeyRotation {
 		return
@@ -196,18 +200,13 @@ func (m *Manager) pruneEarlierRelays(now time.Time) {
 		if len(p.EarlierRelays) == 0 {
 			continue
 		}
-		kept := p.EarlierRelays[:0]
-		for _, e := range p.EarlierRelays {
-			if m.issuedCanDeposit(p, e.Relay.PK, now) {
-				kept = append(kept, e)
-			}
+		n := 0
+		for n < len(p.EarlierRelays) && !m.issuedCanDeposit(p, p.EarlierRelays[n].Relay.PK, now) {
+			n++
 		}
-		if len(kept) != len(p.EarlierRelays) {
-			for i := len(kept); i < len(p.EarlierRelays); i++ {
-				p.EarlierRelays[i] = EarlierRelay{}
-			}
-			p.EarlierRelays = kept
-			if len(kept) == 0 {
+		if n > 0 {
+			p.EarlierRelays = append([]EarlierRelay(nil), p.EarlierRelays[n:]...)
+			if len(p.EarlierRelays) == 0 {
 				p.EarlierRelays = nil
 			}
 			pruneRelaySeen(p)

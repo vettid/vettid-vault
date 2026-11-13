@@ -118,9 +118,13 @@ func TestTableAEarlierIdentityRotateAfterCutoff(t *testing.T) {
 	}
 	again := first
 	again.MsgID = rkAfter // the same message again, after the cut-off: every link followed
+	f.p(0).PeerFeatures = nil
 	f.process(0, again)
 	if f.superseded() != 0 {
 		t.Fatal("an identity.rotate whose links are all followed was refused after the cut-off")
+	}
+	if f.p(0).PeerFeatures != nil {
+		t.Fatal("the ignored identity.rotate counted its features")
 	}
 	ik := append([]byte(nil), f.p(0).IK...)
 	f.rotate(1)
@@ -277,6 +281,35 @@ func TestTableAEarlierHsRespLinksCheckedFirst(t *testing.T) {
 // an old copy's features change no PeerFeatures, it does not mark the
 // device heard, and it raises no device.update_needed.
 func TestTableAEarlierTokenIssuedTokensOnly(t *testing.T) {
+	d, p, tok := rkTokenAfterCutoff(t, false)
+	if p.Standing.Token != tok {
+		t.Fatal("the token was not taken")
+	}
+	if p.Heard || p.PeerFeatures != nil || len(d.audits("device.update_needed")) != 0 || len(d.audits("drop.peer_key")) != 0 {
+		t.Fatalf("more than its tokens counted: heard %v, features %v, update_needed %d", p.Heard, p.PeerFeatures, len(d.audits("device.update_needed")))
+	}
+}
+
+// The epoch's checks come first: a relay.token.issued after the cut-off
+// under an epoch rule E destroyed (with an earlier ts) is refused
+// (superseded_epoch), and its token is not taken.
+func TestTableAEarlierTokenIssuedEpochChecksFirst(t *testing.T) {
+	d, p, tok := rkTokenAfterCutoff(t, true)
+	if p.Standing.Token == tok {
+		t.Fatal("a token was taken from a message under a destroyed epoch")
+	}
+	if got := d.audits("drop.peer_key"); len(got) != 1 || got[0].Ref != "superseded_epoch" {
+		t.Fatalf("not refused by the epoch's checks: %+v", got)
+	}
+}
+
+// rkTokenAfterCutoff: the vault follows its device from its relay key to a
+// new one; the device then sends, from the earlier key after the cut-off,
+// relay.token.issued with a valid token of the new key's mailbox and
+// features lacking hs_confirm. With destroyed, the device's epoch is first
+// marked destroyed by rule E, after the message's ts.
+func rkTokenAfterCutoff(t *testing.T, destroyed bool) (*devFixture, *Peer, string) {
+	t.Helper()
 	d := newDevFixture(t)
 	sinkOf(d)
 	d.m.opt.RelayKeyRotation = true
@@ -288,6 +321,10 @@ func TestTableAEarlierTokenIssuedTokensOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 	p.Heard, p.PeerFeatures = false, nil
+	if destroyed {
+		id := d.ep.ID()
+		p.Epochs = append(p.Epochs, EpochMeta{ID: id[:], Destroyed: true, DestroyTS: now.Add(time.Hour)})
+	}
 	d.m.mu.Unlock()
 	tok, err := relayauth.MintToken(k2, relayauth.Claims{Iss: p.Relay.Mailbox, Sub: relayauth.EncodeKey(d.m.keys.relay.Public().(ed25519.PublicKey)),
 		Aud: p.Relay.URL, Iat: now.Add(-time.Minute), Exp: now.Add(40 * 24 * time.Hour), Jti: "after-cut"})
@@ -304,10 +341,5 @@ func TestTableAEarlierTokenIssuedTokensOnly(t *testing.T) {
 	if err := d.m.ProcessBatch(context.Background(), &fakeCollector{}, []Message{msg}); err != nil {
 		t.Fatal(err)
 	}
-	if p.Standing.Token != tok {
-		t.Fatal("the token was not taken")
-	}
-	if p.Heard || p.PeerFeatures != nil || len(d.audits("device.update_needed")) != 0 || len(d.audits("drop.peer_key")) != 0 {
-		t.Fatalf("more than its tokens counted: heard %v, features %v, update_needed %d", p.Heard, p.PeerFeatures, len(d.audits("device.update_needed")))
-	}
+	return d, p, tok
 }

@@ -26,15 +26,6 @@ func bothWays(t *testing.T, f func(t *testing.T, off bool)) {
 // trace: the world's log, for failure messages.
 func (s *scen) trace() string { return strings.Join(s.w.log, "\n  ") }
 
-// viols: the violations so far, one line each.
-func (s *scen) viols() []string {
-	var out []string
-	for _, v := range s.w.viol {
-		out = append(out, v.Inv+": "+v.Detail)
-	}
-	return out
-}
-
 // pendingAt: I rekeys with R; R answers; I holds the new epoch pending and
 // its hs.fin is in R's mailbox. It returns the current and pending epochs.
 func (s *scen) pendingAt(I, R *Party) (e0, e1 int) {

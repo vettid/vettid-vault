@@ -228,8 +228,6 @@ func (r *Relay) advance() {
 			for _, m := range b.msgs {
 				if m.P.Kind == KFin || m.P.Kind == KResp || m.P.Kind == KConfirm {
 					r.w.ttlFin[[2]PID{m.Actor, r.w.owner(k)}] = "deleted-with-old-mailbox"
-					if m.P.Kind == KFin {
-					}
 				}
 				if m.P.Kind == KSession && r.w.probeFate[m.P.Probe] == "" {
 					r.w.probeFate[m.P.Probe] = "deleted with the old mailbox"
@@ -272,8 +270,6 @@ func (r *Relay) advance() {
 				r.w.waitTTL(m, k)
 				if m.P.Kind == KFin || m.P.Kind == KResp || m.P.Kind == KConfirm {
 					r.w.ttlFin[[2]PID{m.Actor, r.w.owner(k)}] = "expired-at-relay-TTL"
-					if m.P.Kind == KFin {
-					}
 				}
 				if m.P.Kind == KSession && r.w.probeFate[m.P.Probe] == "" {
 					r.w.probeFate[m.P.Probe] = "expired (relay TTL)"
@@ -282,14 +278,6 @@ func (r *Relay) advance() {
 		}
 		b.msgs = kept
 	}
-}
-
-func (r *Relay) pending() int {
-	n := 0
-	for _, b := range r.boxes {
-		n += len(b.msgs)
-	}
-	return n
 }
 
 // swapPos: a misbehaving relay swaps the asserted positions (msg_id,

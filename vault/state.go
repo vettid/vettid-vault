@@ -366,6 +366,30 @@ type Peer struct {
 	// IDResend counts S5's identity.rotate resends to the peer for the
 	// vault's latest rotation (0.86.0).
 	IDResend *IDResend `json:"id_resend,omitempty"`
+
+	// Relay-key rotation, receiving side (0.90.3 §3.4.1, §3.4.2; only with
+	// Options.RelayKeyRotation; a state without these members has no
+	// earlier relay key, no seen relay link and no relay fork).
+	//
+	// EarlierRelays are the peer's relay keys the vault followed it away
+	// from, oldest first, each with its followed relay link and its
+	// cut-off, kept until no token the vault issued to it can still
+	// deposit (§3.4.1 "Relay-key states").
+	EarlierRelays []EarlierRelay `json:"earlier_relays,omitempty"`
+	// RelaySeen are the peer's valid relay links that passed rule C and
+	// were not followed, at most one per old key and MaxRelaySeen in all
+	// (§3.4.1 rule C, RK12).
+	RelaySeen []json.RawMessage `json:"relay_seen,omitempty"`
+	// RelayFork is set when two successors of one relay key of a
+	// connection were seen (rule C, "Relay links"): the connection is
+	// suspended (Fork), connection.rotation.resolve answers not_found and
+	// only a new invitation ends it.
+	RelayFork *ForkSuspension `json:"relay_fork,omitempty"`
+	// RelayConflict is the same for an owner device or agent (rule C,
+	// "Between a vault and its own device or agent"): nothing suspends,
+	// the first successor stays, the other is refused (conflict), and the
+	// vault sends that device nothing more.
+	RelayConflict *RelayConflict `json:"relay_conflict,omitempty"`
 }
 
 // RevokedToken is a revoked standing token's jti and exp.

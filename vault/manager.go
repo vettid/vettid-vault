@@ -165,6 +165,14 @@ type Options struct {
 	ConfirmAppKey func(ctx context.Context, c AppKeyConfirm) error
 	// AppKeyRetry overrides the confirmation's retry schedule (tests).
 	AppKeyRetry *AppKeyRetry
+	// RelayKeyRotation turns on the receiving side of relay-key rotation
+	// between vaults that is built so far (VAULT-MESSAGING 0.90.3 §3.4.1,
+	// §3.4.2): a peer's earlier relay keys and their cut-offs, Table A's
+	// rows for them, rule C for relay links with the relay fork, and
+	// RK12. Off (the default) the vault behaves exactly as without it. No
+	// release turns it on before the whole of §3.4.2 is built (RK0: the
+	// vault does not advertise relay_follow).
+	RelayKeyRotation bool
 }
 
 // LifecycleEvent is reported to the parent, which writes it to the vault

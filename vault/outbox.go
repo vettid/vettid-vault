@@ -1029,6 +1029,7 @@ func (m *Manager) housekeeping(now time.Time) {
 	m.remintIssued(now)
 	m.pruneHistories(now)
 	m.pruneIssued(now)
+	m.pruneEarlierRelays(now) // §3.4.1: an earlier relay key ends with the last token issued to it
 	m.pruneRetiredKEMs(now)
 	for id, fr := range m.featureReqs {
 		if now.Sub(fr.at) > featureReqTTL {

@@ -419,6 +419,15 @@ func (m *Manager) peerByRelayKey(pk ed25519.PublicKey) *Peer {
 			return p
 		}
 	}
+	if m.opt.RelayKeyRotation {
+		// §3.4.1 "Relay-key states": a key the vault followed a peer away
+		// from is still that peer's (earlier), judged by Table A.
+		for _, p := range m.allPeers() {
+			if p.earlierRelay(pk) != nil {
+				return p
+			}
+		}
+	}
 	return nil
 }
 

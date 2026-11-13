@@ -270,6 +270,10 @@ type Manager struct {
 	// msgID is the relay msg_id of the message being handled: with
 	// relayAt, its position (§3.4.1 "Terms", 0.86.0).
 	msgID string
+	// msgMailbox is the vault's own mailbox the message being handled was
+	// collected from (§3.4.1 "Cut-off"; "" outside a batch: the current
+	// one).
+	msgMailbox string
 	// msgSender is the collect sender of the message being dispatched
 	// (rule U's end checks, §3.4.1).
 	msgSender ed25519.PublicKey

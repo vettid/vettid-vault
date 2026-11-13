@@ -183,11 +183,15 @@ func sleep(ctx context.Context, d time.Duration) bool {
 // Step collects one batch (blocking up to the long-poll wait) and processes
 // it. It returns the number of messages collected.
 func (m *Manager) Step(ctx context.Context) (int, error) {
+	if err := m.beforeCollect(ctx); err != nil {
+		return 0, err
+	}
 	c, err := m.getCollector(ctx)
 	if err != nil {
 		return 0, err
 	}
 	msgs, err := c.Next(ctx)
+	m.collectedCurrent()
 	if err != nil {
 		m.mu.Lock()
 		if m.collector == c {
@@ -210,13 +214,19 @@ func (m *Manager) getCollector(ctx context.Context) (Collector, error) {
 		return m.collector, nil
 	}
 	var c Collector
-	if cr, ok := m.relay.(*ClientRelay); ok && !m.opt.WebSocket && m.opt.PollWait > 0 {
+	if m.relayRotation() && !m.st.Relay.Collect.Stopped.IsZero() {
+		// §3.4.2 RK14 step 1: the current mailbox, answered mailbox_unknown
+		// while a key is pending, is not collected again.
+	} else if cr, ok := m.relay.(*ClientRelay); ok && !m.opt.WebSocket && m.opt.PollWait > 0 {
 		c = cr.NewPollCollector(m.opt.PollWait)
 	} else {
 		var err error
 		if c, err = m.relay.Collector(ctx, m.opt.WebSocket); err != nil {
 			return nil, err
 		}
+	}
+	if m.relayRotation() {
+		c = m.rotationCollector(ctx, c) // §3.4: and the old mailboxes still collected
 	}
 	m.collector = c
 	return c, nil
@@ -245,12 +255,16 @@ func (m *Manager) ProcessBatch(ctx context.Context, c Collector, msgs []Message)
 	m.housekeeping(now)
 	m.notifyUnlocked(now)
 	var durable, ephemeral []string
-	for _, msg := range msgs {
+	processed := make([]bool, len(msgs))
+	for i, msg := range msgs {
+		m.msgMailbox = collectMailbox(c, msg.MsgID, m.st.Relay.Mailbox)
 		switch m.handleMessage(ctx, msg, now) {
 		case ackAfterFlush:
 			durable = append(durable, msg.MsgID)
+			processed[i] = true
 		case ackNow:
 			ephemeral = append(ephemeral, msg.MsgID)
+			processed[i] = true
 		case noAck:
 			if m.st != nil {
 				delete(m.st.SeenMsgIDs, msg.MsgID) // process it again on redelivery
@@ -260,6 +274,10 @@ func (m *Manager) ProcessBatch(ctx context.Context, c Collector, msgs []Message)
 			return ErrSplitBrain
 		}
 	}
+	m.msgMailbox = ""
+	// §3.4.2 RK14 step 1: last_msg_id, in this batch's flush.
+	m.noteCollected(c, msgs, processed)
+
 	m.batchEndFeatures(now) // after the messages: call liveness sees the batch's keep-alives
 	m.reconfirmAll(now)     // §6.3.1: hs.confirm again, once per batch, unless one is queued
 	if len(msgs) < MaxBatch {

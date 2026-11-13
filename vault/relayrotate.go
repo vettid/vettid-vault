@@ -62,6 +62,16 @@ type relayKeyRun struct {
 	// when the next sooner retry may be made (full jitter).
 	fails int
 	next  time.Time
+	// force: the attempt before a collect of a key whose anchor is old
+	// ignores the sooner retries' wait; noOK: an attempt since the last
+	// collect of the current mailbox got no 200 (§3.4.2 RK14 step 1 "The
+	// order once the anchor is old").
+	force, noOK bool
+	// carryNamed are the marks a discarded inherited key's audit already
+	// named, for the recovery's own key; relayMet: the open's fresh key is
+	// the recovery's relay key (relayrecovery.go).
+	carryNamed *RotationOwed
+	relayMet   bool
 	// pending and old are the Relays of the pending key and the old keys
 	// (keys.oldRelay, by index), built when first used.
 	pending Relay
@@ -333,7 +343,14 @@ func (m *Manager) startRelayRotation(seed []byte, byCredential bool, now time.Ti
 	case seed == nil && pr == nil:
 		// The gate is closed (a later change records the relay-key mark).
 	case pr == nil:
-		m.newPendingRelay(seed, marksOf(m.st.RotationOwed), nil, now)
+		// A new key meets any relay-key rotation owed.
+		if o := m.st.RotationOwed; o != nil && !o.RelayKey.IsZero() {
+			o.RelayKey = time.Time{}
+			m.clearMarks(&RotationOwed{})
+		}
+		named := m.rk.carryNamed
+		m.rk.carryNamed = nil
+		m.newPendingRelay(seed, marksOf(m.st.RotationOwed), named, now)
 	case byCredential && pr.Refused != "":
 		// The way out of the refused state: the refused key, its tokens and
 		// the refused mark are discarded; the new key meets any relay-key
@@ -544,6 +561,8 @@ func (m *Manager) relayKeyCall(ctx context.Context) (out relayOutcome, created, 
 		}
 		return relayNoAnswer, false, false, err
 	}
+	// §3.4.2 RK14 step 1: the current mailbox's collects end, for good.
+	m.mailboxGone(m.st.Relay.Mailbox, m.now())
 	lim, created, err := pending.RegisterCreated(ctx)
 	if err == nil {
 		m.limits = lim
@@ -600,7 +619,7 @@ func (m *Manager) relayKeyAttempt(ctx context.Context, atUnlock bool) bool {
 		}
 	case now.Before(pr.RetryAfter):
 		return false // a running retry_after is honored at an unlock too
-	case !atUnlock && now.Before(m.rk.next):
+	case !atUnlock && !m.rk.force && now.Before(m.rk.next):
 		return false
 	}
 	// §3.4.2 RK14 step 1: the anchor, in a write of its own just before
@@ -631,6 +650,7 @@ func (m *Manager) relayKeyAttempt(ctx context.Context, atUnlock bool) bool {
 		m.rk.fails = 0
 		return m.persist(ctx, false) == nil // memory is ahead on failure: the next write that succeeds stores it
 	case relayRefused:
+		m.rk.noOK = true
 		// It fails secure: the refused state, in a write of its own.
 		pr.Refused, pr.RetryAfter = RelayCode(err), time.Time{}
 		if pr.Refused == "" {
@@ -647,6 +667,10 @@ func (m *Manager) relayKeyAttempt(ctx context.Context, atUnlock bool) bool {
 	default:
 		if ctx.Err() != nil {
 			return false // interrupted (a lock): not counted
+		}
+		m.rk.noOK = true
+		if m.dirty {
+			_ = m.persist(ctx, false) // a stop on mailbox_unknown, at once
 		}
 		if pr.Refused != "" {
 			return false
@@ -699,7 +723,18 @@ func (m *Manager) relayMailboxUnknown(ctx context.Context) error {
 	if m.locked {
 		return ErrLocked
 	}
-	if pr := m.st.Relay.Pending; !m.relayRotation() || pr == nil || pr.Refused != "" {
+	pr := m.st.Relay.Pending
+	if !m.relayRotation() || pr == nil {
+		return nil
+	}
+	// §3.4.2 RK14 step 1: the current mailbox's collects end, for good, in
+	// a write at once; in the refused state nothing more is tried.
+	if m.mailboxGone(m.st.Relay.Mailbox, m.now()) {
+		if err := m.persist(ctx, false); err != nil {
+			return err
+		}
+	}
+	if pr.Refused != "" {
 		return nil
 	}
 	m.relayKeyStep(ctx, false)
@@ -734,7 +769,14 @@ func (m *Manager) makePendingCurrent(created bool, now time.Time) bool {
 	// 1: the key made current has none until a rotation away from it is
 	// attempted).
 	oldKey, oldSub := m.keys.relay, relayauth.EncodeKey(pubOf(m.keys.relay))
-	m.st.Relay.Old = append(m.st.Relay.Old, OldRelayKey{Seed: m.st.Relay.Seed, Mailbox: m.st.Relay.Mailbox, MadeOld: now.UTC(), Anchor: m.st.Relay.Anchor})
+	// §3.4.2 RK14 step 1: what was collected from it goes with it; a stop
+	// recorded before this write (mailbox_unknown) has its telling queued
+	// here, and a timed stop already due is made in this write.
+	kept := m.st.Relay.Collect
+	kept.TellingDue = !kept.Stopped.IsZero()
+	m.st.Relay.Old = append(m.st.Relay.Old, OldRelayKey{Seed: m.st.Relay.Seed, Mailbox: m.st.Relay.Mailbox, MadeOld: now.UTC(),
+		Anchor: m.st.Relay.Anchor, Collect: kept})
+	m.st.Relay.Collect = MailboxCollect{}
 	m.keys.oldRelay = append(m.keys.oldRelay, oldKey)
 	for len(m.rk.old) < len(m.keys.oldRelay)-1 {
 		m.rk.old = append(m.rk.old, nil)
@@ -749,6 +791,7 @@ func (m *Manager) makePendingCurrent(created bool, now time.Time) bool {
 	}
 	m.st.Relay.Pending = nil // its retry_after and refused mark go with it
 	m.resetCollector()
+	m.stopOldCollects(now)
 
 	// The recipients again: a device or peer added since gets new tokens,
 	// those of one removed since are dropped; held tokens re-minted near

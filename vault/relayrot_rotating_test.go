@@ -28,9 +28,67 @@ type rotWorld struct {
 	// registration (Register and RegisterCreated); signers the mailbox of
 	// the key that signed each deposit; deleted the mailboxes deleted.
 	rotates, registers, signers, deleted []string
+	// blobSigners: the mailbox of the key that signed each blob upload.
+	blobSigners []string
+	// queue are the messages waiting in each mailbox, given once each
+	// (inflight) until acked; collectErr answers a mailbox's collects;
+	// collects logs the mailbox of each collect, acks each ack.
+	queue      map[string][]Message
+	inflight   map[string]bool
+	collectErr map[string]error
+	collects   []string
+	acks       []string
 }
 
-func newRotWorld() *rotWorld { return &rotWorld{live: map[string]bool{}} }
+func newRotWorld() *rotWorld {
+	return &rotWorld{live: map[string]bool{}, queue: map[string][]Message{}, inflight: map[string]bool{}, collectErr: map[string]error{}}
+}
+
+// put queues a message in mailbox mb, deposited at at.
+func (w *rotWorld) put(mb, id string, at time.Time, payload []byte) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.queue[mb] = append(w.queue[mb], Message{MsgID: id, DepositedAt: at.UTC().Format(time.RFC3339Nano), Payload: payload})
+}
+
+// rotCollector collects one mailbox of the rotWorld.
+type rotCollector struct {
+	w  *rotWorld
+	mb string
+}
+
+func (c *rotCollector) Next(context.Context) ([]Message, error) {
+	c.w.mu.Lock()
+	defer c.w.mu.Unlock()
+	c.w.collects = append(c.w.collects, c.mb)
+	if err := c.w.collectErr[c.mb]; err != nil {
+		return nil, err
+	}
+	var out []Message
+	for _, msg := range c.w.queue[c.mb] {
+		if !c.w.inflight[msg.MsgID] && len(out) < MaxBatch {
+			c.w.inflight[msg.MsgID] = true
+			out = append(out, msg)
+		}
+	}
+	return out, nil
+}
+
+func (c *rotCollector) Ack(_ context.Context, id string) error {
+	c.w.mu.Lock()
+	defer c.w.mu.Unlock()
+	c.w.acks = append(c.w.acks, c.mb+"/"+id)
+	q := c.w.queue[c.mb][:0]
+	for _, msg := range c.w.queue[c.mb] {
+		if msg.MsgID != id {
+			q = append(q, msg)
+		}
+	}
+	c.w.queue[c.mb] = q
+	return nil
+}
+
+func (c *rotCollector) Close() error { return nil }
 
 func (w *rotWorld) pop(q *[]error) error {
 	if len(*q) == 0 {
@@ -102,6 +160,10 @@ func (r *rotRelay) Rotate(_ context.Context, newKey ed25519.PrivateKey) (string,
 	return nw, nil
 }
 
+func (r *rotRelay) Collector(context.Context, bool) (Collector, error) {
+	return &rotCollector{w: r.w, mb: mailboxOf(r.key)}, nil
+}
+
 func (r *rotRelay) WithKey(k ed25519.PrivateKey) Relay {
 	return &rotRelay{stubRelay: r.stubRelay, key: k, w: r.w}
 }
@@ -115,7 +177,7 @@ func (r *rotRelay) Deposit(ctx context.Context, url, mailbox, token string, payl
 
 func (r *rotRelay) PutBlob(ctx context.Context, url, mailbox, token string, data []byte) (string, time.Time, error) {
 	r.w.mu.Lock()
-	r.w.signers = append(r.w.signers, mailboxOf(r.key))
+	r.w.blobSigners = append(r.w.blobSigners, mailboxOf(r.key))
 	r.w.mu.Unlock()
 	return "01JB2Z6V9K3M4N5P6Q7R8S0001", time.Now().Add(time.Hour), nil
 }
@@ -159,6 +221,7 @@ func newRotFx(t *testing.T) *rotFx {
 	o := &d.fixture.opts
 	o.Features = append(o.Features, fx.sink)
 	o.RelayKeyRotation = true
+	o.PollWait = 10 * time.Millisecond // an idle collect returns at once
 	o.Now = func() time.Time {
 		fx.cmu.Lock()
 		defer fx.cmu.Unlock()

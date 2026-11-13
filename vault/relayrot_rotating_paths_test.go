@@ -237,16 +237,13 @@ func TestRelayRotOldKeyKeptForDeposits(t *testing.T) {
 	})
 	// A blob upload too, its Relay taken with its token.
 	fx.do(func(m *Manager) { m.st.Connections["c1"].Standing.Token = tokFor(oldKey) })
-	fx.w.mu.Lock()
-	fx.w.signers = nil
-	fx.w.mu.Unlock()
 	if _, _, err := fx.m.PutBlobTo(context.Background(), "c1", []byte("x")); err != nil {
 		t.Fatal(err)
 	}
 	fx.w.mu.Lock()
 	defer fx.w.mu.Unlock()
-	if len(fx.w.signers) != 1 || fx.w.signers[0] != old {
-		t.Fatalf("blob upload signed by %v", fx.w.signers)
+	if len(fx.w.blobSigners) != 1 || fx.w.blobSigners[0] != old {
+		t.Fatalf("blob upload signed by %v", fx.w.blobSigners)
 	}
 }
 

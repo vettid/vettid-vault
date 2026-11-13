@@ -1047,6 +1047,8 @@ func (m *Manager) housekeeping(now time.Time) {
 	m.pruneEarlierRelays(now) // §3.4.1: an earlier relay key ends with the last token issued to it
 	m.pruneRetiredKEMs(now)
 	if m.opt.RelayKeyRotation {
+		// §3.4.2 RK14 step 1: the timed stops, written by this batch.
+		m.stopOldCollects(now)
 		m.pruneDeferred(now) // §3.4.1 rule T's deferrals whose message is gone
 		m.rk6Ticks(now)      // §3.4.2 RK6: owed restarts
 	}

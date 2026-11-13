@@ -209,6 +209,24 @@ type RelayState struct {
 	// Recipients are, per recipient (a device or connection id), what the
 	// second write recorded for §3.4.1 S1 and the new address's update.
 	Recipients map[string]*RelayRecipient `json:"recipients,omitempty"`
+	// Collect is what the vault collected from the current mailbox
+	// (§3.4.2 RK14 step 1): kept while a key is pending, and passed to
+	// the old key at the second write.
+	Collect MailboxCollect `json:"collect,omitzero"`
+}
+
+// MailboxCollect is RK14 step 1's record of one of the vault's own
+// mailboxes (§3.4.2). LastMsgID is the largest msg_id such that every
+// message the relay gave from that mailbox up to it was processed and
+// flushed; NoAckFloor the smallest msg_id given and left unprocessed
+// (LastMsgID does not pass it until it is processed). Stopped is when the
+// vault ended its collects of the mailbox (zero: not ended); TellingDue:
+// relay.mailbox.closed is owed for it (sent by a later change).
+type MailboxCollect struct {
+	LastMsgID  string    `json:"last_msg_id,omitempty"`
+	NoAckFloor string    `json:"no_ack_floor,omitempty"`
+	Stopped    time.Time `json:"stopped,omitzero"`
+	TellingDue bool      `json:"telling_due,omitempty"`
 }
 
 // PendingRelay is a relay key stored before the relay's rotate (§3.4 step
@@ -249,10 +267,11 @@ type HeldTokens struct {
 // is its second write; Anchor its anchor, kept as the base of the stop of
 // its collects (§3.4.2 RK14 step 1).
 type OldRelayKey struct {
-	Seed    []byte    `json:"seed"`
-	Mailbox string    `json:"mailbox"`
-	MadeOld time.Time `json:"made_old"`
-	Anchor  time.Time `json:"anchor,omitzero"`
+	Seed    []byte         `json:"seed"`
+	Mailbox string         `json:"mailbox"`
+	MadeOld time.Time      `json:"made_old"`
+	Anchor  time.Time      `json:"anchor,omitzero"`
+	Collect MailboxCollect `json:"collect,omitzero"`
 }
 
 // RelayRecipient is one recipient's record of the vault's relay-key

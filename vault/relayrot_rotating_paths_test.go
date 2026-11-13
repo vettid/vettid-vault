@@ -30,7 +30,7 @@ func TestRelayRotRotationWhilePendingOwesTheNextKey(t *testing.T) {
 	if err := fx.m.RotateIdentity(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	fx.clk = fx.clk.Add(time.Second)
+	fx.setClk(fx.clk.Add(time.Second))
 	if err := fx.m.RotateIdentity(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -39,7 +39,7 @@ func TestRelayRotRotationWhilePendingOwesTheNextKey(t *testing.T) {
 	if fx.pendingMailbox() != k1 || fx.ik() == ik1 || owed == nil || !owed.RelayKey.Equal(t0) {
 		t.Fatalf("pending moved %v, ik moved %v, owed %+v", fx.pendingMailbox() != k1, fx.ik() != ik1, owed)
 	}
-	fx.clk = fx.clk.Add(time.Hour)
+	fx.setClk(fx.clk.Add(time.Hour))
 	fx.batch() // K1 completes; K2 is stored in its second write and completed at once
 	rot, _ := fx.w.log()
 	if len(rot) != 3 || fx.pending() != nil {
@@ -73,7 +73,7 @@ func TestRelayRotCrashAfterTheSecondWriteThatStoredTheNextKey(t *testing.T) {
 	}
 	k1 := fx.pendingMailbox()
 	fx.w.rotate = []error{nil, relayErr(503, "")} // K1 completes; K2's rotate gets no answer
-	fx.clk = fx.clk.Add(time.Hour)
+	fx.setClk(fx.clk.Add(time.Hour))
 	fx.batch()
 	k2 := fx.pendingMailbox()
 	if k2 == "" || k2 == k1 || fx.mailbox() != k1 {
@@ -96,7 +96,7 @@ func TestRelayRotWayOutOfTheRefusedState(t *testing.T) {
 	if err := fx.credRotate(); err != nil {
 		t.Fatal(err)
 	}
-	fx.clk = fx.clk.Add(2 * time.Minute)
+	fx.setClk(fx.clk.Add(2 * time.Minute))
 	fx.batch()
 	k1, anchor := fx.pendingMailbox(), fx.m.RelayKeyStatus().Anchor
 	if pr := fx.pending(); pr == nil || pr.Refused == "" || anchor.IsZero() {
@@ -184,7 +184,7 @@ func TestRelayRotSecondWriteTakesTheRecipientsAgain(t *testing.T) {
 		it.Exp = fx.clk.Add(9 * 24 * time.Hour)
 		h.Issued = replaceIssued(h.Issued, it)
 	})
-	fx.clk = fx.clk.Add(2 * time.Minute)
+	fx.setClk(fx.clk.Add(2 * time.Minute))
 	fx.batch()
 	fx.do(func(m *Manager) {
 		r := m.st.Relay.Recipients
@@ -235,6 +235,19 @@ func TestRelayRotOldKeyKeptForDeposits(t *testing.T) {
 			t.Fatal("an unreadable token is not deposited with the current key")
 		}
 	})
+	// A blob upload too, its Relay taken with its token.
+	fx.do(func(m *Manager) { m.st.Connections["c1"].Standing.Token = tokFor(oldKey) })
+	fx.w.mu.Lock()
+	fx.w.signers = nil
+	fx.w.mu.Unlock()
+	if _, _, err := fx.m.PutBlobTo(context.Background(), "c1", []byte("x")); err != nil {
+		t.Fatal(err)
+	}
+	fx.w.mu.Lock()
+	defer fx.w.mu.Unlock()
+	if len(fx.w.signers) != 1 || fx.w.signers[0] != old {
+		t.Fatalf("blob upload signed by %v", fx.w.signers)
+	}
 }
 
 // The unlock with a key pending registers no key and uses the limits last
@@ -375,5 +388,36 @@ func TestRelayRotDeleteWithAKeyPending(t *testing.T) {
 	defer fx.w.mu.Unlock()
 	if len(fx.w.deleted) != 2 || fx.w.deleted[0] != cur || fx.w.deleted[1] != pmb {
 		t.Fatalf("deleted %v", fx.w.deleted)
+	}
+}
+
+// The attachment workers run without the vault's lock while the second
+// write replaces the current Relay under it: they read it through
+// ownRelay, and an upload takes its Relay with its token under the lock
+// (run with -race).
+func TestRelayRotSecondWriteDoesNotRaceTheAttachmentWorkers(t *testing.T) {
+	fx := newRotFx(t)
+	stop, done := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			_ = fx.m.ownRelay().BaseURL()
+			_, _, _ = fx.m.PutBlobTo(context.Background(), "c1", []byte("x"))
+		}
+	}()
+	for range 3 {
+		if err := fx.credRotate(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	close(stop)
+	<-done
+	if len(fx.m.RelayKeyStatus().OldMailboxes) != 3 {
+		t.Fatal("not rotated")
 	}
 }

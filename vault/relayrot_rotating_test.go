@@ -113,6 +113,13 @@ func (r *rotRelay) Deposit(ctx context.Context, url, mailbox, token string, payl
 	return r.stubRelay.Deposit(ctx, url, mailbox, token, payload)
 }
 
+func (r *rotRelay) PutBlob(ctx context.Context, url, mailbox, token string, data []byte) (string, time.Time, error) {
+	r.w.mu.Lock()
+	r.w.signers = append(r.w.signers, mailboxOf(r.key))
+	r.w.mu.Unlock()
+	return "01JB2Z6V9K3M4N5P6Q7R8S0001", time.Now().Add(time.Hour), nil
+}
+
 func (r *rotRelay) MintToken(sub ed25519.PublicKey, ttl time.Duration, jti string, q *relayauth.Quota, ownerDevice bool) (string, error) {
 	return relayclient.New(r.base, r.key).MintToken(relayauth.EncodeKey(sub), r.base, relayclient.TokenOptions{TTL: ttl, JTI: jti, Quota: q, OwnerDevice: ownerDevice})
 }
@@ -132,18 +139,31 @@ type rotFx struct {
 	w    *rotWorld
 	sink *recSink
 	fs   *faultStore
-	clk  time.Time
+	clk  time.Time // the test's reading; set with setClk
 	conn *tdev
+	cmu  sync.Mutex
+	vclk time.Time // the vault's (its attachment run reads it unlocked)
+}
+
+func (fx *rotFx) setClk(t time.Time) {
+	fx.cmu.Lock()
+	defer fx.cmu.Unlock()
+	fx.clk, fx.vclk = t, t
 }
 
 func newRotFx(t *testing.T) *rotFx {
 	d := newDevFixture(t)
-	fx := &rotFx{devFixture: d, t: t, w: newRotWorld(), sink: &recSink{}, clk: time.Now().UTC()}
+	fx := &rotFx{devFixture: d, t: t, w: newRotWorld(), sink: &recSink{}}
+	fx.setClk(time.Now().UTC())
 	fx.conn = d.asConnection(t, "c1", 0x70)
 	o := &d.fixture.opts
 	o.Features = append(o.Features, fx.sink)
 	o.RelayKeyRotation = true
-	o.Now = func() time.Time { return fx.clk }
+	o.Now = func() time.Time {
+		fx.cmu.Lock()
+		defer fx.cmu.Unlock()
+		return fx.vclk
+	}
 	o.Relay = func(base string, key ed25519.PrivateKey) Relay {
 		d.fixture.relay = &stubRelay{base: base, key: key}
 		return &rotRelay{stubRelay: d.fixture.relay, key: key, w: fx.w}
@@ -257,4 +277,12 @@ func relayErr(status int, code string) error { return &relayclient.Error{Status:
 // parseOwnToken verifies a token the vault minted on its current key.
 func parseOwnToken(m *Manager, tok string) (relayauth.Claims, error) {
 	return relayauth.ParseToken(tok, pubOf(m.keys.relay))
+}
+
+// setFail fails the next n state writes (under the store's lock: the
+// attachment run writes from its own goroutine).
+func (f *faultStore) setFail(n int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.failState = n
 }

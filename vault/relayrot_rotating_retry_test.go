@@ -29,7 +29,7 @@ func TestRelayRotNoAnswerRetriedWithTheSameKey(t *testing.T) {
 			t.Fatalf("%v: pending %+v", err, pr)
 		}
 		pmb := fx.pendingMailbox()
-		fx.clk = fx.clk.Add(time.Minute + time.Second)
+		fx.setClk(fx.clk.Add(time.Minute + time.Second))
 		fx.batch()
 		rot, _ := fx.w.log()
 		if len(rot) != 2 || rot[0] != rot[1] || fx.mailbox() != pmb {
@@ -59,7 +59,7 @@ func TestRelayRotSoonerRetriesBackOff(t *testing.T) {
 	if next.Before(fx.clk) || next.After(fx.clk.Add(time.Minute)) {
 		t.Fatalf("first wait to %v", next)
 	}
-	fx.clk = next.Add(-time.Millisecond)
+	fx.setClk(next.Add(-time.Millisecond))
 	if next.After(fx.clk) {
 		fx.batch()
 		if rot, _ := fx.w.log(); len(rot) != 1 {
@@ -82,7 +82,7 @@ func TestRelayRotRetryAfterKeptAcrossTheUnlock(t *testing.T) {
 	if pr := fx.pending(); pr == nil || !pr.RetryAfter.Equal(fx.clk.Add(2*time.Hour)) {
 		t.Fatalf("retry_after %+v", pr)
 	}
-	fx.clk = fx.clk.Add(time.Hour)
+	fx.setClk(fx.clk.Add(time.Hour))
 	fx.restart()
 	if rot, _ := fx.w.log(); len(rot) != 1 {
 		t.Fatalf("attempted while retry_after runs: %v", rot)
@@ -90,7 +90,7 @@ func TestRelayRotRetryAfterKeptAcrossTheUnlock(t *testing.T) {
 	if a := fx.acts("identity.rotation_failed"); len(a) != 1 || a[0].Priority != "high" || !a[0].Feed {
 		t.Fatalf("rotation_failed %+v", a)
 	}
-	fx.clk = fx.clk.Add(time.Hour + time.Second)
+	fx.setClk(fx.clk.Add(time.Hour + time.Second))
 	fx.batch()
 	if rot, _ := fx.w.log(); len(rot) != 2 || fx.pending() != nil {
 		t.Fatalf("not completed after retry_after: %v", rot)
@@ -110,7 +110,7 @@ func TestRelayRotLeftPendingAuditedOncePerUnlock(t *testing.T) {
 		t.Fatal("audited at the rotation's own attempt")
 	}
 	fx.restart()
-	fx.clk = fx.clk.Add(2 * time.Minute)
+	fx.setClk(fx.clk.Add(2 * time.Minute))
 	fx.batch()
 	if rot, _ := fx.w.log(); len(rot) != 3 || len(fx.acts("identity.rotation_failed")) != 1 {
 		t.Fatalf("rotates %v, audits %d", rot, len(fx.acts("identity.rotation_failed")))
@@ -134,7 +134,7 @@ func TestRelayRotRefusedState(t *testing.T) {
 	if pr := fx.pending(); pr == nil || pr.Refused != "forbidden" || len(fx.acts("identity.rotation_failed")) != 1 {
 		t.Fatalf("pending %+v, audits %d", pr, len(fx.acts("identity.rotation_failed")))
 	}
-	fx.clk = fx.clk.Add(2 * time.Hour)
+	fx.setClk(fx.clk.Add(2 * time.Hour))
 	fx.batch()
 	if err := fx.m.relayMailboxUnknown(context.Background()); err != nil {
 		t.Fatal(err)
@@ -224,7 +224,7 @@ func TestRelayRotAnchorClearedOnlyByTheRelaysOwnRefusal(t *testing.T) {
 		t.Fatal(err)
 	}
 	a0 := fx.m.RelayKeyStatus().Anchor
-	fx.clk = fx.clk.Add(2 * time.Minute)
+	fx.setClk(fx.clk.Add(2 * time.Minute))
 	fx.batch()
 	if pr := fx.pending(); pr == nil || pr.Refused == "" || !fx.m.RelayKeyStatus().Anchor.Equal(a0) {
 		t.Fatalf("a later 400 cleared the kept anchor: %+v", fx.m.RelayKeyStatus())
@@ -250,7 +250,7 @@ func TestRelayRotAfterTheGraceRegisters(t *testing.T) {
 			fx.w.live[pmb] = true // an earlier rotate made it
 		}
 		fx.w.mu.Unlock()
-		fx.clk = fx.clk.Add(2 * time.Minute)
+		fx.setClk(fx.clk.Add(2 * time.Minute))
 		fx.batch()
 		_, regs := fx.w.log()
 		if fx.mailbox() != pmb || regs[len(regs)-1] != pmb {
@@ -299,7 +299,7 @@ func TestRelayRotMailboxUnknownStartsTheRotate(t *testing.T) {
 	fx.w.mu.Lock()
 	delete(fx.w.live, fx.mailbox())
 	fx.w.mu.Unlock()
-	fx.clk = fx.clk.Add(2 * time.Minute)
+	fx.setClk(fx.clk.Add(2 * time.Minute))
 	if err := fx.m.relayMailboxUnknown(context.Background()); err != nil {
 		t.Fatal(err)
 	}

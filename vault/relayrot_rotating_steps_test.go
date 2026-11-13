@@ -81,14 +81,13 @@ func TestRelayRotStep1StoresPendingWithHeldTokens(t *testing.T) {
 // whatever starts step 2 (here the collect loop's mailbox_unknown).
 func TestRelayRotStep2OnlyForAStoredKey(t *testing.T) {
 	fx := newRotFx(t)
+	fx.fs.setFail(1 << 20) // no write stores it (the attachment run writes too)
 	fx.do(func(m *Manager) {
 		if err := m.rotateKeys(m.now(), true); err != nil {
 			t.Fatal(err)
 		}
 	})
-	if err := fx.m.relayMailboxUnknown(context.Background()); err != nil {
-		t.Fatal(err)
-	}
+	_ = fx.m.relayMailboxUnknown(context.Background()) // its own write fails
 	if rot, _ := fx.w.log(); len(rot) != 0 {
 		t.Fatalf("rotated before the key was stored: %v", rot)
 	}
@@ -100,7 +99,7 @@ func TestRelayRotStep2OnlyForAStoredKey(t *testing.T) {
 func TestRelayRotStep2AnchorStoredBeforeTheRotate(t *testing.T) {
 	fx := newRotFx(t)
 	fx.w.rotate = []error{relayErr(503, "unavailable")}
-	fx.fs.failState = 0
+	fx.fs.setFail(0)
 	var anchorAtRotate time.Time
 	fx.w.onRotate = func() { anchorAtRotate = fx.m.st.Relay.Anchor } // the lock is held
 	mb := fx.mailbox()
@@ -111,7 +110,7 @@ func TestRelayRotStep2AnchorStoredBeforeTheRotate(t *testing.T) {
 		if err := m.persist(context.Background(), false); err != nil {
 			t.Fatal(err)
 		}
-		fx.fs.failState = 1 // the anchor's write
+		fx.fs.setFail(1) // the anchor's write
 		m.relayKeyStep(context.Background(), false)
 		if !m.st.Relay.Anchor.IsZero() {
 			t.Fatal("an anchor not stored is kept in memory")
@@ -126,7 +125,7 @@ func TestRelayRotStep2AnchorStoredBeforeTheRotate(t *testing.T) {
 		t.Fatalf("rotates %v, anchor at the rotate %v", rot, anchorAtRotate)
 	}
 	// Stored: a crash after the attempt keeps it, and it is not set again.
-	fx.clk = fx.clk.Add(time.Hour)
+	fx.setClk(fx.clk.Add(time.Hour))
 	fx.w.rotate = []error{relayErr(503, "unavailable")}
 	fx.crash()
 	if a := fx.m.RelayKeyStatus().Anchor; !a.Equal(anchorAtRotate) {
@@ -221,7 +220,7 @@ func TestRelayRotCrashAfterStep1(t *testing.T) {
 func TestRelayRotCrashBetweenRotateAndSecondWrite(t *testing.T) {
 	fx := newRotFx(t)
 	mb := fx.mailbox()
-	fx.w.onRotate = func() { fx.fs.failState = 1 << 20 } // every write after the rotate fails
+	fx.w.onRotate = func() { fx.fs.setFail(1 << 20) } // every write after the rotate fails
 	if err := fx.credRotate(); err != nil {
 		t.Fatal(err)
 	}
@@ -230,7 +229,7 @@ func TestRelayRotCrashBetweenRotateAndSecondWrite(t *testing.T) {
 		t.Fatal("no rotation")
 	}
 	fx.w.onRotate = nil
-	fx.fs.failState = 0
+	fx.fs.setFail(0)
 	// Memory went ahead; the store still holds the key pending.
 	fx.crash()
 	rot, _ := fx.w.log()

@@ -115,7 +115,7 @@ func (m *Manager) runBlobCall(r *attRunner, deviceID string, req envelope.Inner,
 		}
 		ctx, cancel := context.WithTimeout(ctx, blobCallBound)
 		defer cancel()
-		data, err := m.relay.GetBlob(ctx, blobID)
+		data, err := m.ownRelay().GetBlob(ctx, blobID)
 		switch {
 		case err != nil && (transient(err) || ctx.Err() != nil):
 			code = "relay_error"
@@ -156,7 +156,7 @@ func (m *Manager) runBlobCall(r *attRunner, deviceID string, req envelope.Inner,
 	// The blob is deleted on every path (§5.5): after a failed or timed out
 	// fetch too, with a context of its own.
 	dctx, dcancel := context.WithTimeout(context.Background(), 15*time.Second)
-	_ = m.relay.DeleteBlob(dctx, blobID)
+	_ = m.ownRelay().DeleteBlob(dctx, blobID)
 	dcancel()
 	wipe(key)
 	m.mu.Lock()

@@ -208,6 +208,15 @@ func (m *Manager) relayFor(tok string) Relay {
 	return m.relay
 }
 
+// ownRelay is the current Relay, read under the vault's lock: for the
+// attachment workers, which run unlocked, while the second write (§3.4
+// step 3) replaces it under the lock. Never called with the lock held.
+func (m *Manager) ownRelay() Relay {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.relay
+}
+
 // relayRecipients are the recipients of a relay-key rotation (§3.4 step
 // 2): every active device and connection, in id order.
 func (m *Manager) relayRecipients() []*Peer {

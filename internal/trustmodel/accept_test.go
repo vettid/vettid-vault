@@ -1723,6 +1723,9 @@ func (q *Party) f1DemoteRestart(r *PeerRec, M *Msg, app []IKLink, x Pos, pre int
 		var set []int
 		flag := false
 		for j := ie + 1; j < len(r.Epochs); j++ {
+			if ep := &r.Epochs[j]; ep.Pending || ep.Abandoned || ep.Destroyed {
+				continue // "Pending epochs at a link", R29-K9, rule E (as the vault's f1Demote)
+			}
 			if ep := &r.Epochs[j]; r.signedBy(ep.Signer, l.Old) {
 				set = append(set, j)
 				flag = flag || ep.Flag

@@ -511,3 +511,28 @@ func TestRelayRotPhoneUnlockRetryReportsTheStoredHeaderSeq(t *testing.T) {
 	}
 	m.Crash()
 }
+
+// The same, with the count's reset failing too: the failed attempt's put
+// and the stored header then differ (stored+2 against stored+1), and the
+// retry still reports the stored one.
+func TestRelayRotPhoneUnlockRetryReportsTheStoredHeaderSeqResetFails(t *testing.T) {
+	io := newInheritedOpen(t, func(rw *rotWorld, k, _ string) {
+		delete(rw.live, k)
+		rw.register = []error{relayErr(503, "")}
+	})
+	if err := io.m.Lock(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	stored := io.f.storedHeader().HeaderSeq
+	io.f.st.mu.Lock()
+	// The count passes; the attempt's header put and the reset after it fail.
+	io.f.st.passHeader, io.f.st.failHeader = 1, 2
+	io.f.st.mu.Unlock()
+	m, uo := io.f.phoneUnlockOut()
+	if m != nil || uo.Code != CodeRetry {
+		t.Fatalf("unlock 1: %+v", uo)
+	}
+	if h := io.f.storedHeader(); uo.HeaderSeq != h.HeaderSeq || h.HeaderSeq != stored+1 {
+		t.Fatalf("retry reports header_seq %d; stored %d (before %d)", uo.HeaderSeq, h.HeaderSeq, stored)
+	}
+}

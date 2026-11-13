@@ -14,7 +14,7 @@ import (
 	"github.com/vettid/vettid-vault/vms/peerwire"
 )
 
-// Rule T, tokens (VAULT-MESSAGING 0.90.3 §3.4.1). A token in a message the
+// Rule T, tokens (VAULT-MESSAGING 0.90.4 §3.4.1, with §7.1 "The holder's checks"). A token in a message the
 // vault accepts, or takes tokens from, is kept only if it verifies, has not
 // expired, names as sub the vault's relay key (the vault rotates no relay
 // key of its own yet, so it keeps no earlier one for deposits), and names
@@ -24,22 +24,37 @@ import (
 // ignored and is no reason to refuse the message, except an update's `token`
 // (rule U: token_unusable), and except a relay.token.issued whose iss is a
 // mailbox the vault does not yet know for the peer, which is deferred.
-// heldToken checks signature, iss, aud, sub, scope and a revoked jti; with
-// Options.RelayKeyRotation heldTokenFrom adds "has not expired". Every
-// rule T check goes through heldTokenFrom, so the holder's checks of §7.1
-// (0.90.4: the lifetime bounds, exp after iat, iat not ahead of the clock)
-// apply here too once heldToken has them; they are not repeated here.
+// Every rule T check goes through heldTokenFrom, which makes the holder's
+// checks of §7.1 (0.90.4: signature and claims, the lifetime bounds per
+// kind, exp after iat, iat not ahead of the clock, a revoked jti) and, with
+// Options.RelayKeyRotation, rule T's "has not expired".
 
 // errExpiredHeld is a token rule T does not keep: it has expired.
 var errExpiredHeld = errors.New("vault: an expired token")
 
-// heldTokenFrom is heldToken for a token minted by the mailbox of relay r
-// (the peer's relay key on record for heldToken). With relay-key rotation
-// it also refuses an expired token (rule T).
-func (m *Manager) heldTokenFrom(tok string, p *Peer, r PeerRelay) (HeldToken, error) {
+// heldTokenFrom is heldToken for a token of the given kind minted by the
+// mailbox of relay r (the peer's relay key on record for heldToken): every
+// holder's check of §7.1 (0.90.4) and, with relay-key rotation, rule T's
+// "has not expired".
+func (m *Manager) heldTokenFrom(tok string, p *Peer, r PeerRelay, kind string) (HeldToken, error) {
 	c, err := peerwire.VerifyHeldToken(tok, r.PK, r.Mailbox, r.URL, m.keys.relay.Public().(ed25519.PublicKey))
 	if err != nil {
 		return HeldToken{}, err
+	}
+	life := StandingMax
+	if kind == TokReconnect {
+		life = handshake.ReconnectTokenMaxLifetime
+	}
+	// The own relay's limit is the one read when the vault registered with
+	// it, so a raise of the relay's policy is seen only from the next unlock.
+	if lim := time.Duration(m.limits.MaxTokenLifetimeSeconds) * time.Second; lim > 0 && lim < life && r.URL == m.st.Relay.URL {
+		// The issuer's relay is this vault's own: its advertised
+		// max_token_lifetime_seconds is known, and the relay refuses a
+		// token over it (token_invalid).
+		life = lim
+	}
+	if c.Exp.Sub(c.Iat) > life || !c.Exp.After(c.Iat) || c.Iat.After(m.now().Add(envelope.MaxClockSkewFuture)) {
+		return HeldToken{}, errHeldLifetime
 	}
 	for _, rv := range p.RevokedHeld {
 		if rv.JTI == c.Jti {

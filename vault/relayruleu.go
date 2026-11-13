@@ -138,7 +138,7 @@ func (m *Manager) ruleU(s *Session, in *envelope.Inner) error {
 		return nil
 	}
 	addr := relayOf(u.Relay)
-	st, err := m.heldTokenFrom(u.Token, p, addr)
+	st, err := m.heldTokenFrom(u.Token, p, addr, TokStanding)
 	if err != nil {
 		m.refusePeerKey(p, "token_unusable", now)
 		return nil
@@ -148,7 +148,7 @@ func (m *Manager) ruleU(s *Session, in *envelope.Inner) error {
 	// the spec should confirm); only a connection holds one.
 	var rt HeldToken
 	if u.ReconnectToken != "" && p.Kind == KindConnection {
-		if t, err := m.heldTokenFrom(u.ReconnectToken, p, addr); err == nil {
+		if t, err := m.heldTokenFrom(u.ReconnectToken, p, addr, TokReconnect); err == nil {
 			rt = t
 		}
 	}
@@ -443,7 +443,7 @@ func (m *Manager) heldReconnectForCurrent(p *Peer, now time.Time) bool {
 	if noReconnectToken(p, now) {
 		return false
 	}
-	_, err := m.heldTokenFrom(p.Reconnect.Token, p, p.Relay)
+	_, err := m.heldTokenFrom(p.Reconnect.Token, p, p.Relay, TokReconnect)
 	return err == nil
 }
 

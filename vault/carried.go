@@ -27,7 +27,7 @@ import (
 // were kept only to deposit its answer, and are never held.
 func (m *Manager) adoptHeld(p *Peer, kind string, held *HeldToken, c HeldToken) {
 	if m.opt.RelayKeyRotation && c.Token != "" {
-		if _, err := m.heldToken(c.Token, p); err != nil {
+		if _, err := m.heldToken(c.Token, p, kind); err != nil {
 			return
 		}
 	}

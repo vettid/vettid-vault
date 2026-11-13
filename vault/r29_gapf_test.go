@@ -268,7 +268,7 @@ func TestR29GapFFreshTokenConverges(t *testing.T) {
 	g.d.relay.failMailbox = nil
 	g.d.relay.mu.Unlock()
 	rc := relayclient.New(g.td.peer.Relay.URL, g.relay)
-	tok, err := rc.MintToken(relayauth.EncodeKey(g.vaultRelay()), g.td.peer.Relay.URL, relayclient.TokenOptions{TTL: 60 * 24 * time.Hour})
+	tok, err := rc.MintToken(relayauth.EncodeKey(g.vaultRelay()), g.td.peer.Relay.URL, relayclient.TokenOptions{TTL: 30 * 24 * time.Hour}) // §7.1: at most 30 days
 	if err != nil {
 		t.Fatal(err)
 	}

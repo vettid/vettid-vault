@@ -77,6 +77,7 @@ type Collector interface {
 const (
 	CodeTokenExpired   = "token_expired"
 	CodeTokenRevoked   = "token_revoked"
+	CodeTokenInvalid   = "token_invalid"
 	CodeTokenUsed      = "token_used"
 	CodeMailboxUnknown = "mailbox_unknown"
 	CodeClaimUnknown   = "claim_unknown"

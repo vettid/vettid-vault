@@ -272,8 +272,32 @@ func (m *Manager) evidenceFirst(p *Peer, in *envelope.Inner, now time.Time) bool
 
 // followLinks follows identity links at the position of the message being
 // handled, which traveled under epoch msgEpoch (nil: a handshake), with
-// "Epochs after an ik link" and H5.
+// "Epochs after an ik link" and H5; strict F1 takes msgEpoch as E.
 func (m *Manager) followLinks(p *Peer, app []*handshake.Rotation, msgEpoch []byte, now time.Time) {
+	m.followLinksF1(p, app, msgEpoch, msgEpoch, now)
+}
+
+// followLinksF1 is followLinks for links applied at a handshake's last
+// message (msgEpoch nil: it opened under no epoch Q keeps, so "Pending
+// epochs at a link" makes no exception) where strict F1 still has an E
+// (owner decision 2026-11-12, §3.4.1 invariant I3): f1Epoch is the epoch
+// the rekey hs.init traveled under, or the epoch the reconnect hs.init
+// named. Every hs.fin that applies links passes one, except for an answer
+// recorded before the epoch was kept (a rekey answer without InitEpoch, a
+// reconnect answer without Named): nil then runs no strict F1, as before.
+// The demotion is by position, x being the message handled (the hs.fin),
+// so the epoch that message establishes, recorded only after, is never
+// among those demoted.
+//
+// R29-K9 is deliberately not run here. An old copy's epoch that Q began
+// and abandoned while pending (for example Q's rekey answered by the copy,
+// abandoned as later_rekey, with the link then applied at P's hs.fin) is
+// left until P's identity.rotate arrives: the window §3.4.1 accepts while
+// K9 has not yet judged. K9 at a reconnect's hs.fin was tried and
+// suspends honest pairs (TestR29T1Seeds on 2 seeds, TestR30NoteLossSeeds
+// on 1). At a rekey's hs.fin it broke no test, but §3.4.1 runs K9 only at
+// the identity.rotate, which P seals under its own current epoch.
+func (m *Manager) followLinksF1(p *Peer, app []*handshake.Rotation, msgEpoch, f1Epoch []byte, now time.Time) {
 	if len(app) == 0 {
 		return
 	}
@@ -334,7 +358,7 @@ func (m *Manager) followLinks(p *Peer, app []*handshake.Rotation, msgEpoch []byt
 			m.note(now, "epoch_demoted", p.ID)
 		}
 	}
-	m.f1Demote(p, app, msgEpoch, now)
+	m.f1Demote(p, app, f1Epoch, now)
 	if demotedCurrent && !m.noLinkRestart {
 		m.restartAfterDemotion(p, now) // not beside the caller's own handshake
 	}

@@ -79,10 +79,18 @@ func (m *Manager) mint(p *Peer, kind string, ttl time.Duration, quota *relayauth
 // heldToken validates a token another principal issued to the vault: its
 // signature by the principal's relay key, iss = its mailbox, sub = the
 // vault's relay key, aud = its relay URL, and a deposit scope
-// (peerwire.VerifyHeldToken); with relay-key rotation also rule T's "has
-// not expired" (heldTokenFrom).
-func (m *Manager) heldToken(tok string, p *Peer) (HeldToken, error) {
-	return m.heldTokenFrom(tok, p, p.Relay)
+// (peerwire.VerifyHeldToken); and, as the relay refuses a deposit under it
+// otherwise (RELAY-PROTOCOL §5.3), a lifetime exp - iat within §7.1's cap
+// for its kind (a reconnect token 365 days, any other token the vault
+// holds 30 days; on the vault's own relay, at most that relay's
+// max_token_lifetime_seconds), an exp later than its iat, and an iat not later than now
+// plus the clock skew a message's ts may have (envelope.MaxClockSkewFuture). Without the cap, a
+// token with a far exp (an old copy holding the peer's relay key can mint
+// one) would win every "later exp" comparison and pin the held token to
+// one the relay refuses. With relay-key rotation also rule T's "has not
+// expired" (heldTokenFrom).
+func (m *Manager) heldToken(tok string, p *Peer, kind string) (HeldToken, error) {
+	return m.heldTokenFrom(tok, p, p.Relay, kind)
 }
 
 // tokenBackdate is how far relayclient backdates iat (RELAY-PROTOCOL §5.2,
@@ -234,13 +242,24 @@ func (m *Manager) storeIssuedTo(p *Peer, body json.RawMessage, now time.Time) {
 	if err != nil {
 		return
 	}
-	ht, err := m.heldToken(tok, p)
+	ht, err := m.heldToken(tok, p, kind)
 	if err != nil {
 		m.audit(now, "bad_issued_token", p.ID)
 		return
 	}
 	if kind == TokReconnect {
 		if p.Kind == KindConnection {
+			if sameJTI(ht.Token, p.Reconnect.Token, p) {
+				return // the held one offered again: nothing to adopt or refuse
+			}
+			if !ht.Exp.After(p.Reconnect.Exp) {
+				// As §6.3.1 adopts a carried token: it replaces the held
+				// token of its kind only if its exp is later. An older or
+				// shorter-lived one (a late honest one, or an old copy's)
+				// is refused, so the held reconnect token stays.
+				m.audit(now, "issued_token_not_newer", p.ID)
+				return
+			}
 			p.Reconnect = ht
 			if h := m.opt.Hooks.Adopt; h != nil {
 				h(p.ID, TokReconnect, ht.Token, "issued")
@@ -388,3 +407,21 @@ func (m *Manager) markDeviceTokens(now time.Time) {
 // errRevokedHeld: a standing token the relay answered token_revoked for is
 // offered again (0.88.2 §8.6).
 var errRevokedHeld = errors.New("vault: a revoked standing token")
+
+// sameJTI reports whether tokens a and b, both issued by p's mailbox,
+// carry the same jti.
+func sameJTI(a, b string, p *Peer) bool {
+	if a == "" || b == "" {
+		return false
+	}
+	ca, err := relayauth.ParseToken(a, p.Relay.PK)
+	if err != nil {
+		return false
+	}
+	cb, err := relayauth.ParseToken(b, p.Relay.PK)
+	return err == nil && ca.Jti == cb.Jti
+}
+
+// errHeldLifetime is a held token whose exp - iat is over §7.1's cap for
+// its kind or not positive, or whose iat is in the future.
+var errHeldLifetime = errors.New("vault: a held token's lifetime or iat is out of bounds")

@@ -327,7 +327,7 @@ func rkTokenAfterCutoff(t *testing.T, destroyed bool) (*devFixture, *Peer, strin
 	}
 	d.m.mu.Unlock()
 	tok, err := relayauth.MintToken(k2, relayauth.Claims{Iss: p.Relay.Mailbox, Sub: relayauth.EncodeKey(d.m.keys.relay.Public().(ed25519.PublicKey)),
-		Aud: p.Relay.URL, Iat: now.Add(-time.Minute), Exp: now.Add(40 * 24 * time.Hour), Jti: "after-cut"})
+		Aud: p.Relay.URL, Iat: now.Add(-time.Minute), Exp: now.Add(25 * 24 * time.Hour), Jti: "after-cut"})
 	if err != nil {
 		t.Fatal(err)
 	}

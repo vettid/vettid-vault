@@ -27,8 +27,11 @@ func (f *r29Fx) rkSend(withRC, withRots bool) *peerwire.AddressUpdate {
 	f.t.Helper()
 	k1 := rkKey(rkK1)
 	own := f.pk(0)
-	exp := f.clk.Add(300 * 24 * time.Hour)
 	mint := func(jti string) string {
+		exp := f.clk.Add(25 * 24 * time.Hour) // a standing token: within §7.1's 30 days
+		if jti == "p-rc" {
+			exp = f.clk.Add(300 * 24 * time.Hour)
+		}
 		tok, err := relayauth.MintToken(k1, relayauth.Claims{Iss: relayauth.MailboxID(rkPub(k1)), Sub: relayauth.EncodeKey(own),
 			Aud: "https://relay.example.org", Iat: f.clk.Add(-time.Minute), Exp: exp, Jti: jti})
 		if err != nil {

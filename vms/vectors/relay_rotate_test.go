@@ -43,7 +43,7 @@ func checkRelayRotateVectors(t *testing.T, dir string) {
 		c := doc{t, cm}
 		t.Run(c.str("name"), func(t *testing.T) {
 			var raws, signed []json.RawMessage
-			if json.Unmarshal(c.m["links"], &raws) != nil || json.Unmarshal(c.m["signed_bytes_hex"], &signed) != nil || len(raws) != len(signed) {
+			if json.Unmarshal(c.m["relay_links"], &raws) != nil || json.Unmarshal(c.m["signed_bytes_hex"], &signed) != nil || len(raws) != len(signed) {
 				t.Fatal("links")
 			}
 			var valid bool

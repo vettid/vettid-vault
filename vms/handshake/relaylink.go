@@ -15,15 +15,17 @@ const MaxRelayLinks = 32
 // principal's relay key Old was replaced by New, and both signed it in the
 // rotation's first write.
 //
-// Format (rule U):
+// Format (rule U, 0.90.3):
 //
-//	{"old":b64,"new":b64,"sig_old":b64,"sig_new":b64}
+//	{"v":1,"suite":2,"old":b64,"new":b64,"sig_old":b64,"sig_new":b64}
 //	m       = "vettid/vms/2/relay-rotate" || old (32) || new (32)
 //	sig_old = Ed25519(old, m)        sig_new = Ed25519(new, m)
 //
 // Keys are the 32 raw Ed25519 bytes, signatures 64 bytes, all standard
-// base64 with padding. As with an identity link's label, the label is
-// prepended by suite.Sign, so the signed bytes are exactly m.
+// base64 with padding. As with an identity link, v and suite are not bytes
+// of m: the suite is bound through the label's "vettid/vms/2/", and v = 1
+// is this layout; any other v or suite is refused. The label is prepended
+// by suite.Sign, so the signed bytes are exactly m.
 type RelayLink struct {
 	Old    ed25519.PublicKey
 	New    ed25519.PublicKey
@@ -83,6 +85,8 @@ func (l *RelayLink) Verify() error {
 // Marshal encodes the link in rule U's member order.
 func (l *RelayLink) Marshal() []byte {
 	return strictjson.NewBuilder().
+		Uint("v", 1).
+		Uint("suite", uint64(suite.Suite2)).
 		Base64("old", l.Old).
 		Base64("new", l.New).
 		Base64("sig_old", l.SigOld).
@@ -90,12 +94,19 @@ func (l *RelayLink) Marshal() []byte {
 		Bytes()
 }
 
-// ParseRelayLink parses a link strictly (duplicate members, non-canonical
-// base64 and wrong lengths are refused; unknown members are ignored, as
-// §10.1 says for every body). It does not verify it.
+// ParseRelayLink parses a link strictly (a v other than 1, a suite other
+// than 2, duplicate members, non-canonical base64 and wrong lengths are
+// refused, ErrRelayLink; unknown members are ignored, as §10.1 says for
+// every body). It does not verify it (Verify refuses old == new).
 func ParseRelayLink(raw json.RawMessage) (*RelayLink, error) {
 	o, err := strictjson.ParseObject(raw)
 	if err != nil {
+		return nil, ErrRelayLink
+	}
+	if v, err := o.Uint("v", 0, 255); err != nil || v != 1 {
+		return nil, ErrRelayLink
+	}
+	if s, err := o.Uint("suite", 0, 255); err != nil || s != uint64(suite.Suite2) {
 		return nil, ErrRelayLink
 	}
 	l := &RelayLink{}

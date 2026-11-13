@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
@@ -80,8 +81,11 @@ func TestRelayLinkVerifyRefuses(t *testing.T) {
 	}
 	m := RelayLinkSigned(pubOf(a), pubOf(a))
 	self := &RelayLink{Old: pubOf(a), New: pubOf(a), SigOld: ed25519.Sign(a, m), SigNew: ed25519.Sign(a, m)}
-	if self.Verify() == nil {
+	if !errors.Is(self.Verify(), ErrRelayLink) {
 		t.Fatal("a link from a key to itself accepted")
+	}
+	if p, err := ParseRelayLink(self.Marshal()); err != nil || !errors.Is(VerifyRelayChain(pubOf(a), pubOf(a), []*RelayLink{p}), ErrRelayLink) {
+		t.Fatal("a parsed link from a key to itself verified")
 	}
 	// The identity link's label does not verify a relay link.
 	idm := append([]byte(suite.LabelRotate), pubOf(a)...)
@@ -137,7 +141,7 @@ func TestVerifyRelayChain(t *testing.T) {
 func TestRelayLinkParse(t *testing.T) {
 	l, _ := NewRelayLink(relayKey(0x61), relayKey(0x62))
 	b := l.Marshal()
-	want := `{"old":"` + base64.StdEncoding.EncodeToString(l.Old) + `","new":"` + base64.StdEncoding.EncodeToString(l.New) +
+	want := `{"v":1,"suite":2,"old":"` + base64.StdEncoding.EncodeToString(l.Old) + `","new":"` + base64.StdEncoding.EncodeToString(l.New) +
 		`","sig_old":"` + base64.StdEncoding.EncodeToString(l.SigOld) + `","sig_new":"` + base64.StdEncoding.EncodeToString(l.SigNew) + `"}`
 	if string(b) != want {
 		t.Fatalf("marshal:\n %s\n %s", b, want)
@@ -149,9 +153,26 @@ func TestRelayLinkParse(t *testing.T) {
 	if _, err := ParseRelayLink(replaceMember(t, b, "x_unknown", 1)); err != nil {
 		t.Fatal("an unknown member refused (§10.1: ignored)")
 	}
+	// 0.90.3: v = 1 and suite = 2, nothing else (relay_unlinked).
+	for name, raw := range map[string][]byte{
+		"v 2":            replaceMember(t, b, "v", 2),
+		"v 0":            replaceMember(t, b, "v", 0),
+		"v string":       replaceMember(t, b, "v", "1"),
+		"no v":           replaceMember(t, b, "v", nil),
+		"suite 1":        replaceMember(t, b, "suite", 1),
+		"suite 3":        replaceMember(t, b, "suite", 3),
+		"suite string":   replaceMember(t, b, "suite", "2"),
+		"no suite":       replaceMember(t, b, "suite", nil),
+		"v 1.0":          []byte(strings.Replace(string(b), `"v":1`, `"v":1.0`, 1)),
+		"suite negative": replaceMember(t, b, "suite", -2),
+	} {
+		if _, err := ParseRelayLink(raw); !errors.Is(err, ErrRelayLink) {
+			t.Errorf("%s: %v, want ErrRelayLink", name, err)
+		}
+	}
 	k32 := base64.StdEncoding.EncodeToString(l.Old)
 	bad := map[string][]byte{
-		"duplicate old":        []byte(strings.Replace(string(b), `{"old"`, `{"old":"`+k32+`","old"`, 1)),
+		"duplicate old":        []byte(strings.Replace(string(b), `,"old"`, `,"old":"`+k32+`","old"`, 1)),
 		"short old":            replaceMember(t, b, "old", base64.StdEncoding.EncodeToString(l.Old[:31])),
 		"long new":             replaceMember(t, b, "new", base64.StdEncoding.EncodeToString(append(bytes.Clone(l.New), 0))),
 		"short sig_old":        replaceMember(t, b, "sig_old", base64.StdEncoding.EncodeToString(l.SigOld[:63])),
@@ -208,7 +229,7 @@ func TestInitRelayLinks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Contains(b, []byte(`"relay_links":[{"old":`)) {
+	if !bytes.Contains(b, []byte(`"relay_links":[{"v":1,"suite":2,"old":`)) {
 		t.Fatal("relay_links not encoded")
 	}
 	got, err := ParseInit(b)

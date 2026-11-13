@@ -25,12 +25,12 @@ var ErrRelayBody = errors.New("peerwire: malformed relay rotation body")
 
 // AddressUpdate is a relay.address.update body:
 //
-//	{relay: {url, mailbox, pk}, token, reconnect_token?, links, rotations?}
+//	{relay: {url, mailbox, pk}, token, reconnect_token?, relay_links, rotations?}
 //
-// links are the signed relay links from the sender's key for the
-// recipient to its current key (rule U, 1 to 32); rotations are its
-// identity links (0.90.0 RK5). Parsing checks the form only; Verify checks
-// the chain.
+// relay_links (0.90.3; "links" before) are the signed relay links from the
+// sender's key for the recipient to its current key (rule U, 1 to 32);
+// rotations are its identity links (0.90.0 RK5), an empty array read as
+// absent (0.90.3). Parsing checks the form only; Verify checks the chain.
 type AddressUpdate struct {
 	Relay          handshake.RelayAddr
 	Token          string
@@ -50,7 +50,7 @@ func (u *AddressUpdate) Marshal() ([]byte, error) {
 	if u.ReconnectToken != "" {
 		b.String("reconnect_token", u.ReconnectToken)
 	}
-	b.Raw("links", handshake.MarshalRelayLinks(u.Links))
+	b.Raw("relay_links", handshake.MarshalRelayLinks(u.Links))
 	if len(u.Rotations) > 0 {
 		out := []byte{'['}
 		for i, r := range u.Rotations {
@@ -103,14 +103,14 @@ func ParseAddressUpdate(body []byte) (*AddressUpdate, error) {
 	} else {
 		u.ReconnectToken = t
 	}
-	arr, err := o.Array("links")
+	arr, err := o.Array("relay_links")
 	if err != nil {
 		return nil, ErrRelayBody
 	}
 	if u.Links, err = handshake.ParseRelayLinks(arr); err != nil {
 		return nil, ErrRelayBody
 	}
-	rots, _, err := o.OptArray("rotations")
+	rots, _, err := o.OptArray("rotations") // (0.90.3) [] is read as absent: Rotations stays nil
 	if err != nil || len(rots) > handshake.MaxRotations {
 		return nil, ErrRelayBody
 	}

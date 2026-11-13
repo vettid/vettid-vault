@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
@@ -65,7 +66,7 @@ func TestAddressUpdateRoundTripAndVerify(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.HasPrefix(string(b), `{"relay":{"url":"https://relay.example.org","mailbox":"`) || !strings.Contains(string(b), `,"links":[{"old":"`) {
+	if !strings.HasPrefix(string(b), `{"relay":{"url":"https://relay.example.org","mailbox":"`) || !strings.Contains(string(b), `,"relay_links":[{"v":1,"suite":2,"old":"`) {
 		t.Fatalf("member order: %s", b)
 	}
 	got, err := ParseAddressUpdate(b)
@@ -106,8 +107,15 @@ func TestAddressUpdateRoundTripAndVerify(t *testing.T) {
 func TestAddressUpdateRotations(t *testing.T) {
 	u, _ := sampleUpdate(t)
 	b, _ := u.Marshal()
-	if _, err := ParseAddressUpdate(setMember(t, b, "rotations", []any{})); err != nil {
+	got, err := ParseAddressUpdate(setMember(t, b, "rotations", []any{}))
+	if err != nil {
 		t.Fatal("empty rotations refused:", err)
+	}
+	if got.Rotations != nil {
+		t.Fatal("an empty rotations not read as absent (0.90.3)")
+	}
+	if out, _ := got.Marshal(); !bytes.Equal(out, b) {
+		t.Fatal("an empty rotations re-encoded")
 	}
 	if _, err := ParseAddressUpdate(setMember(t, b, "rotations", []any{map[string]any{"v": 1}})); err == nil {
 		t.Fatal("a malformed rotation accepted")
@@ -123,26 +131,27 @@ func TestAddressUpdateRefused(t *testing.T) {
 	var m map[string]json.RawMessage
 	_ = json.Unmarshal(b, &m)
 	var links []json.RawMessage
-	_ = json.Unmarshal(m["links"], &links)
+	_ = json.Unmarshal(m["relay_links"], &links)
 	many := make([]json.RawMessage, 33)
 	for i := range many {
 		many[i] = links[0]
 	}
 	otherPK := rrPub(rrKey(0x70))
 	cases := map[string][]byte{
-		"duplicate token":  []byte(strings.Replace(string(b), `"token":`, `"token":"`+rrTok+`","token":`, 1)),
-		"no links":         setMember(t, b, "links", nil),
-		"empty links":      setMember(t, b, "links", []any{}),
-		"33 links":         setMember(t, b, "links", many),
-		"no token":         setMember(t, b, "token", nil),
-		"bad token":        setMember(t, b, "token", "not-a-paseto"),
-		"empty reconnect":  setMember(t, b, "reconnect_token", ""),
-		"no relay":         setMember(t, b, "relay", nil),
-		"mailbox mismatch": setMember(t, b, "relay", map[string]string{"url": "https://relay.example.org", "mailbox": handshake.MailboxID(otherPK), "pk": b64(u.Relay.PK)}),
-		"short pk":         setMember(t, b, "relay", map[string]string{"url": "https://relay.example.org", "mailbox": u.Relay.Mailbox, "pk": b64(u.Relay.PK[:31])}),
-		"http url":         setMember(t, b, "relay", map[string]string{"url": "http://relay.example.org", "mailbox": u.Relay.Mailbox, "pk": b64(u.Relay.PK)}),
-		"short link sig":   setMember(t, b, "links", []any{map[string]string{"old": b64(u.Links[0].Old), "new": b64(u.Links[0].New), "sig_old": b64(u.Links[0].SigOld[:63]), "sig_new": b64(u.Links[0].SigNew)}}),
-		"not an object":    []byte(`[]`),
+		"duplicate token":   []byte(strings.Replace(string(b), `"token":`, `"token":"`+rrTok+`","token":`, 1)),
+		"no relay_links":    setMember(t, b, "relay_links", nil),
+		"only the old name": setMember(t, setMember(t, b, "links", json.RawMessage(m["relay_links"])), "relay_links", nil),
+		"empty links":       setMember(t, b, "relay_links", []any{}),
+		"33 links":          setMember(t, b, "relay_links", many),
+		"no token":          setMember(t, b, "token", nil),
+		"bad token":         setMember(t, b, "token", "not-a-paseto"),
+		"empty reconnect":   setMember(t, b, "reconnect_token", ""),
+		"no relay":          setMember(t, b, "relay", nil),
+		"mailbox mismatch":  setMember(t, b, "relay", map[string]string{"url": "https://relay.example.org", "mailbox": handshake.MailboxID(otherPK), "pk": b64(u.Relay.PK)}),
+		"short pk":          setMember(t, b, "relay", map[string]string{"url": "https://relay.example.org", "mailbox": u.Relay.Mailbox, "pk": b64(u.Relay.PK[:31])}),
+		"http url":          setMember(t, b, "relay", map[string]string{"url": "http://relay.example.org", "mailbox": u.Relay.Mailbox, "pk": b64(u.Relay.PK)}),
+		"short link sig":    setMember(t, b, "relay_links", []any{map[string]any{"v": 1, "suite": 2, "old": b64(u.Links[0].Old), "new": b64(u.Links[0].New), "sig_old": b64(u.Links[0].SigOld[:63]), "sig_new": b64(u.Links[0].SigNew)}}),
+		"not an object":     []byte(`[]`),
 	}
 	for name, raw := range cases {
 		if _, err := ParseAddressUpdate(raw); err == nil {
@@ -191,6 +200,9 @@ func TestMailboxClosed(t *testing.T) {
 		if _, err := ParseMailboxClosed([]byte(s)); err == nil {
 			t.Errorf("accepted: %s", s)
 		}
+	}
+	if _, err := ParseMailboxClosed([]byte(`{"mailbox":"` + mbx + `"}`)); !errors.Is(err, ErrRelayBody) {
+		t.Fatalf("missing last_msg_id: %v, want ErrRelayBody (0.90.3: required, null allowed)", err)
 	}
 	if _, err := (&MailboxClosed{Mailbox: "x"}).Marshal(); err == nil {
 		t.Fatal("a bad mailbox marshalled")

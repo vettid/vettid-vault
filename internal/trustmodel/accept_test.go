@@ -1372,9 +1372,10 @@ func (q *Party) tableBFin(r *PeerRec, M *Msg, pos Pos) dec {
 	if len(app) > 0 && q.followIK(r, app, pos, false) {
 		return dec{"suspend", "fork", cell + ":K4-flag"}
 	}
-	if len(app) > 0 && !q.w.noF1Fin {
-		// VAULT-MESSAGING 0.90.4 (erratum to Strict F1): the links an
-		// hs.init carried, applied at its verified hs.fin, run Strict F1
+	if len(app) > 0 && q.w.f1Fin {
+		// VAULT-MESSAGING 0.90.4 (erratum to Strict F1; off by default,
+		// TRUSTMODEL_F1FIN=1): the links an hs.init carried, applied at
+		// its verified hs.fin, run Strict F1
 		// with E the epoch the rekey traveled under or the reconnect named
 		// (the answer's ctx) and x this hs.fin; it demotes with no
 		// reconnect started (the handshake establishes next), or suspends

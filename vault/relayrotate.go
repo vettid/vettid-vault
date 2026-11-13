@@ -698,6 +698,12 @@ func (m *Manager) relayKeyCall(ctx context.Context) (out relayOutcome, created, 
 		// §6.10).
 		if lim, c, rerr := pending.RegisterCreated(ctx); rerr == nil {
 			m.limits, created = lim, c
+		} else if ctx.Err() != nil || !definiteRefusal(rerr) {
+			// No definite answer: the registration may have been a 201 whose
+			// answer was lost (the successor gone again, made afresh), so it
+			// is taken as one and the key waits freshMailboxWait. A definite
+			// refusal created nothing.
+			created = true
 		}
 		return relayDone, created, true, nil
 	}

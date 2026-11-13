@@ -371,3 +371,30 @@ func TestRelayRotInheritedMarkCompletionMintsAgain(t *testing.T) {
 		t.Fatal("no held token to check")
 	}
 }
+
+// The rotate succeeds and the registration after it gets no answer: it may
+// have made the successor afresh (a lost 201), so the key is not completed
+// at once; it waits freshMailboxWait from the answer, and the attempt after
+// the wait completes it, its held tokens minted again.
+func TestRelayRotRegistrationAfterARotateUnansweredWaits(t *testing.T) {
+	fx := newRotFx(t)
+	fx.w.rotate = []error{relayErr(503, "")}
+	if err := fx.credRotate(); err != nil {
+		t.Fatal(err)
+	}
+	pmb := fx.pendingMailbox()
+	fx.w.mu.Lock()
+	fx.w.register = []error{relayErr(503, "")} // the registration after the rotate: no answer
+	fx.w.mu.Unlock()
+	fx.setClk(fx.clk.Add(time.Hour))
+	fx.batch() // the sooner retry: the rotate answered, the registration not
+	pr := fx.pending()
+	if pr == nil || fx.pendingMailbox() != pmb || pr.Created.IsZero() {
+		t.Fatalf("completed at once, or no wait: pending %v", pr)
+	}
+	fx.setClk(pr.Created.Add(freshMailboxWait))
+	fx.batch()
+	if fx.mailbox() != pmb {
+		t.Fatal("not made current after the wait")
+	}
+}

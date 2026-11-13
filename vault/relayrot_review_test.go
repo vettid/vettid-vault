@@ -2,7 +2,6 @@ package vault
 
 import (
 	"context"
-	"crypto/ed25519"
 	"fmt"
 	"testing"
 	"time"
@@ -258,22 +257,45 @@ func TestRuleTDeferredTokenAdoptedAfterTheFollow(t *testing.T) {
 	}
 }
 
-// Rule U's duplicate keeps RK5's "links first": its identity links are
-// followed though no relay link is.
+// Rule U's duplicate keeps RK5's "links first": from a key Q has not
+// passed the cut-off of (here the earlier key, deposited before it), its
+// identity links are followed though no relay link is.
 func TestRuleUDuplicateFollowsIdentityLinks(t *testing.T) {
-	f := rkPair(t)
-	f.rkSend(true, false)
-	f.deliver(1, 0, kOther)
-	if !f.followedK1() {
+	d, td, p, k := rkConnU(t)
+	k1 := rkKey(0x61)
+	l := rkLink(t, k, k1)
+	sendCFrom(d, td, rkPub(k), peerwire.TypeRelayAddressUpdate, rkMarshal(t, rkBody(t, d, k1, l)))
+	if !suite.EqualPublic(p.Relay.PK, rkPub(k1)) {
 		t.Fatal("setup: not followed")
 	}
-	f.rotate(1)
-	f.lose(1, 0, kRotate)
-	f.lose(1, 0, kHSInit)
-	f.rkSend(true, true)
-	f.deliver(1, 0, kOther)
-	if !suite.EqualPublic(f.p(0).IK, f.m(1).keys.ik.Public().(ed25519.PublicKey)) {
-		t.Fatal("a duplicate update's identity links were not followed")
+	u := rkBody(t, d, k1, l)
+	u.Rotations = []*handshake.Rotation{rkIKLink(t, d, 0x20)}
+	id, _ := envelope.NewULID(time.Now())
+	raw, err := td.ep.Seal(&envelope.Inner{ID: id, Type: peerwire.TypeRelayAddressUpdate, TS: time.Now(), Body: []byte(rkMarshal(t, u))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	msg := Message{MsgID: "g000", Sender: relayauth.EncodeKey(rkPub(k)), JTI: "standing-per", Payload: raw} // before the cut-off
+	_ = d.m.ProcessBatch(context.Background(), &fakeCollector{}, []Message{msg})
+	if refs := peerKeyRefs(d); len(refs) != 0 || !suite.EqualPublic(p.IK, rkPub(rkKey(0x20))) {
+		t.Fatalf("a duplicate update's identity links were not followed: %v", refs)
+	}
+}
+
+// The same rule on the follow path: an update from an earlier key after
+// its cut-off whose relay chain leads on past the current key, carrying an
+// identity link not followed, is refused superseded_relay as an
+// identity.rotate of that row would be: nothing followed.
+func TestRuleUEarlierAfterFollowRefusesNewIdentityLinks(t *testing.T) {
+	d, td, p, k := rkConnU(t)
+	k1, k3 := rkKey(0x61), rkKey(0x63)
+	sendCFrom(d, td, rkPub(k), peerwire.TypeRelayAddressUpdate, rkMarshal(t, rkBody(t, d, k1, rkLink(t, k, k1))))
+	u := rkBody(t, d, k3, rkLink(t, k, k1), rkLink(t, k1, k3))
+	u.Rotations = []*handshake.Rotation{rkIKLink(t, d, 0x20)}
+	sendCFrom(d, td, rkPub(k), peerwire.TypeRelayAddressUpdate, rkMarshal(t, u))
+	if refs := peerKeyRefs(d); len(refs) != 1 || refs[0] != "superseded_relay" || !suite.EqualPublic(p.Relay.PK, rkPub(k1)) ||
+		!suite.EqualPublic(p.IK, rkPub(rkKey(0x74))) {
+		t.Fatalf("refused %v; followed relay %v; ik moved %v", refs, suite.EqualPublic(p.Relay.PK, rkPub(k3)), !suite.EqualPublic(p.IK, rkPub(rkKey(0x74))))
 	}
 }
 
@@ -309,10 +331,19 @@ func TestRelayEarlierKeyKeptUntilTheRevokeIsTaken(t *testing.T) {
 // one whose from.relay differs from it is refused (reconnect_bad_token).
 func TestRuleTReconnectInitAnswerAddressIsTheKeptOne(t *testing.T) {
 	f := rkPair(t)
+	// Side 1 announces another relay URL in its hs.init (from.relay.url),
+	// its tokens minted for it (aud): the vault keeps the one on record.
+	const elsewhere = "https://elsewhere.example.org"
+	f.d[1].relay.mu.Lock()
+	f.d[1].relay.base = elsewhere
+	f.d[1].relay.mu.Unlock()
+	f.m(1).st.Relay.URL = elsewhere
 	f.do(1, func(m *Manager, p *Peer) { m.startReconnect(p, f.clk) })
 	init := f.rkTake(kHSInit, rkBefore)
 	f.rkFollow()
-	f.p(0).EarlierRelays[0].Relay.URL = "https://elsewhere.example.org"
+	if f.p(0).EarlierRelays[0].Relay.URL == elsewhere {
+		t.Fatal("setup: the kept address is the announced one")
+	}
 	f.process(0, init)
 	if !f.audited(0, "reconnect_bad_token") || len(f.m(0).st.Awaiting) != 0 {
 		t.Fatal("answered at an address other than the one kept for the earlier key")

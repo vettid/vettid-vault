@@ -14,7 +14,7 @@ import (
 	"github.com/vettid/vettid-vault/vms/suite"
 )
 
-// Rule U, a relay.address.update (VAULT-MESSAGING 0.90.3 §3.4.1), with
+// Rule U, a relay.address.update (VAULT-MESSAGING 0.90.4 §3.4.1), with
 // §3.4.2 RK5 (the update's identity links, applied first, and the ik
 // requirement) and RK6 (the vault's own reconnects at a follow). Only with
 // Options.RelayKeyRotation; without it hAddressUpdate refuses every update
@@ -29,13 +29,19 @@ import (
 //  2. acceptFrom steps 1-3 (dispatch): rule C on the relay links (RK12
 //     while suspended) and on the identity links (evidenceFirst).
 //  3. Table A: rule U in every row but Record suspended and Foreign.
-//  4. The handler (ruleU): first RK5, the identity links (Table B, H5,
-//     the demotion rules, R29-K9) and the ik requirement; then rule U's
-//     chain checks (relay_unlinked), the duplicate path, relay_rollback,
-//     the per-peer cap, rule T on the update's token (token_unusable);
-//     then the follow, in the same state write: the links and cut-offs,
-//     relay.pk current, the tokens kept; then the answer, the
-//     revocations and RK6.
+//  4. The handler (ruleU), first the checks that do not depend on the ik,
+//     each refusing with no link followed, identity links included
+//     (RK10): the chain and its ends (relay_unlinked), the followed
+//     prefix; for a duplicate, straight to step 5; then relay_rollback,
+//     the per-peer cap, rule T on the update's token (token_unusable).
+//  5. From an earlier key after its cut-off, the update's identity links
+//     are judged as Table A's identity.rotate column judges that row: all
+//     already followed, they change nothing and only R29-K9 is judged;
+//     any other is refused superseded_relay (earlierAfterRotations).
+//  6. RK5: the identity links (Table B, H5, the demotion rules, R29-K9)
+//     and the ik requirement; a duplicate is then answered; otherwise the
+//     follow, in one state write: the links and cut-offs, relay.pk
+//     current, the tokens kept; then the answer, the revocations and RK6.
 
 // MaxEarlierRelays caps a peer's earlier relay keys (Peer.EarlierRelays).
 // The spec sets no cap: earlier keys leave only when no token the vault
@@ -114,7 +120,12 @@ func (m *Manager) ruleU(s *Session, in *envelope.Inner) error {
 	k := m.followedRelayPrefix(p, u.Links)
 	if k == len(u.Links) {
 		// The duplicate: nothing is followed; its identity links are
-		// applied first (RK5; R29-K9 runs on a duplicate too).
+		// applied first (RK5; R29-K9 runs on a duplicate too). Rule T on
+		// its token is not checked: no token is kept (the spec does not
+		// say; a reading of this release).
+		if m.earlierAfterRotations(p, sender, u.Rotations, now) {
+			return nil
+		}
 		if m.rk5(s, u.Rotations) {
 			m.ruleUDuplicate(p, now)
 		}
@@ -150,6 +161,9 @@ func (m *Manager) ruleU(s *Session, in *envelope.Inner) error {
 		if t, err := m.heldTokenFrom(u.ReconnectToken, p, addr, TokReconnect); err == nil {
 			rt = t
 		}
+	}
+	if m.earlierAfterRotations(p, sender, u.Rotations, now) {
+		return nil
 	}
 	if !m.rk5(s, u.Rotations) {
 		return nil
@@ -535,5 +549,25 @@ func (m *Manager) relayAwaitsRC(p *Peer, ctx []byte, now time.Time) bool {
 		p.RelayRestart = &RelayRestart{Named: append([]byte(nil), ctx...), Since: p.RelayAwaitRC}
 		m.dirty = true
 	}
+	return true
+}
+
+// earlierAfterRotations judges the identity links of an update from an
+// earlier relay key of p's after its cut-off as Table A judges an
+// identity.rotate in that row: if every one is already followed they
+// change nothing (rk5 then only judges R29-K9 and the ik requirement);
+// otherwise the update is refused superseded_relay with none of them
+// applied. A relay link from that key can be replayed by anyone who saw
+// it (it is the same for every recipient), so it must not carry an ik
+// link that an identity.rotate from the same key could not. It reports
+// whether the update was refused.
+func (m *Manager) earlierAfterRotations(p *Peer, sender ed25519.PublicKey, rots []*handshake.Rotation, now time.Time) bool {
+	if len(rots) == 0 || m.relayStateOf(p, sender) != relayEarlierAfter {
+		return false
+	}
+	if handshake.KnownPrefix(parseRotations(p.Chain), rots) == len(rots) {
+		return false
+	}
+	m.refusePeerKey(p, "superseded_relay", now)
 	return true
 }

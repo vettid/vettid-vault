@@ -321,28 +321,46 @@ type oneMailboxCollector struct {
 func (c *oneMailboxCollector) mailboxOf(string) string { return c.mb }
 
 // RK14 step 1 "The order once the anchor is old": while a key is pending
-// and the current key's anchor is more than 13 days old, each collect of
-// the current mailbox follows an attempt that got no 200 since the last
-// one, whatever the sooner retries' wait.
+// and the current key's anchor is more than 13 days old, a collect of the
+// current mailbox follows an attempt that got no 200 since the last one,
+// unless no attempt may be made: the sooner retries' wait counts as that
+// (a reading of this release), so a relay that fails fast does not get a
+// rotate before every collect.
 func TestRelayRotOldAnchorAttemptsBeforeEachCollect(t *testing.T) {
 	fx := newRotFx(t)
-	fx.w.rotate = []error{relayErr(503, ""), relayErr(503, ""), relayErr(503, "")}
+	fx.w.rotate = []error{relayErr(503, ""), relayErr(503, ""), relayErr(503, ""), relayErr(503, "")}
 	if err := fx.credRotate(); err != nil {
 		t.Fatal(err)
 	}
 	fx.setClk(fx.clk.Add(OldMailboxStop + time.Minute))
 	fx.do(func(m *Manager) { m.rk.next = fx.clk.Add(time.Hour) })
-	fx.step() // the rotation's own attempt got no 200: this collect needs none
-	fx.step()
+	for range 3 {
+		fx.step() // the wait runs: the collects go on without an attempt
+	}
+	if rot, _ := fx.w.log(); len(rot) != 1 {
+		t.Fatalf("rotates %v while the sooner retries' wait runs", rot)
+	}
+	fx.setClk(fx.clk.Add(2 * time.Hour)) // the wait has run out
+	collects0, _ := fx.worldLog()
 	fx.step()
 	rot, _ := fx.w.log()
-	if len(rot) != 3 {
-		t.Fatalf("rotates %v: not one before each collect", rot)
+	collects, _ := fx.worldLog()
+	if len(rot) != 2 || len(collects) != len(collects0)+1 {
+		t.Fatalf("rotates %v, collects %d: not one attempt before the collect", rot, len(collects)-len(collects0))
+	}
+	for range 5 {
+		fx.step() // a fast 503: the next attempt waits for its backoff
+	}
+	if rot, _ := fx.w.log(); len(rot) != 2 {
+		t.Fatalf("rotates %v: one per collect against a failing relay", rot)
 	}
 	fx.setClk(fx.clk.Add(-OldMailboxStop)) // a young anchor: the wait holds
-	fx.do(func(m *Manager) { m.st.Relay.Anchor = fx.clk.Add(-time.Hour) })
+	fx.do(func(m *Manager) {
+		m.st.Relay.Anchor = fx.clk.Add(-time.Hour)
+		m.rk.next = fx.clk.Add(time.Hour)
+	})
 	fx.step()
-	if rot, _ := fx.w.log(); len(rot) != 3 {
+	if rot, _ := fx.w.log(); len(rot) != 2 {
 		t.Fatalf("rotates %v with a young anchor", rot)
 	}
 }

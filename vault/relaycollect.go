@@ -622,9 +622,11 @@ func (m *Manager) rotationCollector(ctx context.Context, main Collector) Collect
 // while the current key's anchor is more than 13 days old and a key is
 // pending, the vault collects the current mailbox only after an attempt
 // that got no 200 since its last collect, or while no attempt may be made
-// (a retry_after runs, the refused state's attempt was made). An attempt
-// that succeeds leads to the second write, which stops the collects of the
-// old mailbox before any.
+// (a retry_after runs, the refused state's attempt was made, or the
+// sooner retries' wait runs: a reading of this release, the spec should
+// confirm, so that a relay failing fast does not get an attempt before
+// every collect). An attempt that succeeds leads to the second write,
+// which stops the collects of the old mailbox before any.
 func (m *Manager) beforeCollect(ctx context.Context) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -637,9 +639,7 @@ func (m *Manager) beforeCollect(ctx context.Context) error {
 	if a := m.st.Relay.Anchor; a.IsZero() || !m.now().After(a.Add(OldMailboxStop)) {
 		return nil
 	}
-	m.rk.force = true
 	m.relayKeyStep(ctx, false)
-	m.rk.force = false
 	if m.locked {
 		return ErrLocked
 	}

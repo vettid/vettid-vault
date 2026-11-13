@@ -62,11 +62,9 @@ type relayKeyRun struct {
 	// when the next sooner retry may be made (full jitter).
 	fails int
 	next  time.Time
-	// force: the attempt before a collect of a key whose anchor is old
-	// ignores the sooner retries' wait; noOK: an attempt since the last
-	// collect of the current mailbox got no 200 (§3.4.2 RK14 step 1 "The
-	// order once the anchor is old").
-	force, noOK bool
+	// noOK: an attempt since the last collect of the current mailbox got
+	// no 200 (§3.4.2 RK14 step 1 "The order once the anchor is old").
+	noOK bool
 	// carryNamed are the marks a discarded inherited key's audit already
 	// named, for the recovery's own key; relayMet: the open's fresh key is
 	// the recovery's relay key (relayrecovery.go).
@@ -770,7 +768,9 @@ func (m *Manager) relayKeyAttempt(ctx context.Context, atUnlock bool) bool {
 		}
 	case now.Before(pr.RetryAfter):
 		return false // a running retry_after is honored at an unlock too
-	case !atUnlock && !m.rk.force && now.Before(m.rk.next):
+	case !atUnlock && now.Before(m.rk.next):
+		// The sooner retries' wait (full jitter) runs: no attempt may be
+		// made, before a collect either (beforeCollect).
 		return false
 	}
 	// §3.4.2 RK14 step 1: the anchor, in a write of its own just before

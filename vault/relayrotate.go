@@ -850,10 +850,13 @@ func (m *Manager) relayKeyAttempt(ctx context.Context, atUnlock bool) bool {
 			// pending, nothing announced; the attempt after the wait
 			// completes it.
 			// A write that fails leaves the state behind (stateBehind): the
-			// key is not completed until a write stores the wait.
-			pr.Created, pr.Refused, pr.RetryAfter = now.UTC(), "", time.Time{}
+			// key is not completed until a write stores the wait. The time
+			// is when the answer came, not when the call began: the
+			// deletion may have come during the call.
+			at := m.now()
+			pr.Created, pr.Refused, pr.RetryAfter = at.UTC(), "", time.Time{}
 			m.dirty = true
-			m.rk.fails, m.rk.next = 0, now.Add(freshMailboxWait)
+			m.rk.fails, m.rk.next = 0, at.Add(freshMailboxWait)
 			_ = m.persist(ctx, false)
 			return false
 		}

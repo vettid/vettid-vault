@@ -64,7 +64,7 @@ func TestRelayRotRegisteredAfreshAgainRenewsTheWait(t *testing.T) {
 	fx.setClk(first.Add(freshMailboxWait))
 	fx.batch()
 	if pr := fx.pending(); fx.mailbox() == pmb || pr == nil || !pr.Created.Equal(fx.clk) {
-		t.Fatalf("a second 201 did not start the wait again (created %v)", pr)
+		t.Fatalf("a second 201 did not start the wait again (created %v)", createdOf(pr))
 	}
 	fx.w.onRotate = nil
 	fx.setClk(fx.clk.Add(freshMailboxWait))
@@ -226,4 +226,84 @@ func TestRelayRotFreshWaitUnstoredFailsClosed(t *testing.T) {
 	if fx.mailbox() != pmb {
 		t.Fatal("not completed once the wait was stored")
 	}
+}
+
+// The wait runs from when the answer came, not from when the call began:
+// a deletion during the call (a slow rotate, the successor gone again
+// before the registration), with the relay's clock ahead of the vault's
+// by all of §4.1's 90 seconds, still lies §6.10's 90 seconds before every
+// held token's iat.
+func TestRelayRotFreshWaitCountsFromTheAnswer(t *testing.T) {
+	fx := newRotFx(t)
+	fx.w.rotate = []error{relayErr(503, "")}
+	if err := fx.credRotate(); err != nil {
+		t.Fatal(err)
+	}
+	pmb := fx.pendingMailbox()
+	fx.setClk(fx.clk.Truncate(time.Second).Add(2 * time.Minute))
+	deleted := fx.clk.Add(5 * time.Second) // the vault's clock when the relay deletes
+	fx.w.onRotate = func() {
+		fx.setClk(deleted) // the call takes 5 s
+		fx.w.mu.Lock()
+		delete(fx.w.live, pmb)
+		fx.w.mu.Unlock()
+	}
+	fx.batch()
+	pr := fx.pending()
+	if pr == nil || !pr.Created.Equal(deleted) {
+		t.Fatalf("the wait's start %v, want the answer's %v", createdOf(pr), deleted)
+	}
+	fx.w.onRotate = nil
+	fx.setClk(pr.Created.Add(freshMailboxWait))
+	fx.batch()
+	if fx.mailbox() != pmb {
+		t.Fatal("not made current after the wait")
+	}
+	bound := deleted.Add(collectedToWindow).Add(freshMailboxTombstone) // on the relay's clock
+	fx.do(func(m *Manager) {
+		for id, r := range m.st.Relay.Recipients {
+			for _, s := range []string{r.Standing, r.Reconnect} {
+				if s == "" {
+					continue
+				}
+				c, err := parseOwnToken(m, s)
+				if err != nil || c.Iat.Before(bound) {
+					t.Fatalf("%s: iat %v before the tombstone's bound %v (%v)", id, c.Iat, bound, err)
+				}
+			}
+		}
+	})
+}
+
+// A recovery's open: the inherited key's mailbox made afresh waits from
+// when the answer came, not from the open's own time.
+func TestRelayRotInheritedFreshWaitCountsFromTheAnswer(t *testing.T) {
+	fx := newRotFx(t)
+	fx.w.rotate = []error{relayErr(503, "")}
+	if err := fx.credRotate(); err != nil {
+		t.Fatal(err)
+	}
+	pmb := fx.pendingMailbox()
+	opened := fx.clk
+	answered := opened.Add(5 * time.Second)
+	fx.w.onRotate = func() {
+		fx.setClk(answered)
+		fx.w.mu.Lock()
+		delete(fx.w.live, pmb)
+		fx.w.mu.Unlock()
+	}
+	fx.do(func(m *Manager) {
+		m.inheritedKeyAtOpen(context.Background(), RecoveryOpenParams{Options: fx.fixture.opts}, opened)
+	})
+	if pr := fx.pending(); pr == nil || !pr.Created.Equal(answered) {
+		t.Fatalf("the wait's start %v, want the answer's %v", createdOf(pr), answered)
+	}
+}
+
+// createdOf is pr's Created (zero for none), for a failure's message.
+func createdOf(pr *PendingRelay) time.Time {
+	if pr == nil {
+		return time.Time{}
+	}
+	return pr.Created
 }

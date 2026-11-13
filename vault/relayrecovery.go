@@ -81,8 +81,11 @@ func (m *Manager) inheritedKeyAtOpen(ctx context.Context, p RecoveryOpenParams, 
 		// freshMailboxWait has run (relayKeyAttempt), the answer's time
 		// stored with it by the step-2 write; the recovery's rotation owes
 		// a relay-key rotation, as with no answer.
-		pr.Created, pr.Refused, pr.RetryAfter = now.UTC(), "", time.Time{}
-		m.rk.next = now.Add(freshMailboxWait)
+		// The time the answer came, not the open's (the deletion may have
+		// come during the call).
+		at := m.now()
+		pr.Created, pr.Refused, pr.RetryAfter = at.UTC(), "", time.Time{}
+		m.rk.next = at.Add(freshMailboxWait)
 		return
 	case out == relayDone:
 		if m.makePendingCurrent(created || !pr.Created.IsZero(), now) {

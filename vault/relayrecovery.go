@@ -50,6 +50,9 @@ func (m *Manager) inheritedKeyAtOpen(ctx context.Context, p RecoveryOpenParams, 
 	if !m.relayRotation() || pr == nil || m.keys.pendingRelay == nil {
 		return
 	}
+	// Inherited: it is not this recovery's own key, and never waits for
+	// a recovered phone (recoveryWaits), whichever recovery stored it.
+	pr.Recovery = ""
 	if m.relay == nil {
 		m.relay = p.Relay(m.st.Relay.URL, m.keys.relay)
 	}

@@ -797,6 +797,13 @@ func (m *Manager) setRecoveredInvite(inv *Invite, now time.Time) {
 		if old.CreatedBy == inviteByRecovery && id != inv.ID {
 			m.dropRecoveredHandshake(id, now)
 			delete(m.st.Invites, id)
+			// The same phone under a later recovery: the relay key the
+			// earlier recovery's open stored still waits for its first
+			// handshake (recoveryWaits), in this same write.
+			if pr := m.st.Relay.Pending; pr != nil && pr.Recovery == id && old.EnrollIK != nil && inv.EnrollIK != nil &&
+				suite.EqualPublic(old.EnrollIK, inv.EnrollIK) {
+				pr.Recovery = inv.ID
+			}
 		}
 	}
 	m.st.Invites[inv.ID] = inv

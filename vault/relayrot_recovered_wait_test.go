@@ -227,3 +227,109 @@ func TestRelayRotRecoveryOwnKeyWaitAuditedAtUnlock(t *testing.T) {
 		t.Fatalf("rotates %v, identity.rotation_failed %d", rot, n)
 	}
 }
+
+// rotOpenFixture is an open fixture whose vault rotates its relay key on
+// a relay that can rotate (every key's mailbox live once its Relay is
+// built).
+func rotOpenFixture(t *testing.T) (*openFixture, *rotWorld) {
+	f := newOpenFixture(t)
+	rw := newRotWorld()
+	f.opts.RelayKeyRotation, f.opts.RelayKeyRotationUnfinished = true, true
+	f.opts.Relay = func(base string, key ed25519.PrivateKey) Relay {
+		rw.mu.Lock()
+		rw.live[mailboxOf(key)] = true
+		rw.mu.Unlock()
+		return &rotRelay{stubRelay: &stubRelay{base: base, key: key}, key: key, w: rw}
+	}
+	return f, rw
+}
+
+func pendingRecovery(m *Manager) string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if pr := m.st.Relay.Pending; pr != nil {
+		return pr.Recovery
+	}
+	return ""
+}
+
+// The same phone registered again for a later recovery, after the earlier
+// recovery's open stored step 2 (its own relay key pending) and lost its
+// ok: the repeat through the `next` wrap replaces the invite, and the key
+// still waits for the phone's first handshake, now under the later
+// recovery.
+func TestRelayRotRecoveryOwnKeyWaitFollowsTheSamePhone(t *testing.T) {
+	f, rw := rotOpenFixture(t)
+	a1, a2 := attBinding("attested-key-one"), attBinding("attested-key-two")
+	f.reRegister(rebindR1, f.phone, a1)
+	f.stopAfterStep2(rebindR1, f.phone, a1)
+	f.clock = f.clock.Add(24 * time.Hour)
+	f.bucket.Advance(24 * time.Hour)
+	f.reRegister(rebindR2, f.phone, a2)
+	m, out := f.openAttested(rebindR2, f.phone, a2)
+	if m == nil || !out.OK {
+		t.Fatalf("repeat: %+v", out)
+	}
+	defer m.Crash()
+	if got := pendingRecovery(m); got != rebindR2 {
+		t.Fatalf("the pending key's recovery %q, want %q", got, rebindR2)
+	}
+	if err := m.ProcessBatch(context.Background(), &fakeCollector{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if rot, _ := rw.log(); len(rot) != 0 {
+		t.Fatalf("rotated before the phone's first handshake: %v", rot)
+	}
+	pairRecoveredPhone(t, m, f.phone)
+	if err := m.ProcessBatch(context.Background(), &fakeCollector{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if rot, _ := rw.log(); len(rot) != 1 {
+		t.Fatalf("rotates after the pairing: %v", rot)
+	}
+}
+
+// A later recovery opening over the key an earlier recovery's open stored
+// (the same phone, never paired, registered again): to this open the key
+// is inherited, its mark is cleared, and it does not wait for the phone.
+func TestRelayRotSecondRecoveryInheritsTheKeyWithoutTheWait(t *testing.T) {
+	f, rw := rotOpenFixture(t)
+	m, out := f.open(testPIN, rPW)
+	if m == nil || !out.OK || pendingRecovery(m) != recID {
+		t.Fatalf("first open %+v, recovery %q", out, pendingRecovery(m))
+	}
+	pend := m.pendingMailbox()
+	if err := m.Lock(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	f.clock = f.clock.Add(24 * time.Hour)
+	f.bucket.Advance(24 * time.Hour)
+	if err := headerTx(context.Background(), HeaderParams{Options: f.opts, VaultID: f.vid, UserGUID: "u1"}, func(h *Header, _ time.Time) (bool, error) {
+		h.HasCredential = true // as the fixture's first request
+		yes := true
+		h.CredentialBackup = &yes
+		return false, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	a2 := attBinding("attested-key-two")
+	f.reRegister(rebindR2, f.phone, a2)
+	rw.mu.Lock()
+	rw.rotate = []error{relayErr(503, "")} // the open's one attempt: no answer
+	rw.mu.Unlock()
+	m, out = f.openAttested(rebindR2, f.phone, a2)
+	if m == nil || !out.OK {
+		t.Fatalf("second open %+v", out)
+	}
+	defer m.Crash()
+	if m.pendingMailbox() != pend || pendingRecovery(m) != "" || !recoveryInvitePending(m) {
+		t.Fatalf("pending %s (want %s), recovery %q", m.pendingMailbox(), pend, pendingRecovery(m))
+	}
+	rot0, _ := rw.log()
+	if err := m.ProcessBatch(context.Background(), &fakeCollector{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if rot, _ := rw.log(); len(rot) <= len(rot0) {
+		t.Fatalf("the inherited key waited: rotates %v", rot)
+	}
+}

@@ -54,6 +54,23 @@ type Relay interface {
 	ListBlobs(ctx context.Context) (BlobList, error)
 }
 
+// RelayRotator is what a Relay offers for the vault's own relay-key
+// rotation (§3.4 "The order of a relay-key rotation"; RELAY-PROTOCOL §6.1,
+// §6.7). Only with Options.RelayKeyRotation; a Relay without it rotates no
+// relay key (the rotation's attempt is not made). Each call is one
+// attempt: the vault retries on its own schedule.
+type RelayRotator interface {
+	// Rotate moves the mailbox of this Relay's key to newKey's, in a
+	// request signed by this Relay's key; it returns the new mailbox id.
+	Rotate(ctx context.Context, newKey ed25519.PrivateKey) (string, error)
+	// RegisterCreated registers this Relay's key and reports whether the
+	// relay created the mailbox (201) or already had it (200).
+	RegisterCreated(ctx context.Context) (Limits, bool, error)
+	// WithKey is a Relay on the same relay for another of the vault's own
+	// relay keys (a pending one, or an old one kept for deposits).
+	WithKey(key ed25519.PrivateKey) Relay
+}
+
 // BlobEntry is one blob of the own mailbox's list.
 type BlobEntry = relayclient.BlobEntry
 
@@ -166,6 +183,26 @@ func (r *ClientRelay) BaseURL() string { return r.base }
 func (r *ClientRelay) Register(ctx context.Context) (Limits, error) {
 	reg, err := r.client(r.base).Register(ctx)
 	return reg.Limits, err
+}
+
+// once is the client for one attempt (RelayRotator).
+func (r *ClientRelay) once() *relayclient.Client {
+	c := relayclient.New(r.base, r.key)
+	c.HTTP, c.Now, c.MaxAttempts = r.http, r.now, 1
+	return c
+}
+
+func (r *ClientRelay) Rotate(ctx context.Context, newKey ed25519.PrivateKey) (string, error) {
+	return r.once().Rotate(ctx, newKey)
+}
+
+func (r *ClientRelay) RegisterCreated(ctx context.Context) (Limits, bool, error) {
+	reg, err := r.once().Register(ctx)
+	return reg.Limits, reg.Created, err
+}
+
+func (r *ClientRelay) WithKey(key ed25519.PrivateKey) Relay {
+	return NewClientRelay(r.base, key, r.http, r.now)
 }
 
 func (r *ClientRelay) Deposit(ctx context.Context, relayURL, mailbox, token string, payload []byte) (string, error) {

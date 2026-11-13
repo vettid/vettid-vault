@@ -108,8 +108,17 @@ type World struct {
 	s1Pause     map[[2]PID][][2]int64       // (P, Q): S1's pause intervals (7.10 b)
 	revokedRC   map[[2]PID]bool             // (P, Q): P's rule U revoked reconnect tokens it issued to Q's earlier key
 	gapOpen     map[[2]PID]int64            // (P, Q): P ended the pair stale by S1 while Q waits (7.16.2), since
-	missedGrace bool                        // an old mailbox ended with a real peer's message in it (M2, resMissedGrace)
+	missedGrace []endedBox                  // vaults' old mailboxes that ended with a real peer's message in them (M2, resMissedGrace)
 	dedupeEnded map[[2]int]bool             // (party, inner id): its dedupe ended 60 days after a telling (RK14)
+}
+
+// endedBox: a vault's old mailbox ended at its grace with messages from
+// real peers (From) in it, while its owner had been locked for Lock at a
+// stretch.
+type endedBox struct {
+	Owner PID
+	Lock  int64
+	From  []PID
 }
 
 type rot struct {
@@ -144,6 +153,11 @@ func (w *World) injectRefuse() bool { return w.pRef > 0 && w.rng.Float64() < w.p
 func (w *World) logf(format string, a ...any) {
 	s := fmt.Sprintf("t=%s %s", w.clock(), fmt.Sprintf(format, a...))
 	w.log = append(w.log, s)
+}
+
+// dur formats a duration in seconds as days, hours and minutes.
+func dur(d int64) string {
+	return fmt.Sprintf("%dd%02dh%02dm", d/day, d%day/hour, d%hour/minute)
 }
 
 func (w *World) clock() string {

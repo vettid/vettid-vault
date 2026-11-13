@@ -213,15 +213,36 @@ func (w *World) rapidRotations(a, b PID) bool {
 // is refused quota_exceeded (§3.4.1 "The reconnect bound").
 const resHonestStaleQuota = "rapid rotations: an honest pair stale by quota_exceeded after 3 or more key changes, on either side or both, in quick succession (§3.4.1 Residuals, 0.88.2)"
 
-// resMissedGrace: a relay-key rotation's old mailbox ended (its grace, 14
-// days with GRACE14) with a message a peer deposited still in it, in a run
-// where a party was locked longer than U = 4 days at a stretch. The
-// liveness argument (§3.4.1, A3; §3.4.2 RK15) assumes each side present
-// every U <= 4 days, so every message in an old mailbox is collected
-// within its grace; M2's own bound (no lock longer than T = 14 days) is
-// looser and equals the grace. §3.4.2 RK14 states the outcome when both
-// sides' old mailboxes end (stale, relay_moved).
-const resMissedGrace = "an old mailbox's grace ended with a peer's message in it while a side was away longer than U (§3.4.1 A3; §3.4.2 RK14)"
+// resMissedGrace: one side of the pair is a vault whose old mailbox ended
+// at its grace (14 days with GRACE14) with the other side's message still
+// in it, while that vault had been locked, at a stretch, for longer than
+// the grace less U (A3's 4 days): it was present for less than one U of
+// the grace. The update or RK8 reconnect in it never reached the vault:
+// the residuals of relay-key rotation (§3.4.1 Residuals, 0.90.0: "Both
+// sides' old mailboxes end"; "a lock longer than the grace"; "Both sides
+// rotated, and X cannot resend its update"). The threshold is not the
+// grace itself: M2 is not checked at all in a run with a lock longer than
+// T = 14 days, which equals the grace. Every run it covers at 10,000 runs
+// is a vault that collected the peer's message minutes after it arrived,
+// crashed before the write, and stayed locked for the rest of the grace
+// (13 days 23 hours 57 minutes).
+const resMissedGrace = "a vault locked for all but less than U of the grace when its old mailbox ended with the peer's message in it (§3.4.1 Residuals, relay-key rotation)"
+
+// missedGraceFor: resMissedGrace applies to the pair (a, b).
+func (w *World) missedGraceFor(a, b PID) bool {
+	for _, g := range w.missedGrace {
+		other := a
+		if g.Owner == a {
+			other = b
+		} else if g.Owner != b {
+			continue
+		}
+		if g.Lock > w.grace()-4*day && slices.Contains(g.From, other) {
+			return true
+		}
+	}
+	return false
+}
 
 // noteLocked: time d passed; real parties locked through it add to their
 // stretch (M2).
@@ -286,11 +307,10 @@ func (w *World) checkHonestStale() {
 				w.statWait("M2 (device F)", a.ID, b.ID, strings.Join(refs, "; "))
 				continue
 			}
-			if w.missedGrace && w.maxLock > 4*day {
-				// outside the liveness argument's A3: a mailbox's grace
-				// ended with a peer's message in it while a side was away
-				// longer than U (RK14 states the outcome when both sides'
-				// old mailboxes end: relay_moved)
+			if w.missedGraceFor(a.ID, b.ID) {
+				// a vault of the pair was locked longer than the grace
+				// when its old mailbox ended with the other's message in
+				// it (§3.4.1 Residuals, relay-key rotation)
 				w.exempt("M2", resMissedGrace)
 				w.statWait("M2 (missed-grace residual)", a.ID, b.ID, strings.Join(refs, "; "))
 				continue

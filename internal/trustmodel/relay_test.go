@@ -1,6 +1,9 @@
 package trustmodel
 
-import "sort"
+import (
+	"slices"
+	"sort"
+)
 
 // Abstract keys, tokens and the relay (RELAY-PROTOCOL §5, §6.1-6.7, §6.10).
 
@@ -231,9 +234,26 @@ func (r *Relay) advance() {
 					r.w.probeFate[m.P.Probe] = "deleted with the old mailbox"
 				}
 			}
-			for _, m := range b.msgs {
-				if o := r.w.keyOwner(k); o >= 0 && m.Actor != o && !r.w.party(m.Actor).Copy {
-					r.w.missedGrace = true // M2: outside A3 (resMissedGrace)
+			if o := r.w.keyOwner(k); o >= 0 && !r.w.party(o).Device {
+				// M2 (resMissedGrace): a vault's old mailbox ended with a
+				// real peer's message in it; record the owner and how long
+				// it had been locked at a stretch
+				g := endedBox{Owner: o, Lock: r.w.lockedFor[o]}
+				for _, m := range b.msgs {
+					if m.Actor != o && !r.w.party(m.Actor).Copy && !slices.Contains(g.From, m.Actor) {
+						g.From = append(g.From, m.Actor)
+					}
+				}
+				if len(g.From) > 0 {
+					first := int64(0)
+					for _, m := range b.msgs {
+						if m.Actor != o && (first == 0 || m.DepAt < first) {
+							first = m.DepAt
+						}
+					}
+					r.w.logf("mailbox %d of %s ended with messages from %v (the oldest deposited %s before; owner locked %s at a stretch)",
+						k, r.w.party(o).Name, g.From, dur(r.w.Now-first), dur(g.Lock))
+					r.w.missedGrace = append(r.w.missedGrace, g)
 				}
 			}
 			delete(r.boxes, k)

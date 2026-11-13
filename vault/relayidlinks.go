@@ -11,9 +11,11 @@ import (
 // the row "Earlier, after its cut-off", identity.rotate column): from an
 // earlier relay key of p's after its cut-off, identity links are judged as
 // that row judges an identity.rotate. If every link is already followed,
-// nothing is applied and the message goes on (R29-K9 is still judged by
-// the caller); otherwise it is refused superseded_relay and nothing is
-// applied. A relay link from that key is the same for every recipient, so
+// nothing is applied and the message goes on; otherwise it is refused
+// superseded_relay and nothing is applied. R29-K9 on such links is judged
+// by the identity.rotate and relay.address.update callers only (Table A's
+// "(0.87.1) R29-K9 is still judged"); the handshake entry points judge
+// none here. A relay link from that key is the same for every recipient, so
 // an old copy holding it could otherwise replay a followed relay link and
 // move the ik. From any other row the links go on to the caller's Table B.
 //

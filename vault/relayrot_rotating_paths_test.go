@@ -27,6 +27,8 @@ func TestRelayRotRotationWhilePendingOwesTheNextKey(t *testing.T) {
 	}
 	k1, ik1 := fx.pendingMailbox(), fx.ik()
 	t0 := fx.clk
+	// The sooner retry's wait (full jitter) is past the two rotations below.
+	fx.do(func(m *Manager) { m.rk.next = fx.clk.Add(time.Minute) })
 	if err := fx.m.RotateIdentity(context.Background()); err != nil {
 		t.Fatal(err)
 	}

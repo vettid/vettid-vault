@@ -7,9 +7,12 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/vettid/vettid-vault/vault/store"
+	"github.com/vettid/vettid-vault/vms/attwire"
 	"github.com/vettid/vettid-vault/vms/envelope"
 )
 
@@ -267,4 +270,104 @@ func TestRelayRotBlobCallFromTheOldMailbox(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatal("no answer")
+}
+
+// The attachment paths that name a blob record the own mailbox their
+// message was collected from: a peer's attachment received (AttachReceive)
+// from K before the second write is fetched after it with K's key; a
+// re-upload (AttachRedeliver) and a device's send (AttachSend) collected
+// from the old mailbox during the 13 days name it too.
+func TestRelayRotAttachmentPathsRecordTheirMailbox(t *testing.T) {
+	fx := newRotFx(t)
+	k := fx.mailbox()
+	content := append([]byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n'}, bytes.Repeat([]byte{9}, 64)...)
+	data, key, sum, err := envelope.SealBlob(content)
+	if err != nil {
+		t.Fatal(err)
+	}
+	view := func(id string) *attwire.PeerView {
+		return &attwire.PeerView{Kind: attwire.KindPhoto, Size: len(content), Width: 1, Height: 1,
+			Blob: &attwire.Blob{ID: id, Key: key, SHA256: sum, Size: len(content), Mime: "image/png"}}
+	}
+	session := func(m *Manager, id string) *Session {
+		p := m.peer(id)
+		return &Session{m: m, peer: p, host: managerHost{m}, from: info(p), now: m.now()}
+	}
+	var attID string
+	fx.do(func(m *Manager) {
+		m.attStop() // the test fetches itself
+		var refused *AttView
+		if attID, refused = (managerHost{m}).AttachReceive(session(m, "c1"), "msg-1", view("B3")); refused != nil {
+			t.Fatalf("refused %+v", refused)
+		}
+	})
+	if err := fx.credRotate(); err != nil { // the second write: K is old
+		t.Fatal(err)
+	}
+	if fx.mailbox() == k {
+		t.Fatal("not rotated")
+	}
+	fx.w.mu.Lock()
+	fx.w.blobs[k] = map[string][]byte{"B3": data}
+	fx.w.mu.Unlock()
+	var b AttBlob
+	fx.do(func(m *Manager) { b = *m.st.Attach.Entries[attID].Blob })
+	if b.Mailbox != k {
+		t.Fatalf("received blob's mailbox %q, want %q", b.Mailbox, k)
+	}
+	if got, _, why, err := fx.m.fetchBlob(context.Background(), b, 0); err != nil || !bytes.Equal(got, content) {
+		t.Fatalf("fetch after the second write: %q %v", why, err)
+	}
+	fx.do(func(m *Manager) {
+		// A re-upload the vault asked for, collected from the old mailbox.
+		e := m.st.Attach.Entries[attID]
+		e.State, e.Asked, e.Blob = AttFetching, true, nil
+		m.msgMailbox = k
+		(managerHost{m}).AttachRedeliver(session(m, "c1"), "msg-1", view("B4"))
+		if e.Blob == nil || e.Blob.ID != "B4" || e.Blob.Mailbox != k {
+			t.Fatalf("redelivered blob %+v", e.Blob)
+		}
+		// A device's send, collected from the old mailbox.
+		d := &attwire.DeviceSend{Blob: &attwire.Blob{ID: "B5", Key: key, SHA256: sum, Size: len(content), Mime: "image/png"},
+			Kind: attwire.KindPhoto, Width: 1, Height: 1}
+		id, err := (managerHost{m}).AttachSend(session(m, "dev1"), "c1", "msg-2", m.now(), "", false, d)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if mb := m.st.Attach.Entries[id].Blob.Mailbox; mb != k {
+			t.Fatalf("sent blob's mailbox %q", mb)
+		}
+		m.msgMailbox = ""
+	})
+}
+
+// countingStore counts reads.
+type countingStore struct {
+	store.Store
+	mu    sync.Mutex
+	reads int
+}
+
+func (s *countingStore) Get(ctx context.Context, key string) ([]byte, store.Version, error) {
+	s.mu.Lock()
+	s.reads++
+	s.mu.Unlock()
+	return s.Store.Get(ctx, key)
+}
+
+// RecoveryOpen with the switch and without its companion refuses before it
+// reads anything (no attempt is spent).
+func TestRelayRotRecoveryOpenRefusesWithoutTheCompanion(t *testing.T) {
+	f := newFixture(t)
+	cs := &countingStore{Store: f.store}
+	o := f.opts
+	o.Store, o.RelayKeyRotation = cs, true
+	m, out := RecoveryOpen(context.Background(), RecoveryOpenParams{Options: o, VaultID: f.vid, UserGUID: "u1", RecoveryID: recID,
+		PIN: testPIN, Password: []byte(rPW), UnlockSecret: testSecret})
+	if m != nil || out.OK || out.Code != OpenRetry {
+		t.Fatalf("open %+v", out)
+	}
+	if cs.reads != 0 {
+		t.Fatalf("read %d objects", cs.reads)
+	}
 }

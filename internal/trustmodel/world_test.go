@@ -109,6 +109,7 @@ type World struct {
 	revokedRC   map[[2]PID]bool             // (P, Q): P's rule U revoked reconnect tokens it issued to Q's earlier key
 	gapOpen     map[[2]PID]int64            // (P, Q): P ended the pair stale by S1 while Q waits (7.16.2), since
 	missedGrace []endedBox                  // vaults' old mailboxes that ended with a real peer's message in them (M2, resMissedGrace)
+	probePend   map[int]int                 // probe -> the pending rekey epoch toward the device open when the vault sent it
 	dedupeEnded map[[2]int]bool             // (party, inner id): its dedupe ended 60 days after a telling (RK14)
 }
 
@@ -731,6 +732,15 @@ func (p *Party) deposit(e *Entry, r *PeerRec) {
 		if m.Kind == KSession && m.Probe > 0 && !p.Copy {
 			if w.fLoss(p, e.To, m.Epoch) {
 				w.probeF[m.Probe] = true
+			}
+			if !p.Device && r.Device && r.Pend != nil && !r.Pend.Reconnect {
+				// sent toward the device while a pending rekey is open: if
+				// that epoch is abandoned, the loss is the device exception
+				// (abandonPending marks it)
+				if w.probePend == nil {
+					w.probePend = map[int]int{}
+				}
+				w.probePend[m.Probe] = r.Pend.ID
 			}
 			w.probeEpoch[m.Probe] = m.Epoch
 		}

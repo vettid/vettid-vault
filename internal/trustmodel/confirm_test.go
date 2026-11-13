@@ -146,6 +146,16 @@ func (q *Party) abandonPending(r *PeerRec, why string, restart bool) {
 	r.AbanIDs = append(r.AbanIDs, pe.ID)
 	if r.Device && !q.Device && !pe.Reconnect {
 		q.markF(r, why) // finding F: until a newer epoch is confirmed
+		if !q.Copy {
+			// probes the vault sent while this pending epoch was open are
+			// lost, if lost, through the device exception: the device may
+			// already be on the abandoned epoch
+			for id, ep := range q.w.probePend {
+				if ep == pe.ID {
+					q.w.probeF[id] = true
+				}
+			}
+		}
 	}
 	q.w.stat("A:abandoned:" + why)
 	q.w.hit("I7:abandon")

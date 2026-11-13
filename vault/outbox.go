@@ -921,6 +921,13 @@ func (m *Manager) deposit(ctx context.Context, e *OutboxEntry, now time.Time) er
 		if st, ok := statusOf(err); ok && st < 500 && st != 429 {
 			m.refused(p, e, now)
 		}
+	case CodeTokenInvalid:
+		if m.reconnectRefused(e, CodeTokenInvalid, now) {
+			return err
+		}
+		if st, ok := statusOf(err); ok && st < 500 && st != 429 {
+			m.refused(p, e, now)
+		}
 	case CodeTokenUsed:
 		m.audit(now, "open_token_used", e.PeerID)
 		e.Done = true
@@ -1097,23 +1104,7 @@ var errQuotaWait = errors.New("vault: waiting for a fresh standing token (quota)
 // failed try. It reports whether it handled the answer; a device's path
 // (toward a device's own vault) is unchanged.
 func (m *Manager) tokenRevoked(p *Peer, e *OutboxEntry, tok string, now time.Time) bool {
-	for _, id := range sortedKeys(m.st.Outgoing) {
-		og, sortedOK := m.st.Outgoing[id]
-		if !sortedOK {
-			continue // removed earlier in this loop
-		}
-		if og.InitOutbox != e.ID || og.New != nil || og.Purpose != handshake.PurposeReconnect {
-			continue
-		}
-		op := m.peer(og.PeerID)
-		if op == nil || op.Kind != KindConnection {
-			return false
-		}
-		named := og.Named
-		m.audit(now, "reconnect_token_revoked", op.ID)
-		m.abandonOutgoing(id, now)
-		e.Done = true
-		m.reconnectFailed(op, named, now)
+	if m.reconnectRefused(e, CodeTokenRevoked, now) {
 		return true
 	}
 	if p == nil || p.Kind != KindConnection {
@@ -1134,12 +1125,60 @@ func (m *Manager) tokenRevoked(p *Peer, e *OutboxEntry, tok string, now time.Tim
 	return true
 }
 
+// reconnectRefused: a reconnect's own hs.init, deposited under the held
+// reconnect token, answered token_revoked or token_invalid (code) is a
+// failed try (the reconnect bound), and that reconnect token is dropped.
+// Kept, it would stay held until its exp, up to a year: an issued
+// reconnect token is adopted only if its exp is later, so no honest one
+// could replace it. A revoked one's jti is also recorded, so that it is
+// refused if offered again (heldToken). It is audited
+// reconnect_token_revoked or reconnect_token_invalid. With no reconnect
+// token left, the next reconnect finds none (the reconnect bound: stale)
+// unless the peer issues a new one first. It reports whether e was such
+// an hs.init.
+func (m *Manager) reconnectRefused(e *OutboxEntry, code string, now time.Time) bool {
+	for _, id := range sortedKeys(m.st.Outgoing) {
+		og, sortedOK := m.st.Outgoing[id]
+		if !sortedOK {
+			continue // removed earlier in this loop
+		}
+		if og.InitOutbox != e.ID || og.New != nil || og.Purpose != handshake.PurposeReconnect {
+			continue
+		}
+		op := m.peer(og.PeerID)
+		if op == nil || op.Kind != KindConnection {
+			return false
+		}
+		named := og.Named
+		if op.Reconnect.Token == e.Token {
+			op.Reconnect = HeldToken{}
+		}
+		if code == CodeTokenRevoked {
+			m.recordRevokedHeld(op, e.Token, now)
+		}
+		m.audit(now, "reconnect_"+code, op.ID)
+		m.abandonOutgoing(id, now)
+		e.Done = true
+		m.reconnectFailed(op, named, now)
+		m.dirty = true
+		return true
+	}
+	return false
+}
+
 // dropHeldToken forgets tok as p's standing token and records its jti as
 // revoked until its exp, so that it is refused if offered again.
 func (m *Manager) dropHeldToken(p *Peer, tok string, now time.Time) {
 	if p.Standing.Token == tok {
 		p.Standing = HeldToken{}
 	}
+	m.recordRevokedHeld(p, tok, now)
+}
+
+// recordRevokedHeld records tok's jti in p.RevokedHeld until its exp
+// (dropping the entries whose exp has passed), so that heldToken refuses
+// it if it is offered again.
+func (m *Manager) recordRevokedHeld(p *Peer, tok string, now time.Time) {
 	if c, err := relayauth.ParseToken(tok, p.Relay.PK); err == nil {
 		kept := p.RevokedHeld[:0]
 		for _, r := range p.RevokedHeld {

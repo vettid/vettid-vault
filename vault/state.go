@@ -725,6 +725,12 @@ type AwaitingHS struct {
 	// followed at hs.fin.
 	Signer []byte            `json:"signer,omitempty"`
 	Links  []json.RawMessage `json:"links,omitempty"`
+	// InitEpoch is the epoch a rekey's hs.init traveled under: strict F1
+	// takes it as E when the hs.init's links are applied at hs.fin (§3.4.1
+	// invariant I3, owner decision 2026-11-12). A record written before it
+	// has none: its links are followed with no strict F1, as they were
+	// then (only "Epochs after an ik link" by position).
+	InitEpoch []byte `json:"init_epoch,omitempty"`
 }
 
 // PendingReconnect is a reconnect hs.init's effects, held until hs.fin.

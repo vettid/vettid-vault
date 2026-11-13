@@ -106,18 +106,23 @@ func (o *RecoveryOpenOutcome) fail(code string) *RecoveryOpenOutcome {
 
 // openWriter writes the header of a recovery open that changes it (a
 // wrong pair's tag, the moved expiry, the log) with a conditional write.
+// stored is the header_seq of the header last known stored (read, or put
+// by write): the one the outcome keeps (only an ok's answer carries a
+// header_seq, §11.4, §13.2). A put that failed may still have stored, so
+// its seq is not used again.
 type openWriter struct {
-	p    *RecoveryOpenParams
-	hkey string
-	ver  store.Version
-	hdr  *Header
+	p      *RecoveryOpenParams
+	hkey   string
+	ver    store.Version
+	hdr    *Header
+	stored uint64
 }
 
 func (w *openWriter) write(ctx context.Context) {
 	w.hdr.HeaderSeq++
 	if b, err := sealHeader(ctx, w.p.Sealer, w.hdr); err == nil {
 		if v, err := w.p.Store.Put(ctx, w.hkey, b, w.ver); err == nil {
-			w.ver = v
+			w.ver, w.stored = v, w.hdr.HeaderSeq
 		}
 	}
 }
@@ -147,7 +152,7 @@ func RecoveryOpen(ctx context.Context, p RecoveryOpenParams) (*Manager, *Recover
 		return drop()
 	}
 	defer suite.Wipe(hdr.Pepper)
-	w := &openWriter{p: &p, hkey: hkey, ver: hver, hdr: hdr}
+	w := &openWriter{p: &p, hkey: hkey, ver: hver, hdr: hdr, stored: hdr.HeaderSeq}
 	out.HeaderSeq = hdr.HeaderSeq
 	// Step 1: the recovery record names this recovery and this phone.
 	r := hdr.Recovery
@@ -230,7 +235,7 @@ func RecoveryOpen(ctx context.Context, p RecoveryOpenParams) (*Manager, *Recover
 		r.WrongAgain++
 		hdr.logRecovery(now, "recovery.open", openRef(r, OpenWrongAgain))
 		w.write(ctx)
-		out.HeaderSeq = hdr.HeaderSeq
+		out.HeaderSeq = w.stored
 		return nil, out.fail(OpenWrongAgain)
 	}
 	// Step 3: the first look.
@@ -282,7 +287,7 @@ func RecoveryOpen(ctx context.Context, p RecoveryOpenParams) (*Manager, *Recover
 	if sp.Outcome == counter.Lost {
 		hdr.logRecovery(now, "recovery.open", openRef(r, OpenAttemptLost))
 		w.write(ctx)
-		out.HeaderSeq = hdr.HeaderSeq
+		out.HeaderSeq = w.stored
 		return nil, out.fail(OpenAttemptLost)
 	}
 	// Step 4b: decided against the attempt's own time.
@@ -312,7 +317,7 @@ func RecoveryOpen(ctx context.Context, p RecoveryOpenParams) (*Manager, *Recover
 		r.LastWrong, r.WrongAgain = tag, 0
 		hdr.logRecovery(now, "recovery.open", openRef(r, OpenWrong))
 		w.write(ctx)
-		out.HeaderSeq = hdr.HeaderSeq
+		out.HeaderSeq = w.stored
 		return nil, out.fail(OpenWrong)
 	}
 	defer suite.Wipe(rk)
@@ -327,7 +332,7 @@ func RecoveryOpen(ctx context.Context, p RecoveryOpenParams) (*Manager, *Recover
 	if err != nil {
 		return nil, out.fail(OpenStoredMismatch)
 	}
-	m, code := openState(ctx, p, hdr, hver, sblob, sver, dek)
+	m, code := openState(ctx, p, hdr, hver, w.stored, sblob, sver, dek)
 	if code == codeDeleted {
 		return drop()
 	}
@@ -412,7 +417,10 @@ func spendCode(o string) string {
 }
 
 // openState decrypts the stored state under dek and makes the manager.
-func openState(ctx context.Context, p RecoveryOpenParams, hdr *Header, hver store.Version, sblob []byte, sver store.Version, dek []byte) (*Manager, string) {
+// storedSeq is the header_seq of the header known stored (the open's
+// writer's last successful put, or the header as read).
+func openState(ctx context.Context, p RecoveryOpenParams, hdr *Header, hver store.Version, storedSeq uint64, sblob []byte, sver store.Version,
+	dek []byte) (*Manager, string) {
 	pt, seq, err := decryptState(dek, p.VaultID, sblob)
 	if err != nil {
 		suite.Wipe(dek)
@@ -433,6 +441,7 @@ func openState(ctx context.Context, p RecoveryOpenParams, hdr *Header, hver stor
 	h.Pepper = append([]byte(nil), hdr.Pepper...)
 	m := newManager(p.Options, &st, &h, dek)
 	m.stateVer, m.headerVer = sver, hver
+	m.storedHeaderSeq = storedSeq
 	if st.Deleting != nil {
 		// 0.51.0 (§12.5): a state that records deleting never runs; the
 		// deletion is finished instead and the open is answered as for a
@@ -662,7 +671,7 @@ func resumeRecovery(ctx context.Context, p RecoveryOpenParams, hdr *Header, hver
 	} else if stateVer != hdr.DEKVersion {
 		return nil, out.fail(OpenStoredMismatch)
 	}
-	m, code := openState(ctx, p, hdr, hver, sblob, sver, append([]byte(nil), dek...))
+	m, code := openState(ctx, p, hdr, hver, hdr.HeaderSeq, sblob, sver, append([]byte(nil), dek...))
 	if code == codeDeleted {
 		suite.Wipe(uk)
 		suite.Wipe(d0)

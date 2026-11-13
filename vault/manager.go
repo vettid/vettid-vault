@@ -456,6 +456,12 @@ type Manager struct {
 	// storedView is the header as last read or written (a header write
 	// that failed leaves it): `locked` reports it (report).
 	storedView *headerView
+	// storedHeaderSeq is the header_seq of the header last known stored
+	// (read at the load, or put by writeHeaderWith). m.hdr.HeaderSeq runs
+	// ahead of it after a put that failed: such a put may still have
+	// stored, so the seq is not used again, and an answer reports this
+	// one, a floor the phone may safely keep (§11.4, §13.2).
+	storedHeaderSeq uint64
 	// headerBehind: the last state write was stored and the header write
 	// after it failed; the batch's host reports wait for a write that
 	// stores the header too (ProcessBatch).
@@ -628,7 +634,7 @@ func Create(ctx context.Context, p CreateParams) (*Manager, error) {
 		return nil, err
 	}
 	m := newManager(p.Options, st, hdr, dek)
-	m.storedView = nil
+	m.storedView, m.storedHeaderSeq = nil, 0 // its header is not stored yet
 	if len(hdr.AppKey) > 0 {
 		m.acked, m.pinned, m.enrolling = nil, ackedKey{}, true // the first header: the host confirms it
 	}
@@ -746,6 +752,7 @@ func newManager(o Options, st *State, hdr *Header, dek []byte) *Manager {
 	}
 	if hdr != nil {
 		m.storedView = viewOf(hdr) // Create clears it: its header is not stored yet
+		m.storedHeaderSeq = hdr.HeaderSeq
 	}
 	if hdr != nil && len(hdr.AppKey) > 0 {
 		// The stored header names it already (a crash that lost the report
@@ -1151,6 +1158,7 @@ func (m *Manager) writeHeaderWith(ctx context.Context, features bool) error {
 		return err
 	}
 	m.headerVer = v
+	m.storedHeaderSeq = m.hdr.HeaderSeq
 	m.storedView = viewOf(m.hdr)
 	if len(m.hdr.AppKey) > 0 {
 		m.pin(m.hdr.AppKey, m.hdr.AppKeySeq) // the stored header names it now

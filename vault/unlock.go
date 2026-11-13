@@ -360,10 +360,13 @@ func UnlockAlt(ctx context.Context, p AltUnlockParams) (*Manager, *AltUnlockOutc
 		hdr.Backoff.Failures++
 		hdr.Backoff.NotBefore = now.Add(backoffFor(hdr.Backoff.Failures))
 		hdr.HeaderSeq++
-		out.HeaderSeq = hdr.HeaderSeq
 		out.RetryAfter = backoffFor(hdr.Backoff.Failures)
 		if b, err := sealHeader(ctx, p.Sealer, hdr); err == nil {
-			_, _ = p.Store.Put(ctx, hkey, b, hver)
+			if _, err := p.Store.Put(ctx, hkey, b, hver); err == nil {
+				// Only a header known to be stored raises the phone's floor
+				// (§11.4, §13.2); otherwise the answer keeps the seq read.
+				out.HeaderSeq = hdr.HeaderSeq
+			}
 		}
 		return nil, out.fail(CodeBadPIN, ErrBadPIN)
 	default:
@@ -751,7 +754,7 @@ func (m *Manager) resume(ctx context.Context, p AltUnlockParams, out *AltUnlockO
 		if err := m.writeHeader(ctx); err != nil && errors.Is(err, ErrSplitBrain) {
 			return nil, out.fail(CodeRetry, err)
 		}
-		out.HeaderSeq = m.hdr.HeaderSeq
+		out.HeaderSeq = m.storedHeaderSeq // not the seq of a write that failed
 		return fail(CodeNoBackup, ErrRecoveryNoBackup)
 	}
 	if err := m.loadKeys(); err != nil {

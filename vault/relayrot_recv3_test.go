@@ -94,3 +94,75 @@ func TestRuleUEarlierAfterCutoffPartlyFollowedRotationsRefused(t *testing.T) {
 		t.Fatal("the update was not refused superseded_relay")
 	}
 }
+
+// RK5's guard: an update whose new identity link makes the vault suspend
+// (R29-K9: an epoch it abandoned while pending, its received flag set by
+// a copy) follows no relay link, keeps no token and is not answered; the
+// suspension stands.
+func TestRK5UpdateLinksSuspendNothingFollowed(t *testing.T) {
+	f, e1 := k9Setup(t, true)
+	f.m(0).opt.RelayKeyRotation = true
+	f.deliver(0, 2, kHSFin)
+	f.deliver(2, 0, kConfirm)
+	if !f.flag(0, e1) || f.p(0).suspended() {
+		t.Fatal("setup: E1's flag not set, or suspended early")
+	}
+	f.lose(1, 0, kRotate)
+	f.rkSend(true, true) // carries ik0 -> ik1, not yet followed
+	f.deliver(1, 0, kOther)
+	if !f.suspendedRef(0, "epoch") {
+		t.Fatal("setup: the update's link did not suspend (K9)")
+	}
+	if f.followedK1() || f.p(0).Standing.Token == "" {
+		t.Fatal("a relay link was followed, or tokens taken, after the links suspended")
+	}
+	for _, e := range f.m(0).st.Outbox {
+		if !e.Done && e.Type == tokenIssuedType {
+			t.Fatal("the update was answered after the links suspended")
+		}
+	}
+}
+
+// R29-K9 runs before RK5's ik requirement for an update from an earlier
+// key after its cut-off whose identity links are all already followed:
+// the update is refused for the requirement (its links do not start at
+// the epoch's signer), and K9 has still ended the epoch the vault
+// abandoned while pending.
+func TestRK5EarlierAfterAllFollowedK9BeforeIKRequirement(t *testing.T) {
+	f, e1 := k9Setup(t, false)
+	f.m(0).opt.RelayKeyRotation = true
+	f.rotate(1)
+	f.rotate(1)
+	f.lose(1, 0, kRotate)
+	f.lose(1, 0, kHSInit)
+	p := f.p(0)
+	for _, raw := range f.m(1).st.Rotations { // both links already followed
+		r, err := handshake.ParseRotation(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		p.IK, p.KEM = append([]byte(nil), r.NewIK...), r.NewKEM.Bytes()
+		p.Chain = append(p.Chain, r.Marshal())
+	}
+	f.rkFollow() // K -> rkKey(0xa7), cut-off rkCut
+	k, k2 := f.m(1).keys.relay, rkKey(0xa7)
+	u := &peerwire.AddressUpdate{Relay: rkAddr(k2), Token: f.rk8Tok(k2, "k9-st", 25*24*time.Hour), Links: []*handshake.RelayLink{rkLink(t, k, k2)}}
+	f.do(1, func(m *Manager, p *Peer) {
+		u.Rotations = m.ownRotationsSince(1) // ik1 -> ik2 only: not from the epoch's signer ik0
+		b, err := u.Marshal()
+		if err != nil {
+			t.Fatal(err)
+		}
+		m.sendTo(p, peerwire.TypeRelayAddressUpdate, b, f.clk)
+	})
+	if f.ended(0, e1) {
+		t.Fatal("setup: E1 already ended")
+	}
+	f.process(0, f.rkTake(kOther, rkAfter))
+	if !f.ended(0, e1) {
+		t.Fatal("R29-K9 was not judged before the ik requirement")
+	}
+	if f.activityCount(0, "drop.peer_key", "ancestor_ik") != 1 {
+		t.Fatal("the update was not refused for the ik requirement")
+	}
+}

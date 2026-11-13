@@ -265,7 +265,8 @@ func (m *Manager) answerUpdate(p *Peer, now time.Time) {
 // whether the update may go on. A device rotates no ik (§6.7): its update
 // carrying identity links cannot occur and is refused (unexpected).
 //
-// The ik requirement is judged before any link is applied, against the ik
+// Links all already followed are judged by R29-K9 first (evidence first).
+// Otherwise the ik requirement is judged before any link is applied, against the ik
 // the links would lead to (rotsOutcome, which makes Table B's decisions
 // without acting on them): an update refused for it has none of its
 // identity links followed (§3.4.2 RK10: "An update Q refuses has none of
@@ -295,6 +296,16 @@ func (m *Manager) rk5(s *Session, rots []*handshake.Rotation) bool {
 		m.applyIDLinks(p, rots, ep, now)
 		return false
 	}
+	// Links all already followed change nothing and are evidence only:
+	// R29-K9 is judged on them first, before the ik requirement (evidence
+	// first, as for an identity.rotate Table A ignores), whatever the
+	// update's fate.
+	known := len(rots) > 0 && handshake.KnownPrefix(parseRotations(p.Chain), rots) == len(rots)
+	if known {
+		if !m.applyIDLinks(p, rots, ep, now) || m.rk5Stops(p, ep) {
+			return false
+		}
+	}
 	var signer []byte
 	if e := p.epochMeta(ep); e != nil {
 		signer = e.Signer
@@ -314,10 +325,24 @@ func (m *Manager) rk5(s *Session, rots []*handshake.Rotation) bool {
 		}
 		return false
 	}
-	if len(rots) > 0 && !m.applyIDLinks(p, rots, ep, now) {
+	if len(rots) > 0 && !known && !m.applyIDLinks(p, rots, ep, now) {
 		return false // a conflict, or the record suspended
 	}
-	return !p.suspended() // the links may have made it suspend (K9, a flag set)
+	return !m.rk5Stops(p, ep)
+}
+
+// rk5Stops is the guard after an update's identity links are applied: if
+// they made the vault suspend p (R29-K9, a received flag, a conflict), or
+// ended the epoch the update travels under, the vault follows no relay
+// link, keeps no token and sends no answer; the suspension stands. (A
+// seam for a later rule: an update refused only for its identity links
+// could still be answered as a duplicate here; not built.)
+func (m *Manager) rk5Stops(p *Peer, ep []byte) bool {
+	if p.suspended() {
+		return true
+	}
+	e := p.epochMeta(ep)
+	return e != nil && e.Ended
 }
 
 // rotsOutcome is the ik p's identity links rots lead to, worked out as

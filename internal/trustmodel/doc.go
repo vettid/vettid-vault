@@ -39,7 +39,7 @@
 //     S1PAUSE, and the cap on RK6, RK9, RK10 and RK11. RK14: GRACE14, HOLD
 //     and TELL. RK15 is not a rule: the randomized runs check it.
 //
-// From VAULT-MESSAGING 0.90.4 (vettid.org #588, an erratum to §3.4.1
+// From VAULT-MESSAGING 0.90.4 (an erratum to §3.4.1
 // Strict F1) the model also runs Strict F1 on the links a rekey or
 // reconnect hs.init carried, applied at its verified hs.fin (E: the
 // epoch the rekey traveled under or the reconnect named; no reconnect

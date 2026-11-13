@@ -648,7 +648,14 @@ func (m *Manager) hTokenRefresh(_ context.Context, s *Session, _ *envelope.Inner
 // step 3, or step 1 with §3.4.2 RK12), which can record a relay fork or
 // refuse a device's second successor (conflict); the update itself is
 // still refused here.
-func (m *Manager) hAddressUpdate(_ context.Context, s *Session, _ *envelope.Inner) (json.RawMessage, error) {
+//
+// With Options.RelayKeyRotation the update is handled by §3.4.1 rule U
+// (ruleU) instead.
+func (m *Manager) hAddressUpdate(_ context.Context, s *Session, in *envelope.Inner) (json.RawMessage, error) {
+	if m.opt.RelayKeyRotation {
+		m.ruleU(s, in)
+		return nil, nil
+	}
 	m.refusePeerKey(s.peer, "relay_unlinked", s.now)
 	return nil, nil
 }

@@ -19,9 +19,8 @@ import (
 //     accepted, relay.token.issued is accepted, and identity.rotate, hs.init,
 //     hs.resp and hs.fin go to Table B.
 //   - Earlier, after its cut-off: refused (superseded_relay), except
-//     relay.address.update (rule U: still the handler's refusal,
-//     relay_unlinked, until rule U is built), relay.token.issued (its tokens
-//     only), and an identity.rotate whose every link is already followed
+//     relay.address.update (rule U, ruleU), relay.token.issued (its tokens
+//     only, by rule T), and an identity.rotate whose every link is already followed
 //     (ignored; R29-K9 is still judged). A refused hs.resp or hs.fin keeps
 //     its handshake (S2).
 //

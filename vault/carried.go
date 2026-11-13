@@ -48,6 +48,9 @@ func (m *Manager) adoptCarried(p *Peer, c *CarriedTokens) {
 	m.adoptHeld(p, TokStanding, &p.Standing, c.Standing)
 	if p.Kind == KindConnection {
 		m.adoptHeld(p, TokReconnect, &p.Reconnect, c.Reconnect)
+		if m.opt.RelayKeyRotation {
+			m.rk6Tick(p, m.now()) // §3.4.2 RK6: a token adopted at a confirmation
+		}
 	}
 	m.retryPeer(p.ID)
 	m.dirty = true

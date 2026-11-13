@@ -396,6 +396,14 @@ type Peer struct {
 	// the first successor stays, the other is refused (conflict), and the
 	// vault sends that device nothing more.
 	RelayConflict *RelayConflict `json:"relay_conflict,omitempty"`
+	// RelayRestart is §3.4.2 RK6's owed restart: an own reconnect the
+	// vault abandoned when it followed the peer's relay link, started
+	// again once it holds a reconnect token for the peer's current
+	// mailbox (rk6Tick).
+	RelayRestart *RelayRestart `json:"relay_restart,omitempty"`
+	// RelayDupAt is when the vault last answered a duplicate
+	// relay.address.update with fresh tokens (rule U; §7.2's bound).
+	RelayDupAt time.Time `json:"relay_dup_at,omitzero"`
 }
 
 // RevokedToken is a revoked standing token's jti and exp.

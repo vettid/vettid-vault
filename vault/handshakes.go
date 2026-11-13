@@ -1186,6 +1186,9 @@ func (m *Manager) activate(p *Peer, ep *handshake.Epoch, purpose handshake.Purpo
 		m.record(Activity{Kind: "connection.active_again", ConnectionID: p.ID, Ref: p.ID, Audit: !restored, Feed: true}, now)
 	}
 	for _, t := range issued {
+		if m.opt.RelayKeyRotation && m.issuedRecorded(t.JTI) {
+			continue // revoked before activation (rule U's follow): it stays denied
+		}
 		t.PeerID = p.ID
 		t.Handshake = true // 0.88.2 §7.2: the quota refresh spares the newest
 		m.st.Issued = append(m.st.Issued, t)

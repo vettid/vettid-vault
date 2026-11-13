@@ -19,7 +19,8 @@ import (
 // VAULT-MESSAGING 0.90.3 §3.4.1 rule C for relay links (one successor per
 // key; links kept as seen; at most 32 per peer; the relay fork; the vault
 // and its own device) and §3.4.2 RK12 (relay links seen while suspended).
-// The update itself is still refused (relay_unlinked): rule U is not built.
+// The updates here carry a token that does not verify, so rule U refuses
+// them (token_unusable) after rule C has run.
 
 // rkUpdate is a relay.address.update body announcing to with links.
 func rkUpdate(t testing.TB, to ed25519.PrivateKey, links ...*handshake.RelayLink) string {
@@ -112,8 +113,8 @@ func TestRuleCRelayForkFromTwoUpdates(t *testing.T) {
 	if s := seenLinks(p); len(s) != 1 || !suite.EqualPublic(s[0][0], rkPub(k)) || !suite.EqualPublic(s[0][1], rkPub(ka)) || p.suspended() {
 		t.Fatalf("the update's link was not kept as seen: %v", s)
 	}
-	if got := d.audits("drop.peer_key"); len(got) != 1 || got[0].Ref != "relay_unlinked" {
-		t.Fatalf("the update was not still refused relay_unlinked: %+v", got)
+	if got := d.audits("drop.peer_key"); len(got) != 1 || got[0].Ref != "token_unusable" || !suite.EqualPublic(p.Relay.PK, rkPub(k)) {
+		t.Fatalf("the update was not refused token_unusable, or was followed: %+v", got)
 	}
 	sendC(d, td, "relay.address.update", rkUpdate(t, ka, rkLink(t, k, ka)))
 	if len(p.RelaySeen) != 1 || p.suspended() {

@@ -245,6 +245,9 @@ func (m *Manager) storeIssuedTo(p *Peer, body json.RawMessage, now time.Time) {
 			if h := m.opt.Hooks.Adopt; h != nil {
 				h(p.ID, TokReconnect, ht.Token, "issued")
 			}
+			if m.opt.RelayKeyRotation {
+				m.rk6Tick(p, now) // §3.4.2 RK6: a restart owed for want of this token
+			}
 		}
 		return
 	}

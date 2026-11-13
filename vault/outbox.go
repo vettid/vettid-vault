@@ -1039,6 +1039,7 @@ func (m *Manager) housekeeping(now time.Time) {
 	m.pruneRetiredKEMs(now)
 	if m.opt.RelayKeyRotation {
 		m.pruneDeferred(now) // §3.4.1 rule T's deferrals whose message is gone
+		m.rk6Ticks(now)      // §3.4.2 RK6: owed restarts
 	}
 	for id, fr := range m.featureReqs {
 		if now.Sub(fr.at) > featureReqTTL {

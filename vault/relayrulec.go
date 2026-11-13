@@ -192,8 +192,7 @@ func (m *Manager) relayBlocked(id string) bool {
 // audited here) rather than passed on.
 //
 // Rule U itself (following the links, the tokens) and the update's identity
-// links (§3.4.2 RK5: applied first) are not built: the handler still
-// refuses the update (relay_unlinked).
+// links (§3.4.2 RK5: applied first) are the handler's (ruleU).
 func (m *Manager) updateRelayEvidence(p *Peer, in *envelope.Inner, sender ed25519.PublicKey, now time.Time) bool {
 	u, err := peerwire.ParseAddressUpdate(in.Body)
 	if err != nil {

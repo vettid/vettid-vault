@@ -433,6 +433,12 @@ func (m *Manager) peerByRelayKey(pk ed25519.PublicKey) *Peer {
 
 // dispatch handles a decrypted session-mode message from principal p.
 func (m *Manager) dispatch(ctx context.Context, p *Peer, in *envelope.Inner, ep *handshake.Epoch, raw []byte, sender ed25519.PublicKey, now time.Time) disposition {
+	m.msgSender = sender
+	if m.opt.RelayKeyRotation && in.Type == peerwire.TypeRelayAddressUpdate && m.updateParseRefuses(p, in, now) {
+		// §3.4.1 rule U, "When it is refused": a link's form or the
+		// chain's count, at parse time, before acceptFrom step 1.
+		return ackAfterFlush
+	}
 	if m.opt.RelayKeyRotation && in.Type == peerwire.TypeRelayAddressUpdate && m.updateRelayEvidence(p, in, sender, now) {
 		// §3.4.1 acceptFrom step 3 for relay links, and step 1 for a
 		// suspended record (§3.4.2 RK12): rule C first. A device's second

@@ -153,7 +153,10 @@ func TestRelayAddressUpdateRefusedFromEveryPeer(t *testing.T) {
 		for _, c := range cases {
 			name := c.name
 			if on {
-				name += ", relay-key rotation on" // rule C runs first; the update is still refused
+				// Rule U (0.90.3): the legacy body has no relay_links, so it
+				// is a malformed body, refused as a whole: dropped with no
+				// drop.peer_key entry and nothing changed.
+				name += ", relay-key rotation on"
 			}
 			t.Run(name, func(t *testing.T) {
 				d := newDevFixture(t)
@@ -211,6 +214,12 @@ func checkUnchanged(t *testing.T, d *devFixture, p *Peer, before peerSnap) {
 		t.Fatalf("the update changed the peer's relay, tokens or the denylist, or was answered:\n before %+v\n after  %+v", before, after)
 	}
 	got := d.audits("drop.peer_key")
+	if d.m.opt.RelayKeyRotation {
+		if len(got) != 0 {
+			t.Fatalf("a malformed update was audited drop.peer_key: %+v", got)
+		}
+		return
+	}
 	if len(got) != 1 || got[0].Ref != "relay_unlinked" || !got[0].Audit {
 		t.Fatalf("not audited drop.peer_key relay_unlinked: %+v", got)
 	}

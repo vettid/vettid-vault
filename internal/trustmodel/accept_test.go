@@ -1380,8 +1380,13 @@ func (q *Party) tableBFin(r *PeerRec, M *Msg, pos Pos) dec {
 		// reconnect started (the handshake establishes next), or suspends
 		// on a received flag
 		under := Msg{Epoch: a.Ctx}
+		demoted := q.w.stats["R29 K7:demote"]
 		if q.f1DemoteRestart(r, &under, app, pos, pre, false) {
+			q.w.hit("K7:flag-suspend-at-hs.fin")
 			return dec{"suspend", "fork", cell + ":K7-flag"}
+		}
+		if q.w.stats["R29 K7:demote"] > demoted {
+			q.w.hit("K7:demote-at-hs.fin")
 		}
 	}
 	if len(app) > 0 && q.newSpec() && r.Status == stActive && r.Pend != nil {

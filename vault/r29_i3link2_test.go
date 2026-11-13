@@ -2,8 +2,11 @@ package vault
 
 import (
 	"bytes"
+	"crypto/ed25519"
 	"testing"
 	"time"
+
+	"github.com/vettid/vettid-vault/vms/handshake"
 )
 
 // More of §3.4.1 "Strict F1" for links applied at hs.fin (owner decision
@@ -147,5 +150,70 @@ func TestR29I3StrictF1ThenRuleE(t *testing.T) {
 	}
 	if !f.suspendedRef(1, "epoch") || f.activity(1, "drop.peer_key", "ancestor_ik") {
 		t.Fatal("a message under Cur, demoted and destroyed, was not judged as rule E's fork evidence")
+	}
+}
+
+// A restored service (§6.6 "After a restore") whose state holds its own
+// ik link old->new that the member vault never followed: it reconnects
+// naming an older epoch e1 (Older) under the new ik with the link. The
+// epochs after e1 at the vault are signed by the old ik with their flags
+// clear (the service never sent under them). Strict F1 (E = e1) demotes
+// them, audit only; the restore is accepted, nothing suspends, the restored
+// epoch is current and the restored line's epoch e1 is untouched.
+func TestR29I3RestoreReconnectWithLink(t *testing.T) {
+	f := newSvcFx(t, "service")
+	f.build(3)
+	e1, e2, e3 := f.ids[1], f.ids[2], f.ids[3]
+	oldIK := append([]byte(nil), f.p.IK...)
+	for _, id := range [][]byte{e2, e3} {
+		if e := f.p.epochMeta(id); e == nil || !bytes.Equal(e.Signer, oldIK) || e.GotFromPeer {
+			t.Fatal("setup: a later epoch is not signed by the old ik with its flag clear")
+		}
+	}
+	f.sink.got = nil
+
+	newIK := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x7a}, 32))
+	link, err := handshake.NewRotation(f.n.ik, newIK, f.n.kem.Public())
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.n.ik = newIK
+	f.at(10 * time.Hour)
+	ini := f.initiate(e1, f.now(), []*handshake.Rotation{link})
+	f.deliver(ini.Envelope(), "")
+	older := false
+	f.d.m.mu.Lock()
+	for _, aw := range f.d.m.st.Awaiting {
+		older = older || aw.Reconnect != nil && aw.Reconnect.Older && bytes.Equal(aw.Reconnect.Named, e1)
+	}
+	f.d.m.mu.Unlock()
+	if !older {
+		t.Fatal("setup: the restore reconnect was not answered as one naming an older epoch")
+	}
+	res := f.complete(ini)
+	if res == nil {
+		t.Fatal("no hs.resp")
+	}
+	newID := res.Epoch.ID()
+	if f.p.suspended() || f.p.Fork != nil || !bytes.Equal(f.p.LastEpochID, newID[:]) || !bytes.Equal(f.p.IK, newIK.Public().(ed25519.PublicKey)) {
+		t.Fatalf("the restore with a link was not accepted: suspended %v", f.p.suspended())
+	}
+	if f.sink.has("connection.reconnected") || !f.sink.has("connection.restored_reconnect") {
+		t.Fatal("not told as a restore")
+	}
+	for _, id := range [][]byte{e2, e3} {
+		if e := f.p.epochMeta(id); e == nil || !e.Demoted {
+			t.Fatal("a later epoch signed by the old ik was not demoted by strict F1")
+		}
+	}
+	for _, id := range [][]byte{e1, newID[:]} {
+		if e := f.p.epochMeta(id); e == nil || e.Demoted || e.Destroyed {
+			t.Fatal("the named epoch or the restored epoch was judged")
+		}
+	}
+	for _, a := range f.sink.got {
+		if a.Kind == "connection.fork_suspected" && a.Feed {
+			t.Fatal("a feed item for an audit-only demotion")
+		}
 	}
 }

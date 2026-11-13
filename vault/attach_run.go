@@ -1262,10 +1262,12 @@ func (m *Manager) attMaintain(r *attRunner, w *attWork) {
 	if !w.needList || ctx.Err() != nil {
 		return
 	}
-	list, err := m.ownRelay().ListBlobs(ctx)
+	// The current mailbox and the old ones still collected (§3.4 (a)),
+	// read once: a second write meanwhile changes neither for this pass.
+	own := m.ownRelays()
+	cur, olds := own[0], own[1:]
+	list, err := cur.ListBlobs(ctx)
 	listed := err == nil
-	// The old mailboxes still collected (§3.4 (a)): their blobs too.
-	olds := m.ownRelays()[1:]
 	oldLists := make([]BlobList, len(olds))
 	for i, rel := range olds {
 		oldLists[i], _ = rel.ListBlobs(ctx)
@@ -1283,7 +1285,7 @@ func (m *Manager) attMaintain(r *attRunner, w *attWork) {
 		if !listed {
 			break
 		}
-		lists, rels := append([]BlobList{list}, oldLists...), append([]Relay{m.ownRelay()}, olds...)
+		lists, rels := append([]BlobList{list}, oldLists...), own
 		for i, l := range lists {
 			for _, b := range l.Blobs {
 				if b.BlobID == d.blob && b.Sender != "" && b.Sender == d.sender {
@@ -1323,7 +1325,7 @@ func (m *Manager) attMaintain(r *attRunner, w *attWork) {
 		m.mu.Unlock()
 	}
 	if w.purge && listed {
-		m.attPurge(r, list, m.ownRelay())
+		m.attPurge(r, list, cur)
 		for i, rel := range olds {
 			m.attPurge(r, oldLists[i], rel)
 		}

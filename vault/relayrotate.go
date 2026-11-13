@@ -220,15 +220,6 @@ func (m *Manager) relayFor(tok string) Relay {
 	return m.relay
 }
 
-// ownRelay is the current Relay, read under the vault's lock: for the
-// attachment workers, which run unlocked, while the second write (§3.4
-// step 3) replaces it under the lock. Never called with the lock held.
-func (m *Manager) ownRelay() Relay {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.relay
-}
-
 // blobMailbox is the own mailbox a blob named by the message being handled
 // was put in: the one the message was collected from ("" without
 // Options.RelayKeyRotation: the current one).
@@ -305,7 +296,9 @@ func (m *Manager) deleteBlobIn(ctx context.Context, mb, id string) {
 
 // ownRelays are the Relays of the vault's own mailboxes whose blobs it
 // keeps: the current one first, then each old one still collected. Takes
-// the lock.
+// the lock: for the attachment workers, which run unlocked, while the
+// second write (§3.4 step 3) replaces the current Relay under it. Never
+// called with the lock held.
 func (m *Manager) ownRelays() []Relay {
 	m.mu.Lock()
 	defer m.mu.Unlock()

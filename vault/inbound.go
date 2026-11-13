@@ -272,6 +272,7 @@ func (m *Manager) ProcessBatch(ctx context.Context, c Collector, msgs []Message)
 			}
 		}
 		if m.locked {
+			m.msgMailbox = ""
 			return ErrSplitBrain
 		}
 	}

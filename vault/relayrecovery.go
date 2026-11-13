@@ -80,6 +80,8 @@ func (m *Manager) inheritedKeyAtOpen(ctx context.Context, p RecoveryOpenParams, 
 		if m.freshKeyAtOpen(ctx, pr, now) {
 			return
 		}
+		// Nothing changed: the inherited key, whose registration was
+		// refused, stays in the refused state.
 		pr.Refused, pr.RetryAfter = RelayCode(err), time.Time{}
 		if pr.Refused == "" {
 			pr.Refused = "refused"
@@ -97,8 +99,13 @@ func (m *Manager) relayKeyFailedAt(now time.Time) {
 // freshKeyAtOpen registers a fresh key in place of an inherited key whose
 // registration was refused, and makes it current in memory (the step-2
 // write stores it): the only relay key not stored first, since a write
-// before step 2 would be under the DEK the old copy holds. false: none
-// was registered; nothing changed.
+// before step 2 would be under the DEK the old copy holds.
+//
+// The order: the seed and the registration first, which change nothing;
+// only once the relay has the fresh mailbox is the inherited key dropped
+// and the fresh key made current, which cannot fail there (the relay-key
+// rotation owed is met and cleared first, so makePendingCurrent draws no
+// next key). false: no key was registered, and nothing changed.
 func (m *Manager) freshKeyAtOpen(ctx context.Context, pr *PendingRelay, now time.Time) bool {
 	draw := suite.RandomBytes
 	if m.opt.KeyRand != nil {
@@ -121,22 +128,21 @@ func (m *Manager) freshKeyAtOpen(ctx context.Context, pr *PendingRelay, now time
 		suite.Wipe(key)
 		return false
 	}
+	// Registered: from here on nothing fails. The fresh key takes the
+	// inherited key's place, with every mark owed: it meets the relay-key
+	// rotation owed and is the recovery's own relay key, so the
+	// recovery's rotation generates none.
 	m.limits = lim
-	// The fresh key takes the inherited key's place, with every mark owed:
-	// it meets the relay-key rotation owed and is the recovery's own relay
-	// key, so the recovery's rotation generates none.
 	marks := unionMarks(unionMarks(pr.Marks, pr.Next), m.st.RotationOwed)
 	named := pr.Named
-	m.dropPendingRelay()
 	if o := m.st.RotationOwed; o != nil {
 		o.RelayKey = time.Time{}
 	}
+	m.dropPendingRelay()
 	m.st.Relay.Pending = &PendingRelay{Seed: seed, Held: map[string]*HeldTokens{}, Marks: marks, Named: named}
 	m.keys.pendingRelay = key
 	m.rk.pending = m.withKey(key)
-	if !m.makePendingCurrent(true, now) { // every held token minted, iat now
-		return false
-	}
+	m.makePendingCurrent(true, now) // every held token minted, iat now; no next key drawn (above)
 	m.rk.relayMet = true
 	return true
 }

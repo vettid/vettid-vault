@@ -395,7 +395,7 @@ func TestRelayRotDeleteWithAKeyPending(t *testing.T) {
 
 // The attachment workers run without the vault's lock while the second
 // write replaces the current Relay under it: they read it through
-// ownRelay, and an upload takes its Relay with its token under the lock
+// ownRelays, and an upload takes its Relay with its token under the lock
 // (run with -race).
 func TestRelayRotSecondWriteDoesNotRaceTheAttachmentWorkers(t *testing.T) {
 	fx := newRotFx(t)
@@ -408,7 +408,7 @@ func TestRelayRotSecondWriteDoesNotRaceTheAttachmentWorkers(t *testing.T) {
 				return
 			default:
 			}
-			_ = fx.m.ownRelay().BaseURL()
+			_ = fx.m.ownRelays()[0].BaseURL()
 			_, _, _ = fx.m.PutBlobTo(context.Background(), "c1", []byte("x"))
 		}
 	}()

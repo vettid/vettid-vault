@@ -29,6 +29,9 @@ func (m *Manager) reconnectNaming(p *Peer, ctx []byte, why string, now time.Time
 		return false
 	}
 	if noReconnectToken(p, now) {
+		if m.relayAwaitsRC(p, ctx, now) {
+			return false // §3.4.2 RK6: owed until a token for the new mailbox arrives
+		}
 		if !m.carriedWait(p, now) { // 0.88.2 §6.3.1: not judged while carried tokens wait
 			m.markStale(p, now) // §3.4.1 "The reconnect bound": no reconnect token
 		}

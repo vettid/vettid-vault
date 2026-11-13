@@ -147,12 +147,23 @@ type ResponderConfig struct {
 	Token          string
 	ReconnectToken string
 	Rotations      []*Rotation // reconnect: own rotations since the last epoch
-	PinnedSuite    uint8
-	Policy         Policy
+	// Relay and RelayLinks (0.90.0 §6.2, §3.4.2 RK8): an answer to a
+	// reconnect deposited with a key earlier than Relay.PK announces it
+	// with the signed relay links from the deposit key up to it.
+	Relay       *RelayAddr
+	RelayLinks  []*RelayLink
+	PinnedSuite uint8
+	Policy      Policy
 
 	// CollectSender is the relay `sender` of the hs.init deposit. It MUST
-	// equal from.relay.pk (§6.3).
+	// equal from.relay.pk (§6.3), unless LinkedSender.
 	CollectSender ed25519.PublicKey
+	// LinkedSender (0.90.0 §3.4.1 Table A, §3.4.2 RK8): a reconnect hs.init
+	// whose relay_links connect CollectSender to from.relay.pk, verified
+	// here, is accepted from CollectSender, and the hs.fin is expected
+	// from it too. The caller sets it only with relay-key rotation on, and
+	// has judged CollectSender a key it keeps for the peer.
+	LinkedSender bool
 	// RecordRelayKey is the relay key on record for the peer. Required for
 	// rekey and reconnect, where the sender must also equal it (§6.3,
 	// §6.6).
@@ -242,7 +253,8 @@ func (p *PendingInit) Respond(cfg ResponderConfig) (*Responder, []byte, error) {
 		sched.Destroy()
 		return nil, nil, err
 	}
-	resp := &Resp{Token: cfg.Token, ReconnectToken: cfg.ReconnectToken, Suite: int(chosen), Rotations: cfg.Rotations, SASNonce: nR, Sig: sig}
+	resp := &Resp{Token: cfg.Token, ReconnectToken: cfg.ReconnectToken, Suite: int(chosen), Rotations: cfg.Rotations, SASNonce: nR, Sig: sig,
+		Relay: cfg.Relay, RelayLinks: cfg.RelayLinks}
 	rb, err := resp.Marshal(p.body.Purpose)
 	if err != nil {
 		sched.Destroy()
@@ -262,7 +274,9 @@ func (p *PendingInit) Respond(cfg ResponderConfig) (*Responder, []byte, error) {
 	p.used = true
 	suite.Wipe(p.ks)
 	p.ks = nil
-	return &Responder{sched: sched, verifyIK: verifyIK, sender: p.body.From.Relay.PK, suiteID: chosen, policy: cfg.Policy,
+	// The hs.fin is expected from the hs.init's deposit key: from.relay.pk
+	// itself unless the hs.init's relay links were accepted (LinkedSender).
+	return &Responder{sched: sched, verifyIK: verifyIK, sender: append(ed25519.PublicKey(nil), cfg.CollectSender...), suiteID: chosen, policy: cfg.Policy,
 		purpose: p.body.Purpose, commit: append([]byte(nil), p.body.SASCommit...), nR: nR}, out, nil
 }
 
@@ -270,8 +284,13 @@ func (p *PendingInit) Respond(cfg ResponderConfig) (*Responder, []byte, error) {
 // verify under.
 func (p *PendingInit) checkInitiator(cfg ResponderConfig) (ed25519.PublicKey, error) {
 	b := p.body
-	// §6.3: the collect sender MUST equal from.relay.pk for hs.init.
-	if !suite.EqualPublic(cfg.CollectSender, b.From.Relay.PK) {
+	// §6.3: the collect sender MUST equal from.relay.pk for hs.init,
+	// unless (RK8) a reconnect's relay links connect it to from.relay.pk.
+	if cfg.LinkedSender && b.Purpose == PurposeReconnect && len(b.RelayLinks) > 0 {
+		if VerifyRelayChain(cfg.CollectSender, b.From.Relay.PK, b.RelayLinks) != nil {
+			return nil, ErrSender
+		}
+	} else if !suite.EqualPublic(cfg.CollectSender, b.From.Relay.PK) {
 		return nil, ErrSender
 	}
 	if cfg.ExpectedCtx != "" && cfg.ExpectedCtx != b.Ctx {
@@ -329,6 +348,14 @@ func (p *PendingInit) checkInitiator(cfg ResponderConfig) (ed25519.PublicKey, er
 // runtime can route it to this pending responder.
 func (r *Responder) Kids() (recipient, sender suite.Kid) {
 	return r.sched.KidI2R, r.sched.KidR2I
+}
+
+// CollectSender is the relay key the hs.init was deposited with, which
+// HandleFin expects hs.fin to be deposited with too.
+func (r *Responder) CollectSender() ed25519.PublicKey {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append(ed25519.PublicKey(nil), r.sender...)
 }
 
 // Abort destroys the pending state.

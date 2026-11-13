@@ -10,6 +10,7 @@ import (
 
 	"github.com/vettid/vettid-vault/vms/envelope"
 	"github.com/vettid/vettid-vault/vms/handshake"
+	"github.com/vettid/vettid-vault/vms/peerwire"
 	"github.com/vettid/vettid-vault/vms/strictjson"
 	"github.com/vettid/vettid-vault/vms/suite"
 )
@@ -125,55 +126,64 @@ func (m *Manager) hIdentityRotate(_ context.Context, s *Session, in *envelope.In
 	if err != nil {
 		return nil, err
 	}
-	p := s.peer
-	for _, r := range links {
-		if m.rotationConflict(p, r, s.now) {
-			return nil, nil
-		}
-	}
-	if p.suspended() {
-		return nil, nil
-	}
 	var ep []byte
 	if s.epoch != nil {
 		id := s.epoch.ID()
 		ep = id[:]
 	}
+	m.applyIDLinks(s.peer, links, ep, s.now)
+	return nil, nil
+}
+
+// applyIDLinks applies identity links from p carried by a message under
+// epoch ep, as Table B's identity.rotate column says (hIdentityRotate; for
+// a relay.address.update, §3.4.2 RK5). It reports whether the links passed:
+// false when rule C found a conflict, the record is suspended, or Table B
+// refused one (audited with its reason).
+func (m *Manager) applyIDLinks(p *Peer, links []*handshake.Rotation, ep []byte, now time.Time) bool {
+	for _, r := range links {
+		if m.rotationConflict(p, r, now) {
+			return false
+		}
+	}
+	if p.suspended() {
+		return false
+	}
 	known := parseRotations(p.Chain)
 	i := handshake.KnownPrefix(known, links)
 	if i == len(links) {
-		m.k9(p, links, ep, s.now) // every link already followed: ignore, R29-K9 still judged
-		return nil, nil
+		m.k9(p, links, ep, now) // every link already followed: ignore, R29-K9 still judged
+		return true
 	}
 	switch first := links[i].OldIK; {
 	case bytes.Equal(first, p.IK):
 	case p.rejected(first):
-		m.refusePeerKey(p, "rejected_ik", s.now)
-		return nil, nil
+		m.refusePeerKey(p, "rejected_ik", now)
+		return false
 	case p.ancestor(first):
 		// Table B: an ancestor ik in identity.rotate is only "every link
 		// already followed: ignore"; any other case cannot occur ("—"),
 		// so refuse (unexpected).
-		m.refusePeerKey(p, "unexpected", s.now)
-		return nil, nil
+		m.refusePeerKey(p, "unexpected", now)
+		return false
 	default:
-		m.refusePeerKey(p, "unknown_ik", s.now)
-		return nil, nil
+		m.refusePeerKey(p, "unknown_ik", now)
+		return false
 	}
 	app := links[i:]
 	if _, _, err := handshake.ResolveChain(p.IK, app); err != nil {
-		m.audit(s.now, "bad_rotation", p.ID)
-		return nil, nil
+		m.audit(now, "bad_rotation", p.ID)
+		return false
 	}
 	for _, r := range app {
 		if p.ancestor(r.NewIK) || p.rejected(r.NewIK) {
-			m.refusePeerKey(p, "ik_rollback", s.now)
-			return nil, nil
+			m.refusePeerKey(p, "ik_rollback", now)
+			return false
 		}
 	}
-	m.followLinks(p, app, ep, s.now)
-	m.k9(p, links, ep, s.now)
-	return nil, nil
+	m.followLinks(p, app, ep, now)
+	m.k9(p, links, ep, now)
+	return true
 }
 
 // k9 is §3.4.1 "Epochs abandoned while pending, at P's identity.rotate"
@@ -232,6 +242,14 @@ func (m *Manager) evidenceFirst(p *Peer, in *envelope.Inner, now time.Time) bool
 	switch in.Type {
 	case "identity.rotate":
 		links, _ = rotateLinks(in.Body)
+	case peerwire.TypeRelayAddressUpdate:
+		// §3.4.2 RK5: the update's identity links are checked by rule C at
+		// step 3 too (a body that does not parse carries none).
+		if m.opt.RelayKeyRotation {
+			if u, err := peerwire.ParseAddressUpdate(in.Body); err == nil {
+				links = u.Rotations
+			}
+		}
 	case handshake.TypeInit:
 		// A rekey's links are checked here and recorded as seen only once
 		// it has passed rekeyPrecheck (handleRekeyInit, review 5).
@@ -770,7 +788,7 @@ func (m *Manager) tickDemoted(p *Peer, now time.Time) {
 		return
 	}
 	if !m.canReconnect(p, now) {
-		if noReconnectToken(p, now) {
+		if noReconnectToken(p, now) && !m.relayAwaitsRC(p, p.LastEpochID, now) {
 			m.markStale(p, now) // no reconnect token left: no way back (review RR2-3)
 		}
 		return // until something changes (an answer settles): no-op
@@ -970,7 +988,7 @@ func (m *Manager) rekeyPrecheck(p *Peer, in *envelope.Inner, ep *handshake.Epoch
 	if err := in.CheckTime(now, true); err != nil {
 		return err
 	}
-	if !bytes.Equal(sender, p.Relay.PK) || !bytes.Equal(sender, body.From.Relay.PK) {
+	if !bytes.Equal(sender, m.recordRelayKey(p, sender)) || !bytes.Equal(sender, body.From.Relay.PK) {
 		return handshake.ErrSender
 	}
 	if len(body.Rotations) == 0 {

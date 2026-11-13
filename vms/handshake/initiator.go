@@ -39,6 +39,10 @@ type InitiatorConfig struct {
 	DeviceAttest        *altchan.DeviceAttest // purpose app (§6.7)
 	APIKey              []byte                // a transfer's new app: its app key (0.15.0, §6.2)
 	UnlockSecret        []byte                // a transfer's new app: its unlock secret (0.33.0, release R)
+	// RelayLinks (0.90.0 §6.2, §3.4.2 RK8): a reconnect deposited with a
+	// key earlier than Relay.PK carries the signed relay links from the
+	// deposit key up to Relay.PK.
+	RelayLinks []*RelayLink
 
 	// AnonymousSender sets hs.init sender_kid to all-zero instead of the
 	// kid of StaticKEM (§6.2).
@@ -153,6 +157,7 @@ func NewInitiator(cfg InitiatorConfig) (*Initiator, error) {
 		Suites:         cfg.Suites,
 		Profile:        cfg.Profile,
 		Rotations:      cfg.Rotations,
+		RelayLinks:     cfg.RelayLinks,
 		DeviceAttest:   cfg.DeviceAttest,
 		APIKey:         cfg.APIKey,
 		UnlockSecret:   cfg.UnlockSecret,
@@ -214,6 +219,13 @@ func (i *Initiator) EphKid() suite.Kid { return i.body.Eph.Kid() }
 
 // Body returns the hs.init body.
 func (i *Initiator) Body() *Init { return i.body }
+
+// ResponderRelayKey is the relay key the handshake expects hs.resp to be
+// deposited with (InitiatorConfig.ResponderRelayKey): the responder's relay
+// key on record when the handshake began.
+func (i *Initiator) ResponderRelayKey() ed25519.PublicKey {
+	return append(ed25519.PublicKey(nil), i.cfg.ResponderRelayKey...)
+}
 
 // Abort destroys the handshake state. Any later HandleResp fails.
 func (i *Initiator) Abort() {

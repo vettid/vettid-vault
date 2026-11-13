@@ -165,6 +165,14 @@ type Options struct {
 	ConfirmAppKey func(ctx context.Context, c AppKeyConfirm) error
 	// AppKeyRetry overrides the confirmation's retry schedule (tests).
 	AppKeyRetry *AppKeyRetry
+	// RelayKeyRotation turns on the receiving side of relay-key rotation
+	// between vaults that is built so far (VAULT-MESSAGING 0.90.4 §3.4.1,
+	// §3.4.2): a peer's earlier relay keys and their cut-offs, Table A's
+	// rows for them, rule C for relay links with the relay fork, RK12,
+	// rule U and rule T, RK2, RK5 and RK6. Off (the default) the vault behaves exactly as without it. No
+	// release turns it on before the whole of §3.4.2 is built (RK0: the
+	// vault does not advertise relay_follow).
+	RelayKeyRotation bool
 }
 
 // LifecycleEvent is reported to the parent, which writes it to the vault
@@ -262,6 +270,12 @@ type Manager struct {
 	// msgID is the relay msg_id of the message being handled: with
 	// relayAt, its position (§3.4.1 "Terms", 0.86.0).
 	msgID string
+	// msgSender is the collect sender of the message being dispatched
+	// (rule U's end checks, §3.4.1).
+	msgSender ed25519.PublicKey
+	// peerKeyRefusals counts drop.peer_key refusals, so that a message's
+	// handling can tell whether it refused (RK7 records accepted ones only).
+	peerKeyRefusals int
 	// msgJTI is the collect jti of the message being handled (RELAY-PROTOCOL 0.4.0 §6.3): the token it was deposited
 	// under, "" when the relay gave none.
 	msgJTI string

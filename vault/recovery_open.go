@@ -511,16 +511,46 @@ func (m *Manager) completeRecoveryR(ctx context.Context, p RecoveryOpenParams, r
 	if len(r.App.APIKey) > 0 {
 		rep.next.AppKey, rep.next.AppKeySeq = append([]byte(nil), r.App.APIKey...), m.hdr.AppKeySeq+1
 	}
-	// The event in the state (step 2): the phone's first handshake
-	// (ctx = recovery_id, no approval), the other apps removed, the keys
-	// rotated, the attempt's success recorded.
+	// The event in the state (step 2), the attempt's success recorded.
+	m.recoveryEvent(ctx, p, r, now)
+	m.record(Activity{Kind: "recovery.completed", Ref: r.ID, Audit: true, Feed: true}, now)
+	recID := r.ID
+	appKeyFn := m.replacementPromoteFn(rep.next)
+	rep.promoteFn = func() {
+		if appKeyFn != nil {
+			appKeyFn()
+		}
+		if m.hdr.Recovery != nil && m.hdr.Recovery.ID == recID {
+			m.hdr.logRecovery(now, "recovery.completed", recID)
+			m.hdr.Recovery = nil
+		}
+	}
+	if err := m.beginReplace(ctx, rep); err != nil {
+		return fail(OpenRetry)
+	}
+	return m.finishOpen(ctx, p, mv, out, true, now)
+}
+
+// recoveryEvent is the recovery's event in the state (§11.14.6 step 6),
+// in memory, for the step-2 write to store: the phone's first handshake
+// (ctx = recovery_id, no approval), the other apps removed, a transfer's
+// held credential key statement and the old phone's notice sent, and the
+// vault's keys rotated, a relay key left pending completed first (§3.4 "A
+// recovery's inherited key"). A first open and a repeat whose step 2 was
+// not stored (§11.14.2: that state was never stored, so the event is
+// applied again under DEK_1) both call it, so that they make the same event.
+func (m *Manager) recoveryEvent(ctx context.Context, p RecoveryOpenParams, r *RecoveryRecord, now time.Time) {
 	m.setRecoveredInvite(&Invite{ID: r.ID, Kind: KindApp, Exp: now.Add(RecoveredInviteWindow), EnrollIK: r.App.IK, EnrollRelayPK: r.App.RelayPK,
 		EnrollKEM: r.App.KEM, EnrollAttest: r.App.Attestation, CreatedBy: inviteByRecovery}, now)
+	// The vault's signer binding (the old app's, or the one kept across
+	// an iOS app, VA4), before the apps go (§11.7.1).
 	m.keepRecoveredSigner()
 	m.replaceApps("", now)
 	// A transfer's held credential key statement first (the backup copy the
 	// open used holds the new key), then the old phone's notice, before the
-	// keys rotate (§11.14.10).
+	// keys rotate (§11.14.10). rotateIdentity calls both again (each is
+	// taken once, so nothing is sent twice); they stay here so that the
+	// order holds when the rotation cannot be made.
 	m.sendHeldKeyRotations(now)
 	m.sendPendingUnlink(now)
 	// A rotation that cannot be made never fails the recovery: the owed
@@ -545,22 +575,6 @@ func (m *Manager) completeRecoveryR(ctx context.Context, p RecoveryOpenParams, r
 		m.record(Activity{Kind: "identity.rotation_failed", Ref: ref, Audit: true, Feed: true, Priority: "high"}, now)
 	}
 	m.rk.openRecovery = ""
-	m.record(Activity{Kind: "recovery.completed", Ref: r.ID, Audit: true, Feed: true}, now)
-	recID := r.ID
-	appKeyFn := m.replacementPromoteFn(rep.next)
-	rep.promoteFn = func() {
-		if appKeyFn != nil {
-			appKeyFn()
-		}
-		if m.hdr.Recovery != nil && m.hdr.Recovery.ID == recID {
-			m.hdr.logRecovery(now, "recovery.completed", recID)
-			m.hdr.Recovery = nil
-		}
-	}
-	if err := m.beginReplace(ctx, rep); err != nil {
-		return fail(OpenRetry)
-	}
-	return m.finishOpen(ctx, p, mv, out, true, now)
 }
 
 // completionStatusTimeout bounds the counter's status read after a
@@ -716,9 +730,6 @@ func resumeRecovery(ctx context.Context, p RecoveryOpenParams, hdr *Header, hver
 			m.zeroize()
 			return nil, out.fail(OpenWrong)
 		}
-		// The first run's sending of a held credential key statement was in
-		// the state that was not stored (§11.14.10).
-		m.sendHeldKeyRotations(now)
 		// The event's attempt, as the first run set it, and its success
 		// sent again: the first run's PendingSucceed was in the state
 		// that was not stored. A `next` part from before the field has
@@ -727,15 +738,18 @@ func resumeRecovery(ctx context.Context, p RecoveryOpenParams, hdr *Header, hver
 			m.st.RecoveredAttempt = []uint64{ra[0], ra[1]}
 			m.st.PendingSucceed = []uint64{ra[0], ra[1]}
 		}
+		// The event as the first run made it, in the state that was not
+		// stored: the invitation, the recorded signer, the other apps
+		// removed, the held statement and the old phone's notice sent, and
+		// the keys rotated, or the rotation owed (§11.14.6 step 6). RecoveryOpen's
+		// step 1 has checked the record and its phone; without them nothing
+		// is completed (fail closed: never a recovery without its event).
 		r := hdr.Recovery
-		if r != nil && r.App != nil {
-			m.setRecoveredInvite(&Invite{ID: r.ID, Kind: KindApp, Exp: now.Add(RecoveredInviteWindow), EnrollIK: r.App.IK, EnrollRelayPK: r.App.RelayPK,
-				EnrollKEM: r.App.KEM, EnrollAttest: r.App.Attestation, CreatedBy: inviteByRecovery}, now)
-			// The first run's RecoveredSigner was in the state that was
-			// not stored: recorded again before the apps go (§11.7.1).
-			m.keepRecoveredSigner()
-			m.replaceApps("", now)
+		if r == nil || r.App == nil {
+			m.zeroize()
+			return nil, out.fail(OpenNoRecovery)
 		}
+		m.recoveryEvent(ctx, p, r, now)
 	} else {
 		if err := m.loadKeys(); err != nil {
 			m.zeroize()

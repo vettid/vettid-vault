@@ -205,3 +205,45 @@ func TestRelayRotInheritedRegisteredAtTheOpenWaits(t *testing.T) {
 		t.Fatalf("not made current after the wait: %+v", rs)
 	}
 }
+
+// A repeat whose step 2 was not stored makes the first open's event again
+// (recoveryEvent), the inherited key's attempt included: the first open's
+// state write fails after its attempt, and the repeat through the `next`
+// wrap completes the key, as the first open did in the state that was not
+// stored.
+func TestRelayRotInheritedCompletedAtARepeatAfterStep1(t *testing.T) {
+	io := &inheritedOpen{rw: newRotWorld()}
+	io.f = newOpenFixtureWith(t, func(f *openFixture) {
+		f.m.mu.Lock()
+		defer f.m.mu.Unlock()
+		f.m.opt.RelayKeyRotation = true
+		for range 2 {
+			if err := f.m.rotateKeys(f.clock, true); err != nil {
+				t.Fatal(err)
+			}
+		}
+		io.k, io.p = f.m.st.Relay.Mailbox, f.m.pendingMailbox()
+		if err := f.m.persist(context.Background(), false); err != nil {
+			t.Fatal(err)
+		}
+	})
+	io.f.opts.RelayKeyRotation, io.f.opts.RelayKeyRotationUnfinished = true, true
+	io.f.opts.Relay = func(base string, key ed25519.PrivateKey) Relay {
+		return &rotRelay{stubRelay: &stubRelay{base: base, key: key}, key: key, w: io.rw}
+	}
+	io.rw.live[io.k] = true
+	io.f.st.failState = 1
+	if m, out := io.f.open(testPIN, rPW); m != nil || out.Code != OpenRetry {
+		t.Fatalf("first open: %+v", out)
+	}
+	m, out := io.f.open(testPIN, rPW)
+	if m == nil || !out.OK {
+		t.Fatalf("repeat: %+v", out)
+	}
+	defer m.Crash()
+	io.m = m
+	rs, _ := io.state()
+	if rs.Mailbox != io.p || len(rs.Old) != 1 || rs.Old[0].Mailbox != io.k {
+		t.Fatalf("the inherited key is not completed at the repeat: %+v", rs)
+	}
+}

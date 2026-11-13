@@ -65,8 +65,8 @@ func (f *openFixture) phoneUnlockWith(tweak func(*AltUnlockParams)) (*Manager, *
 	return UnlockAlt(context.Background(), p)
 }
 
-// countActs counts the activities of kind a sink recorded.
-func countActs(m *Manager, sink *recSink, kind string) int {
+// countActsLocked counts the activities of kind a sink recorded, under the manager's lock.
+func countActsLocked(m *Manager, sink *recSink, kind string) int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	n := 0
@@ -109,7 +109,7 @@ func TestRelayRotInheritedFreshWaitAtTheOpenMakesNoCall(t *testing.T) {
 	if m.pendingMailbox() != io.p || rs.Mailbox != io.k || rs.Pending == nil || !rs.Pending.Created.Equal(created) {
 		t.Fatalf("pending %s, relay %+v", m.pendingMailbox(), rs)
 	}
-	if n := countActs(m, sink, "identity.rotation_failed"); n != 0 {
+	if n := countActsLocked(m, sink, "identity.rotation_failed"); n != 0 {
 		t.Fatalf("identity.rotation_failed %d", n)
 	}
 }

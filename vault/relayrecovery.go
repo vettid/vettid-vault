@@ -83,7 +83,10 @@ func (m *Manager) inheritedKeyAtOpen(ctx context.Context, p RecoveryOpenParams, 
 		// with no stored time waits freshMailboxWait from now (the lost
 		// answer came before), stored by the step-2 write, so no later
 		// attempt (a sooner retry, the recovered phone's unlock) completes
-		// it inside the tombstone's window.
+		// it inside the tombstone's window. A key left in the refused state
+		// is still tried at the next unlock (relayKeyAttempt); a success
+		// then completes it with every held token minted again, since a
+		// time is stored.
 		defer func() {
 			if cur := m.st.Relay.Pending; cur == pr && pr.Created.IsZero() {
 				at := m.now()

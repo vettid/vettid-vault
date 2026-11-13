@@ -38,7 +38,7 @@ func (m *Manager) tableARefuses(p *Peer, in *envelope.Inner, sender ed25519.Publ
 	}
 	switch in.Type {
 	case peerwire.TypeRelayAddressUpdate, tokenIssuedType:
-		return false
+		return false // relay.token.issued: its tokens only (dispatch, after beforeAccept)
 	case "identity.rotate":
 		if links, err := rotateLinks(in.Body); err == nil && handshake.KnownPrefix(parseRotations(p.Chain), links) == len(links) {
 			return false // every link already followed: ignored by the handler, K9 judged

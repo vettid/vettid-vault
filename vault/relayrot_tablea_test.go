@@ -2,9 +2,14 @@ package vault
 
 import (
 	"bytes"
+	"context"
 	"crypto/ed25519"
 	"testing"
+	"time"
 
+	"github.com/vettid/vettid-relay/relayauth"
+
+	"github.com/vettid/vettid-vault/vms/envelope"
 	"github.com/vettid/vettid-vault/vms/handshake"
 	"github.com/vettid/vettid-vault/vms/suite"
 )
@@ -263,5 +268,46 @@ func TestTableAEarlierHsRespLinksCheckedFirst(t *testing.T) {
 	}
 	if len(f.p(0).Seen) != seen+1 {
 		t.Fatalf("the refused answer's identity link was not kept as seen (%d -> %d)", seen, len(f.p(0).Seen))
+	}
+}
+
+// relay.token.issued after the cut-off gives its tokens only (Table A,
+// "Earlier, after its cut-off": "tokens by rule T only"): its token goes
+// through heldToken and is kept, and nothing else of the message counts:
+// an old copy's features change no PeerFeatures, it does not mark the
+// device heard, and it raises no device.update_needed.
+func TestTableAEarlierTokenIssuedTokensOnly(t *testing.T) {
+	d := newDevFixture(t)
+	sinkOf(d)
+	d.m.opt.RelayKeyRotation = true
+	p, k, k2 := d.devPeer, d.devKey, rkKey(0xb1)
+	now := time.Now()
+	d.m.mu.Lock()
+	d.m.relayAt, d.m.msgID = now, "m-cut"
+	if err := d.m.followRelayLinks(p, []*handshake.RelayLink{rkLink(t, k, k2)}, rkAddr(k2)); err != nil {
+		t.Fatal(err)
+	}
+	p.Heard, p.PeerFeatures = false, nil
+	d.m.mu.Unlock()
+	tok, err := relayauth.MintToken(k2, relayauth.Claims{Iss: p.Relay.Mailbox, Sub: relayauth.EncodeKey(d.m.keys.relay.Public().(ed25519.PublicKey)),
+		Aud: p.Relay.URL, Iat: now.Add(-time.Minute), Exp: now.Add(40 * 24 * time.Hour), Jti: "after-cut"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, _ := envelope.NewULID(now)
+	raw, err := d.ep.Seal(&envelope.Inner{ID: id, Type: tokenIssuedType, TS: now, Body: []byte(`{"token":"` + tok + `"}`),
+		Features: []string{"x_copy_feature"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	msg := Message{MsgID: "m-zzz", Sender: relayauth.EncodeKey(rkPub(k)), Payload: raw}
+	if err := d.m.ProcessBatch(context.Background(), &fakeCollector{}, []Message{msg}); err != nil {
+		t.Fatal(err)
+	}
+	if p.Standing.Token != tok {
+		t.Fatal("the token was not taken")
+	}
+	if p.Heard || p.PeerFeatures != nil || len(d.audits("device.update_needed")) != 0 || len(d.audits("drop.peer_key")) != 0 {
+		t.Fatalf("more than its tokens counted: heard %v, features %v, update_needed %d", p.Heard, p.PeerFeatures, len(d.audits("device.update_needed")))
 	}
 }

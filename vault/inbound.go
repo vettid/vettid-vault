@@ -469,6 +469,14 @@ func (m *Manager) dispatch(ctx context.Context, p *Peer, in *envelope.Inner, ep 
 	if m.beforeAccept(p, ep, in, now) {
 		return ackAfterFlush
 	}
+	if m.opt.RelayKeyRotation && in.Type == tokenIssuedType && m.relayStateOf(p, sender) == relayEarlierAfter {
+		// §3.4.1 Table A, "Earlier, after its cut-off": relay.token.issued
+		// gives its tokens only (heldToken checks each), after the epoch's
+		// checks above; nothing else of it counts (features, S5's
+		// resend, dedupe, an answer).
+		m.storeIssuedTo(p, in.Body, now)
+		return ackAfterFlush
+	}
 	// §10.8: counted once the message is not refused for its epoch
 	// (destroyed, demoted; review L4).
 	m.noteFeatures(p, in.Features)

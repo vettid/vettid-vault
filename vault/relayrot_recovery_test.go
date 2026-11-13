@@ -281,7 +281,44 @@ func TestRelayRotInheritedRepeatKeepsTheFreshWait(t *testing.T) {
 	if err := io.m.ProcessBatch(context.Background(), &fakeCollector{}, nil); err != nil {
 		t.Fatal(err)
 	}
-	if rs := ownRelayState(io.m); len(rs.Old) < 2 || rs.Old[1].Mailbox != io.p && rs.Mailbox != io.p {
+	if rs := ownRelayState(io.m); len(rs.Old) < 2 || (rs.Old[1].Mailbox != io.p && rs.Mailbox != io.p) {
+		t.Fatalf("not made current after the wait: %+v", rs)
+	}
+}
+
+// The same lost 201, and the repeat's own rotate gets no definite answer:
+// the key, still pending, is stored with a wait from the repeat, so the
+// next attempt within it (a collection's sooner retry) does not complete
+// it; it is made current after the wait.
+func TestRelayRotInheritedRepeatNoAnswerKeepsTheWait(t *testing.T) {
+	io := newInheritedRepeat(t, func(rw *rotWorld, _, p string) {
+		first := true
+		rw.onRotate = func() {
+			rw.mu.Lock()
+			defer rw.mu.Unlock()
+			if first {
+				delete(rw.live, p)
+				first = false
+			}
+		}
+		rw.rotate = []error{nil, relayErr(503, "")} // the repeat's rotate: no answer
+	})
+	rs := ownRelayState(io.m)
+	if io.m.pendingMailbox() != io.p || rs.Pending.Created.IsZero() {
+		t.Fatalf("after the repeat: pending %s, relay %+v", io.m.pendingMailbox(), rs)
+	}
+	waitFrom := rs.Pending.Created
+	if err := io.m.ProcessBatch(context.Background(), &fakeCollector{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if io.m.pendingMailbox() != io.p {
+		t.Fatal("made current within the wait")
+	}
+	io.f.clock = waitFrom.Add(freshMailboxWait)
+	if err := io.m.ProcessBatch(context.Background(), &fakeCollector{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if rs := ownRelayState(io.m); len(rs.Old) < 1 || rs.Old[0].Mailbox != io.k {
 		t.Fatalf("not made current after the wait: %+v", rs)
 	}
 }

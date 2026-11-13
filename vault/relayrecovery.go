@@ -76,6 +76,23 @@ func (m *Manager) inheritedKeyAtOpen(ctx context.Context, p RecoveryOpenParams, 
 		// nothing audited (the relay answered; nothing failed).
 		return
 	}
+	if m.rk.openRepeat {
+		// A repeat whose step 2 was not stored: the lost run may have made
+		// this key's mailbox afresh, its answer's time lost with the state.
+		// Whatever this attempt's outcome, a key still pending after it
+		// with no stored time waits freshMailboxWait from now (the lost
+		// answer came before), stored by the step-2 write, so no later
+		// attempt (a sooner retry, the recovered phone's unlock) completes
+		// it inside the tombstone's window.
+		defer func() {
+			if cur := m.st.Relay.Pending; cur == pr && pr.Created.IsZero() {
+				at := m.now()
+				pr.Created = at.UTC()
+				m.rk.next = at.Add(freshMailboxWait)
+				m.dirty = true
+			}
+		}()
+	}
 	hadAnchor := !m.st.Relay.Anchor.IsZero()
 	out, created, byRotate, err := m.relayKeyCall(ctx)
 	if !hadAnchor && !(out == relayRefused && byRotate && relaysOwnRefusal(err)) {
@@ -95,16 +112,12 @@ func (m *Manager) inheritedKeyAtOpen(ctx context.Context, p RecoveryOpenParams, 
 		m.rk.next = at.Add(freshMailboxWait)
 		return
 	case out == relayDone && pr.Created.IsZero() && m.rk.openRepeat:
-		// A repeat whose step 2 was not stored: the lost run may have made
-		// this mailbox afresh (its answer's time was in the state that was
-		// not stored), and the relay now answers that it exists. Taken as
-		// possibly afresh, as relayKeyAttempt fails closed on an unstored
-		// time: the key waits freshMailboxWait from this answer, so no token
-		// is minted that the relay refuses. A mailbox made long before only
-		// waits once, needlessly.
-		at := m.now()
-		pr.Created, pr.Refused, pr.RetryAfter = at.UTC(), "", time.Time{}
-		m.rk.next = at.Add(freshMailboxWait)
+		// A repeat whose step 2 was not stored, and the relay answers that
+		// the key's mailbox exists: taken as possibly made afresh by the lost
+		// run, as relayKeyAttempt fails closed on an unstored time, so it is
+		// not completed now; the wait is stored above. A mailbox made long
+		// before only waits once, needlessly.
+		pr.Refused, pr.RetryAfter = "", time.Time{}
 		return
 	case out == relayDone:
 		if m.makePendingCurrent(created || !pr.Created.IsZero(), now) {

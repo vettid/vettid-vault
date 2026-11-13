@@ -166,3 +166,25 @@ func TestRK5EarlierAfterAllFollowedK9BeforeIKRequirement(t *testing.T) {
 		t.Fatal("the update was not refused for the ik requirement")
 	}
 }
+
+// RK5's refusal reason: an update under an epoch signed by the current ik
+// whose links move the ik on but do not start at it (an already-followed
+// link first) fails the requirement; the signer would be an ancestor once
+// the links were applied: ancestor_ik, and nothing applied.
+func TestRK5RequirementReasonSignerBecomesAncestor(t *testing.T) {
+	f := rkPair(t)
+	f.rotate(1)
+	f.settle() // the rotate and the rekey under ik1: the epoch is signed by ik1
+	ik1 := append([]byte(nil), f.m(1).keys.ik.Public().(ed25519.PublicKey)...)
+	if !bytes.Equal(f.p(0).IK, ik1) {
+		t.Fatal("setup: not followed")
+	}
+	f.rotate(1)
+	f.lose(1, 0, kRotate)
+	f.lose(1, 0, kHSInit)
+	f.rkSendRots(func(m *Manager, _ *Peer) []*handshake.Rotation { return m.ownRotationsSince(0) })
+	f.deliver(1, 0, kOther)
+	if !bytes.Equal(f.p(0).IK, ik1) || f.activityCount(0, "drop.peer_key", "ancestor_ik") != 1 {
+		t.Fatalf("ik moved, or not refused ancestor_ik (unknown_ik %d)", f.activityCount(0, "drop.peer_key", "unknown_ik"))
+	}
+}

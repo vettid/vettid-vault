@@ -194,16 +194,14 @@ func ikReason(p *Peer, ik []byte) string {
 	return "unknown_ik"
 }
 
-// rk8RespEvidence is RK8's parse-time end check and acceptFrom step 3 for
-// the relay links of res, an hs.resp to the vault's own reconnect from p
-// deposited with sender (identity links already checked by rule C). It
+// rk8RespEvidence is acceptFrom step 3 for the relay links of res, an
+// hs.resp to the vault's own reconnect from p deposited with sender, once
+// the parse-time end check passed and its identity links were checked by
+// rule C. It
 // returns "" when the chain is valid, "-" when rule C suspended the
 // connection (a relay fork; nothing more is audited), or the refusal's
 // reason (relay_unlinked).
 func (m *Manager) rk8RespEvidence(p *Peer, res *handshake.Result, sender ed25519.PublicKey, now time.Time) string {
-	if rk8EndRefused(sender, res.Resp.RelayLinks) {
-		return "relay_unlinked" // parse time: no link checked or kept
-	}
 	ok, ev := m.relayLinksEvidence(p, sender, res.Resp.Relay.PK, res.Resp.RelayLinks, now)
 	if ev != relayEvNone {
 		return "-"

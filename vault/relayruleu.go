@@ -462,7 +462,7 @@ func (m *Manager) revokePassedReconnect(p *Peer, passed []ed25519.PublicKey, now
 // with tokens naming the new key, on a held reconnect token for p's
 // current mailbox only; without one it is owed (rk6Tick). The rule's
 // "not restarted" case (the reconnect whose own message made the follow)
-// and its order after an establishment are RK8's, not built yet.
+// and its order after an establishment are RK8's (rk8After).
 func (m *Manager) rk6(p *Peer, passed []ed25519.PublicKey, now time.Time) {
 	if p.Kind != KindConnection {
 		return

@@ -3,6 +3,7 @@ package vault
 import (
 	"bytes"
 	"testing"
+	"time"
 
 	"github.com/vettid/vettid-relay/relayauth"
 
@@ -210,6 +211,7 @@ func TestRK7RecordsKeptAndPruned(t *testing.T) {
 	if p.RelayClosures != nil {
 		t.Fatal("records kept without an earlier key")
 	}
+	p.Epochs = append(p.Epochs, EpochMeta{ID: ids[0], Signer: p.IK, EstAt: at, EstMsg: "m-0200"})
 	m.rk7Accepted(p, ids[0], k1)
 	if p.RelayClosures != nil {
 		t.Fatal("recorded without an earlier key")
@@ -232,5 +234,50 @@ func TestRK7ConfirmNeedsCurrentSignerAndAVault(t *testing.T) {
 	p.Kind = KindDesktop
 	if m.rk7ConfirmPasses(p, ids[0], k0) {
 		t.Fatal("passed for a device")
+	}
+}
+
+// RK7, hs.fin: the pass is checked at the hs.fin's own position and
+// closed only by an epoch established later than it, from a later key.
+func TestRK7HsFinPassClosedByLaterEpoch(t *testing.T) {
+	m, p, ids := rk7Fx(t)
+	k0, k1 := rkPub(rkKey(0x51)), rkPub(rkKey(0x52))
+	m.rk7Accepted(p, ids[1], k1) // e2, at m-0300
+	aw := &AwaitingHS{Signer: append([]byte(nil), p.IK...)}
+	m.relayAt = p.Epochs[0].EstAt
+	m.msgID = "m-0250" // after K0's cut-off, before e2
+	if m.rk7FinPasses(p, aw, k0) {
+		t.Fatal("an hs.fin passed although a later key was accepted under an epoch established after it")
+	}
+	m.msgID = "m-0350" // after e2
+	if !m.rk7FinPasses(p, aw, k0) {
+		t.Fatal("an hs.fin after the closing epoch did not pass")
+	}
+}
+
+// RK7: the hs.fin that establishes an epoch counts as accepted under it
+// (rk7Established), unless the record is suspended or it established
+// nothing.
+func TestRK7EstablishingHsFinRecorded(t *testing.T) {
+	m, p, ids := rk7Fx(t)
+	k1 := rkPub(rkKey(0x52))
+	m.rk7Established(p, ids[2], k1) // not current: nothing established
+	if len(p.RelayClosures) != 0 {
+		t.Fatal("recorded for an epoch not established")
+	}
+	p.LastEpochID = ids[2]
+	m.rk7Established(p, ids[2], k1)
+	if len(p.RelayClosures) != 1 {
+		t.Fatal("the establishing hs.fin was not recorded")
+	}
+}
+
+// RK7's records go with the last earlier key, at the prune.
+func TestRK7RecordsPrunedWithEarlierKeys(t *testing.T) {
+	m, p, ids := rk7Fx(t)
+	m.rk7Accepted(p, ids[0], rkPub(rkKey(0x52)))
+	m.pruneEarlierRelays(testNow().Add(1000 * 24 * time.Hour))
+	if len(p.EarlierRelays) != 0 || p.RelayClosures != nil {
+		t.Fatal("the records outlived the earlier keys")
 	}
 }

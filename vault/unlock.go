@@ -894,7 +894,7 @@ func (m *Manager) unlockTokens(k *UnlockKey, deviceToken string, now time.Time) 
 		}
 		p = &Peer{ID: enrollDeviceID, Kind: KindApp, Relay: PeerRelay{PK: inv.EnrollRelayPK}}
 	} else if deviceToken != "" {
-		if ht, err := m.heldToken(deviceToken, p); err == nil && ht.Exp.After(p.Standing.Exp) {
+		if ht, err := m.heldToken(deviceToken, p, TokStanding); err == nil && ht.Exp.After(p.Standing.Exp) {
 			p.Standing = ht
 		}
 	}

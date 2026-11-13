@@ -11,33 +11,42 @@ import (
 	"github.com/vettid/vettid-vault/vms/peerwire"
 )
 
-// relay.token.issued{kind: reconnect} replaces the held reconnect token only
-// if its exp is later (as §6.3.1 adopts a carried token). Side 0 holds a
-// reconnect token from side 1; side 1 (or an old copy of it, side 2) sends
-// tokens with chosen exps.
+// relay.token.issued: a reconnect token replaces the held one only if its
+// exp is later (as §6.3.1 adopts a carried token), and no token is held
+// whose lifetime exp - iat is over §7.1's cap for its kind (reconnect 365
+// days, standing 30 days) or whose iat is in the future. Side 0 holds
+// tokens from side 1; side 1 (or an old copy of it, side 2) sends them.
 
-// reconnectTokenFrom mints a reconnect-sized deposit token from side s's
-// mailbox (s may be the copy, which holds side 1's relay key) for side 0,
-// expiring at exp.
-func (f *r29Fx) reconnectTokenFrom(s int, exp time.Time, jti string) string {
+// tokenFrom mints a deposit token from side s's mailbox (s may be the copy,
+// which holds side 1's relay key) for side 0, with the given iat and exp.
+func (f *r29Fx) tokenFrom(s int, iat, exp time.Time, jti string) string {
 	f.t.Helper()
 	held := f.p(0).Relay // side 1's address on side 0's record
 	tok, err := relayauth.MintToken(f.m(s).keys.relay, relayauth.Claims{Iss: held.Mailbox,
 		Sub: relayauth.EncodeKey(f.m(0).keys.relay.Public().(ed25519.PublicKey)), Aud: held.URL,
-		Iat: f.clk.Add(-time.Minute), Exp: exp, Jti: jti})
+		Iat: iat, Exp: exp, Jti: jti})
 	if err != nil {
 		f.t.Fatal(err)
 	}
 	return tok
 }
 
-// sendReconnectToken has side s send side 0 relay.token.issued{reconnect}.
-func (f *r29Fx) sendReconnectToken(s int, tok string) {
+// sendIssued has side s send side 0 relay.token.issued{kind, tok}.
+func (f *r29Fx) sendIssued(s int, kind, tok string) {
 	f.t.Helper()
 	f.do(s, func(m *Manager, p *Peer) {
-		m.sendTo(p, tokenIssuedType, json.RawMessage(peerwire.TokenIssuedBody(TokReconnect, tok)), f.clk)
+		m.sendTo(p, tokenIssuedType, json.RawMessage(peerwire.TokenIssuedBody(kind, tok)), f.clk)
 	})
 	if f.deliver(s, 0, kAny) == 0 {
+		f.t.Fatal("setup: nothing delivered")
+	}
+}
+
+// reissue has side 1 issue side 0 an honest token of kind, now.
+func (f *r29Fx) reissue(kind string) {
+	f.t.Helper()
+	f.do(1, func(m *Manager, p *Peer) { m.issueTo(p, kind, f.clk) })
+	if f.deliver(1, 0, kAny) == 0 {
 		f.t.Fatal("setup: nothing delivered")
 	}
 }
@@ -56,20 +65,19 @@ func TestReconnectTokenAdoptedOnlyIfLater(t *testing.T) {
 	t.Run("later is adopted", func(t *testing.T) {
 		f := newR29Fx(t)
 		held := f.p(0).Reconnect
-		tok := f.reconnectTokenFrom(1, held.Exp.Add(24*time.Hour), "rc-later")
-		f.sendReconnectToken(1, tok)
-		if f.p(0).Reconnect.Token != tok {
+		f.advance(24 * time.Hour)
+		f.reissue(TokReconnect)
+		if f.p(0).Reconnect == held || !f.p(0).Reconnect.Exp.After(held.Exp) {
 			t.Fatal("a reconnect token with a later exp was not adopted")
 		}
-		if f.audited(0, "issued_token_not_newer") {
+		if f.audited(0, "issued_token_not_newer") || f.audited(0, "bad_issued_token") {
 			t.Fatal("a later token audited as refused")
 		}
 	})
 	t.Run("earlier is refused", func(t *testing.T) {
 		f := newR29Fx(t)
 		held := f.p(0).Reconnect
-		tok := f.reconnectTokenFrom(1, held.Exp.Add(-24*time.Hour), "rc-earlier")
-		f.sendReconnectToken(1, tok)
+		f.sendIssued(1, TokReconnect, f.tokenFrom(1, f.clk.Add(-time.Minute), held.Exp.Add(-24*time.Hour), "rc-earlier"))
 		if f.p(0).Reconnect != held {
 			t.Fatal("a reconnect token with an earlier exp replaced the held one")
 		}
@@ -80,10 +88,12 @@ func TestReconnectTokenAdoptedOnlyIfLater(t *testing.T) {
 	t.Run("same exp is refused", func(t *testing.T) {
 		f := newR29Fx(t)
 		held := f.p(0).Reconnect
-		tok := f.reconnectTokenFrom(1, held.Exp, "rc-same")
-		f.sendReconnectToken(1, tok)
+		f.sendIssued(1, TokReconnect, f.tokenFrom(1, f.clk.Add(-time.Minute), held.Exp, "rc-same"))
 		if f.p(0).Reconnect != held {
 			t.Fatal("a reconnect token with the same exp replaced the held one")
+		}
+		if f.auditedCount(0, "issued_token_not_newer") != 1 {
+			t.Fatal("the refusal was not audited")
 		}
 	})
 	t.Run("exp in the past is refused", func(t *testing.T) {
@@ -92,28 +102,94 @@ func TestReconnectTokenAdoptedOnlyIfLater(t *testing.T) {
 		if !f.clk.Before(held.Exp) {
 			t.Fatal("setup: the held token is not valid")
 		}
-		tok := f.reconnectTokenFrom(1, f.clk.Add(-time.Hour), "rc-past")
-		f.sendReconnectToken(1, tok)
-		if f.p(0).Reconnect != held {
+		f.sendIssued(1, TokReconnect, f.tokenFrom(1, f.clk.Add(-2*time.Hour), f.clk.Add(-time.Hour), "rc-past"))
+		if f.p(0).Reconnect != held || noReconnectToken(f.p(0), f.clk) {
 			t.Fatal("an expired reconnect token replaced the valid held one")
-		}
-		if noReconnectToken(f.p(0), f.clk) {
-			t.Fatal("side 0 lost its valid reconnect token")
 		}
 	})
 	t.Run("old copy cannot shorten it", func(t *testing.T) {
 		f := newR29Fx(t)
-		snap := f.snapshot(1)
-		f.startCopy(1, snap)
+		f.startCopy(1, f.snapshot(1))
 		held := f.p(0).Reconnect
 		// the copy holds side 1's relay key and the current epoch's keys
-		tok := f.reconnectTokenFrom(2, f.clk.Add(time.Hour), "rc-copy")
-		f.sendReconnectToken(2, tok)
+		f.sendIssued(2, TokReconnect, f.tokenFrom(2, f.clk.Add(-time.Minute), f.clk.Add(time.Hour), "rc-copy"))
 		if f.p(0).Reconnect != held {
 			t.Fatal("an old copy's shorter-lived reconnect token replaced the held one")
 		}
 		if f.auditedCount(0, "issued_token_not_newer") != 1 {
 			t.Fatal("the refusal was not audited")
+		}
+	})
+	t.Run("none held: adopted", func(t *testing.T) {
+		f := newR29Fx(t)
+		f.do(0, func(_ *Manager, p *Peer) { p.Reconnect = HeldToken{} })
+		f.reissue(TokReconnect)
+		if f.p(0).Reconnect.Token == "" || noReconnectToken(f.p(0), f.clk) {
+			t.Fatal("a reconnect token was not adopted with none held")
+		}
+	})
+}
+
+// A token whose exp - iat is over §7.1's cap for its kind, or whose iat is
+// in the future, is refused (bad_issued_token), as the relay would refuse
+// a deposit under it. Adopted, a far exp would win every later comparison
+// and pin the held token for good.
+func TestHeldTokenLifetimeAndIat(t *testing.T) {
+	t.Run("far-future reconnect token, then an honest reissue", func(t *testing.T) {
+		f := newR29Fx(t)
+		f.startCopy(1, f.snapshot(1))
+		held := f.p(0).Reconnect
+		far := time.Date(9999, 1, 1, 0, 0, 0, 0, time.UTC)
+		f.sendIssued(2, TokReconnect, f.tokenFrom(2, f.clk.Add(-time.Minute), far, "rc-far"))
+		if f.p(0).Reconnect != held || f.auditedCount(0, "bad_issued_token") != 1 {
+			t.Fatal("a reconnect token with a far exp was not refused as bad_issued_token")
+		}
+		f.advance(24 * time.Hour)
+		f.reissue(TokReconnect)
+		if !f.p(0).Reconnect.Exp.After(held.Exp) {
+			t.Fatal("the honest reissue was not adopted")
+		}
+	})
+	t.Run("over 365 days is refused", func(t *testing.T) {
+		f := newR29Fx(t)
+		held := f.p(0).Reconnect
+		iat := f.clk.Add(-time.Minute)
+		f.sendIssued(1, TokReconnect, f.tokenFrom(1, iat, iat.Add(366*24*time.Hour), "rc-366"))
+		if f.p(0).Reconnect != held || f.auditedCount(0, "bad_issued_token") != 1 {
+			t.Fatal("a 366-day reconnect token was not refused")
+		}
+	})
+	t.Run("far-future standing token, then an honest reissue", func(t *testing.T) {
+		f := newR29Fx(t)
+		f.startCopy(1, f.snapshot(1))
+		held := f.p(0).Standing
+		iat := f.clk.Add(-time.Minute)
+		f.sendIssued(2, TokStanding, f.tokenFrom(2, iat, iat.Add(31*24*time.Hour), "st-31d"))
+		if f.p(0).Standing != held || f.auditedCount(0, "bad_issued_token") != 1 {
+			t.Fatal("a 31-day standing token was not refused as bad_issued_token")
+		}
+		f.advance(24 * time.Hour)
+		f.reissue(TokStanding)
+		if !f.p(0).Standing.Exp.After(held.Exp) {
+			t.Fatal("the honest standing reissue was not adopted")
+		}
+	})
+	t.Run("future iat is refused", func(t *testing.T) {
+		f := newR29Fx(t)
+		held := f.p(0).Reconnect
+		iat := f.clk.Add(time.Hour)
+		f.sendIssued(1, TokReconnect, f.tokenFrom(1, iat, iat.Add(300*24*time.Hour), "rc-future-iat"))
+		if f.p(0).Reconnect != held || f.auditedCount(0, "bad_issued_token") != 1 {
+			t.Fatal("a reconnect token with an iat an hour ahead was not refused")
+		}
+	})
+	t.Run("iat within the skew is adopted", func(t *testing.T) {
+		f := newR29Fx(t)
+		iat := f.clk.Add(time.Minute)
+		tok := f.tokenFrom(1, iat, iat.Add(365*24*time.Hour), "rc-skew")
+		f.sendIssued(1, TokReconnect, tok)
+		if f.p(0).Reconnect.Token != tok {
+			t.Fatal("a reconnect token with an iat a minute ahead was refused")
 		}
 	})
 }

@@ -222,7 +222,7 @@ func (m *Manager) respondFirst(pi *handshake.PendingInit, inv *Invite, sender ed
 		// the holder when it completes (§11.14.6).
 		p.Recovering = true
 	}
-	held, err := m.heldToken(body.Token, p)
+	held, err := m.heldToken(body.Token, p, TokStanding)
 	if err != nil {
 		m.audit(now, "hs_init_bad_token", "")
 		pi.Discard()
@@ -396,8 +396,8 @@ func (m *Manager) respondReconnect(pi *handshake.PendingInit, p *Peer, sender ed
 	default:
 		named = append(named, p.LastEpochID...)
 	}
-	st, err1 := m.heldToken(body.Token, p)
-	rt, err2 := m.heldToken(body.ReconnectToken, p)
+	st, err1 := m.heldToken(body.Token, p, TokStanding)
+	rt, err2 := m.heldToken(body.ReconnectToken, p, TokReconnect)
 	if err1 != nil || err2 != nil {
 		m.audit(now, "reconnect_bad_token", p.ID)
 		pi.Discard()
@@ -1317,10 +1317,10 @@ func (m *Manager) handleResp(ctx context.Context, id string, raw []byte, sender 
 	var carried *CarriedTokens
 	if res.Resp.Token != "" || res.Resp.ReconnectToken != "" {
 		carried = &CarriedTokens{}
-		if t, err := m.heldToken(res.Resp.Token, p); err == nil && res.Resp.Token != "" {
+		if t, err := m.heldToken(res.Resp.Token, p, TokStanding); err == nil && res.Resp.Token != "" {
 			carried.Standing = t
 		}
-		if t, err := m.heldToken(res.Resp.ReconnectToken, p); err == nil && res.Resp.ReconnectToken != "" {
+		if t, err := m.heldToken(res.Resp.ReconnectToken, p, TokReconnect); err == nil && res.Resp.ReconnectToken != "" {
 			carried.Reconnect = t
 		}
 	}

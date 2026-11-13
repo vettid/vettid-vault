@@ -655,13 +655,13 @@ func (m *Manager) hAddressUpdate(_ context.Context, s *Session, in *envelope.Inn
 	if err != nil {
 		return nil, err
 	}
-	st, err := m.heldToken(tok, &np)
+	st, err := m.heldToken(tok, &np, TokStanding)
 	if err != nil {
 		return nil, errBadRequest
 	}
 	var rt HeldToken
 	if rs, ok, _ := o.OptString("reconnect_token"); ok {
-		if rt, err = m.heldToken(rs, &np); err != nil {
+		if rt, err = m.heldToken(rs, &np, TokReconnect); err != nil {
 			return nil, errBadRequest
 		}
 	}

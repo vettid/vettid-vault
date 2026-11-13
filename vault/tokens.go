@@ -9,6 +9,7 @@ import (
 
 	"github.com/vettid/vettid-relay/relayauth"
 
+	"github.com/vettid/vettid-vault/vms/envelope"
 	"github.com/vettid/vettid-vault/vms/handshake"
 	"github.com/vettid/vettid-vault/vms/peerwire"
 )
@@ -79,11 +80,25 @@ func (m *Manager) mint(p *Peer, kind string, ttl time.Duration, quota *relayauth
 // heldToken validates a token another principal issued to the vault: its
 // signature by the principal's relay key, iss = its mailbox, sub = the
 // vault's relay key, aud = its relay URL, and a deposit scope
-// (peerwire.VerifyHeldToken).
-func (m *Manager) heldToken(tok string, p *Peer) (HeldToken, error) {
+// (peerwire.VerifyHeldToken); and, as the relay refuses a deposit under it
+// otherwise (RELAY-PROTOCOL §5.3), a lifetime exp - iat within §7.1's cap
+// for its kind (a reconnect token 365 days, any other token the vault
+// holds 30 days) and an iat not later than now plus the clock skew a
+// message's ts may have (envelope.MaxClockSkewFuture). Without the cap, a
+// token with a far exp (an old copy holding the peer's relay key can mint
+// one) would win every "later exp" comparison and pin the held token to
+// one the relay refuses.
+func (m *Manager) heldToken(tok string, p *Peer, kind string) (HeldToken, error) {
 	c, err := peerwire.VerifyHeldToken(tok, p.Relay.PK, p.Relay.Mailbox, p.Relay.URL, m.keys.relay.Public().(ed25519.PublicKey))
 	if err != nil {
 		return HeldToken{}, err
+	}
+	life := StandingMax
+	if kind == TokReconnect {
+		life = handshake.ReconnectTokenMaxLifetime
+	}
+	if c.Exp.Sub(c.Iat) > life || c.Iat.After(m.now().Add(envelope.MaxClockSkewFuture)) {
+		return HeldToken{}, errHeldLifetime
 	}
 	for _, r := range p.RevokedHeld {
 		if r.JTI == c.Jti {
@@ -242,7 +257,7 @@ func (m *Manager) storeIssuedTo(p *Peer, body json.RawMessage, now time.Time) {
 	if err != nil {
 		return
 	}
-	ht, err := m.heldToken(tok, p)
+	ht, err := m.heldToken(tok, p, kind)
 	if err != nil {
 		m.audit(now, "bad_issued_token", p.ID)
 		return
@@ -401,3 +416,7 @@ func (m *Manager) markDeviceTokens(now time.Time) {
 // errRevokedHeld: a standing token the relay answered token_revoked for is
 // offered again (0.88.2 §8.6).
 var errRevokedHeld = errors.New("vault: a revoked standing token")
+
+// errHeldLifetime is a held token whose exp - iat is over §7.1's cap for
+// its kind, or whose iat is in the future.
+var errHeldLifetime = errors.New("vault: a held token's lifetime or iat is out of bounds")

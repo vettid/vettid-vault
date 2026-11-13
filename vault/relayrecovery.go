@@ -43,6 +43,13 @@ import (
 // The start of the attempt becomes the current key's anchor in the step-2
 // write when it has none, unless the rotate was refused with the relay's
 // own 400 or 401.
+//
+// A repeat whose step 2 was not stored (resumeRecovery) makes the attempt
+// again, not knowing what the lost run learnt: a key the relay answers as
+// existing is taken as possibly made afresh by that run and waits
+// freshMailboxWait. Residual: a fresh key registered at an open whose
+// step-2 write then fails leaves an empty mailbox at the relay, since
+// nothing is written before step 2.
 
 // inheritedKeyAtOpen is that attempt; the step-2 write stores what it
 // changed. Called in the open, with the lock held, before the recovery's
@@ -83,6 +90,18 @@ func (m *Manager) inheritedKeyAtOpen(ctx context.Context, p RecoveryOpenParams, 
 		// a relay-key rotation, as with no answer.
 		// The time the answer came, not the open's (the deletion may have
 		// come during the call).
+		at := m.now()
+		pr.Created, pr.Refused, pr.RetryAfter = at.UTC(), "", time.Time{}
+		m.rk.next = at.Add(freshMailboxWait)
+		return
+	case out == relayDone && pr.Created.IsZero() && m.rk.openRepeat:
+		// A repeat whose step 2 was not stored: the lost run may have made
+		// this mailbox afresh (its answer's time was in the state that was
+		// not stored), and the relay now answers that it exists. Taken as
+		// possibly afresh, as relayKeyAttempt fails closed on an unstored
+		// time: the key waits freshMailboxWait from this answer, so no token
+		// is minted that the relay refuses. A mailbox made long before only
+		// waits once, needlessly.
 		at := m.now()
 		pr.Created, pr.Refused, pr.RetryAfter = at.UTC(), "", time.Time{}
 		m.rk.next = at.Add(freshMailboxWait)

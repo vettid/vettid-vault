@@ -206,12 +206,11 @@ func TestRelayRotInheritedRegisteredAtTheOpenWaits(t *testing.T) {
 	}
 }
 
-// A repeat whose step 2 was not stored makes the first open's event again
-// (recoveryEvent), the inherited key's attempt included: the first open's
-// state write fails after its attempt, and the repeat through the `next`
-// wrap completes the key, as the first open did in the state that was not
-// stored.
-func TestRelayRotInheritedCompletedAtARepeatAfterStep1(t *testing.T) {
+// newInheritedRepeat is newInheritedOpen whose first open's state write
+// (step 2) fails after the inherited key's attempt; the repeat through the
+// `next` wrap is io.m.
+func newInheritedRepeat(t *testing.T, script func(rw *rotWorld, k, p string)) *inheritedOpen {
+	t.Helper()
 	io := &inheritedOpen{rw: newRotWorld()}
 	io.f = newOpenFixtureWith(t, func(f *openFixture) {
 		f.m.mu.Lock()
@@ -232,6 +231,9 @@ func TestRelayRotInheritedCompletedAtARepeatAfterStep1(t *testing.T) {
 		return &rotRelay{stubRelay: &stubRelay{base: base, key: key}, key: key, w: io.rw}
 	}
 	io.rw.live[io.k] = true
+	if script != nil {
+		script(io.rw, io.k, io.p)
+	}
 	io.f.st.failState = 1
 	if m, out := io.f.open(testPIN, rPW); m != nil || out.Code != OpenRetry {
 		t.Fatalf("first open: %+v", out)
@@ -240,10 +242,68 @@ func TestRelayRotInheritedCompletedAtARepeatAfterStep1(t *testing.T) {
 	if m == nil || !out.OK {
 		t.Fatalf("repeat: %+v", out)
 	}
-	defer m.Crash()
-	io.m = m
-	rs, _ := io.state()
-	if rs.Mailbox != io.p || len(rs.Old) != 1 || rs.Old[0].Mailbox != io.k {
-		t.Fatalf("the inherited key is not completed at the repeat: %+v", rs)
+	io.m, io.out = m, out
+	t.Cleanup(m.Crash)
+	return io
+}
+
+// The first open's rotate succeeds and the registration after it answers
+// 201 (the successor made afresh), and its step-2 write fails: the answer's
+// time is lost with it. At the repeat the rotate within the grace is
+// answered again and the registration says the mailbox exists (200); the
+// key is still taken as possibly made afresh and waits freshMailboxWait
+// from that answer, so no token is minted that the relay refuses; it is
+// made current after the wait.
+func TestRelayRotInheritedRepeatKeepsTheFreshWait(t *testing.T) {
+	io := newInheritedRepeat(t, func(rw *rotWorld, _, p string) {
+		first := true
+		rw.onRotate = func() {
+			rw.mu.Lock()
+			defer rw.mu.Unlock()
+			if first { // the successor gone again before the registration
+				delete(rw.live, p)
+				first = false
+			}
+		}
+	})
+	rs := ownRelayState(io.m)
+	if io.m.pendingMailbox() != io.p || rs.Pending.Created.IsZero() {
+		t.Fatalf("after the repeat: pending %s, relay %+v", io.m.pendingMailbox(), rs)
+	}
+	answered := rs.Pending.Created
+	if err := io.m.ProcessBatch(context.Background(), &fakeCollector{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if io.m.pendingMailbox() != io.p {
+		t.Fatal("made current within the wait")
+	}
+	io.f.clock = answered.Add(freshMailboxWait)
+	if err := io.m.ProcessBatch(context.Background(), &fakeCollector{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if rs := ownRelayState(io.m); len(rs.Old) < 2 || rs.Old[1].Mailbox != io.p && rs.Mailbox != io.p {
+		t.Fatalf("not made current after the wait: %+v", rs)
+	}
+}
+
+// A repeat whose step 2 was not stored makes the first open's event again
+// (recoveryEvent), the inherited key's attempt included: the first open's
+// state write fails after its attempt (a rotate the relay took), and the
+// repeat makes the attempt again. The relay answers that the key's mailbox
+// exists; the repeat cannot tell whether the lost run made it afresh, so
+// the key waits freshMailboxWait from that answer (its time is the
+// attempt's mark), then is made current.
+func TestRelayRotInheritedCompletedAtARepeatAfterStep1(t *testing.T) {
+	io := newInheritedRepeat(t, nil)
+	rs := ownRelayState(io.m)
+	if io.m.pendingMailbox() != io.p || rs.Pending.Created.IsZero() {
+		t.Fatalf("no attempt at the repeat: pending %s, relay %+v", io.m.pendingMailbox(), rs)
+	}
+	io.f.clock = rs.Pending.Created.Add(freshMailboxWait)
+	if err := io.m.ProcessBatch(context.Background(), &fakeCollector{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if rs := ownRelayState(io.m); len(rs.Old) < 1 || rs.Old[0].Mailbox != io.k {
+		t.Fatalf("not completed after the wait: %+v", rs)
 	}
 }

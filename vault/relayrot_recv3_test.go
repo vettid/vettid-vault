@@ -3,6 +3,7 @@ package vault
 import (
 	"bytes"
 	"crypto/ed25519"
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -186,5 +187,93 @@ func TestRK5RequirementReasonSignerBecomesAncestor(t *testing.T) {
 	f.deliver(1, 0, kOther)
 	if !bytes.Equal(f.p(0).IK, ik1) || f.activityCount(0, "drop.peer_key", "ancestor_ik") != 1 {
 		t.Fatalf("ik moved, or not refused ancestor_ik (unknown_ik %d)", f.activityCount(0, "drop.peer_key", "unknown_ik"))
+	}
+}
+
+// rotsOutcome makes Table B's decisions as applyIDLinks does: for each
+// refusal its reason is the one applyIDLinks audits, and applyIDLinks
+// follows nothing then.
+func TestRK5RotsOutcomeReasonsMatchApplyIDLinks(t *testing.T) {
+	f := newFixture(t)
+	m := f.m
+	sink := &recSink{}
+	m.features = append(m.features, sink)
+	kem := m.keys.kem.Public()
+	rot := func(a, b ed25519.PrivateKey) *handshake.Rotation {
+		r, err := handshake.NewRotation(a, b, kem)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return r
+	}
+	ik0, ik1, ik2, ik3, ikX, ikR := rkKey(0x90), rkKey(0x91), rkKey(0x92), rkKey(0x93), rkKey(0x94), rkKey(0x95)
+	for _, c := range []struct {
+		name string
+		rots []*handshake.Rotation
+		want string
+	}{
+		{"unknown first old", []*handshake.Rotation{rot(ikX, ik2)}, "unknown_ik"},
+		{"rejected first old", []*handshake.Rotation{rot(ikR, ik2)}, "rejected_ik"},
+		{"back to an ancestor", []*handshake.Rotation{rot(ik1, ik0)}, "ik_rollback"},
+		{"to a rejected ik", []*handshake.Rotation{rot(ik1, ikR)}, "ik_rollback"},
+		{"a break", []*handshake.Rotation{rot(ik1, ik2), rot(ikX, ik3)}, "bad_rotation"},
+		{"valid", []*handshake.Rotation{rot(ik1, ik2)}, ""},
+	} {
+		p := rkPeer(m, "c-"+c.name, rkKey(0x60))
+		p.IK = rkPub(ik1)
+		p.Chain = []json.RawMessage{rot(ik0, ik1).Marshal()}
+		p.Rejected = []RejectedSuccessor{{OldIK: rkPub(rkKey(0x96)), NewIK: rkPub(ikR)}}
+		_, got := p.rotsOutcome(c.rots)
+		if got != c.want {
+			t.Fatalf("%s: rotsOutcome %q, want %q", c.name, got, c.want)
+		}
+		n, na := len(m.st.Audit), len(sink.got)
+		ok := m.applyIDLinks(p, c.rots, nil, testNow())
+		if c.want == "" {
+			if !ok || !bytes.Equal(p.IK, rkPub(ik2)) {
+				t.Fatalf("%s: applyIDLinks did not follow", c.name)
+			}
+			continue
+		}
+		if ok || !bytes.Equal(p.IK, rkPub(ik1)) {
+			t.Fatalf("%s: applyIDLinks followed", c.name)
+		}
+		got = ""
+		for _, a := range m.st.Audit[n:] {
+			if a.Event == "bad_rotation" {
+				got = "bad_rotation"
+			}
+		}
+		for _, a := range sink.got[na:] {
+			if a.Kind == "drop.peer_key" {
+				got = a.Ref
+			}
+		}
+		if got != c.want {
+			t.Fatalf("%s: applyIDLinks refused %q, rotsOutcome %q", c.name, got, c.want)
+		}
+	}
+}
+
+// RK5: when a link rolls the ik back and the ik requirement fails too,
+// the reason is Table B's (ik_rollback), judged first, and nothing moves.
+func TestRK5RollbackReasonBeforeIKRequirement(t *testing.T) {
+	f := rkPair(t)
+	ik0 := f.m(1).keys.ik
+	f.rotate(1)
+	f.lose(1, 0, kHSInit)
+	f.deliver(1, 0, kRotate)
+	ik1 := f.m(1).keys.ik
+	if !bytes.Equal(f.p(0).IK, rkPub(ik1)) {
+		t.Fatal("setup: not followed")
+	}
+	back, err := handshake.NewRotation(ik1, ik0, f.m(1).keys.kem.Public())
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.rkSendRots(func(*Manager, *Peer) []*handshake.Rotation { return []*handshake.Rotation{back} })
+	f.deliver(1, 0, kOther)
+	if !bytes.Equal(f.p(0).IK, rkPub(ik1)) || f.activityCount(0, "drop.peer_key", "ik_rollback") != 1 {
+		t.Fatalf("not refused ik_rollback (ancestor_ik %d)", f.activityCount(0, "drop.peer_key", "ancestor_ik"))
 	}
 }

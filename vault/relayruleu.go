@@ -261,6 +261,16 @@ func (m *Manager) answerUpdate(p *Peer, now time.Time) {
 // the vault's current ik for p, or the update's ik is that ik. It reports
 // whether the update may go on. A device rotates no ik (§6.7): its update
 // carrying identity links cannot occur and is refused (unexpected).
+//
+// The ik requirement is judged before any link is applied, against the ik
+// the links would lead to (rotsOutcome, which makes Table B's decisions
+// without acting on them): an update refused for it has none of its
+// identity links followed (§3.4.2 RK10: "An update Q refuses has none of
+// its links followed ... whatever the reason for the refusal"). Its
+// R29-K9 is not judged either: K9 runs with the links, which are applied
+// only to an update that goes on (a reading of this release; the spec
+// should confirm that a refused update's already-followed links are not
+// judged by K9).
 func (m *Manager) rk5(s *Session, rots []*handshake.Rotation) bool {
 	p, now := s.peer, s.now
 	if p.Kind != KindConnection {
@@ -275,48 +285,83 @@ func (m *Manager) rk5(s *Session, rots []*handshake.Rotation) bool {
 		id := s.epoch.ID()
 		ep = id[:]
 	}
-	if len(rots) > 0 && !m.applyIDLinks(p, rots, ep, now) {
-		return false // Table B refused a link (audited with its reason), or a conflict
-	}
-	if p.suspended() {
-		return false // the links made it suspend (K9, a flag set)
+	post, tableBOK := p.rotsOutcome(rots)
+	if !tableBOK {
+		// Table B refuses a link: applyIDLinks refuses it with its reason
+		// before following any (rule C ran at step 3).
+		m.applyIDLinks(p, rots, ep, now)
+		return false
 	}
 	var signer []byte
 	if e := p.epochMeta(ep); e != nil {
 		signer = e.Signer
 	}
-	if updateIKOK(p, signer, rots) {
-		return true
-	}
-	// The ik requirement failed: no relay link is followed and no token
-	// taken. The spec names no reason; Table B's for the update's ik is
-	// used (a reading of this release; the spec should confirm).
-	switch {
-	case p.ancestor(signer):
-		m.refusePeerKey(p, "ancestor_ik", now)
-	case p.rejected(signer):
-		m.refusePeerKey(p, "rejected_ik", now)
-	default:
-		m.refusePeerKey(p, "unknown_ik", now)
-	}
-	return false
-}
-
-// updateIKOK is RK5's ik requirement after the links are applied: the
-// update's ik (signer) is p's current ik, or the update's chain rots
-// starts at it and ends at p's current ik. An unknown signer fails.
-func updateIKOK(p *Peer, signer []byte, rots []*handshake.Rotation) bool {
-	if len(signer) != ed25519.PublicKeySize {
+	if !updateIKOK(post, signer, rots) {
+		// The ik requirement failed: no link is followed and no token
+		// taken. The spec names no reason; Table B's for the update's ik,
+		// as it would stand once the links were applied, is used (a reading
+		// of this release; the spec should confirm).
+		switch {
+		case p.ancestor(signer) || len(signer) > 0 && bytes.Equal(signer, p.IK) && !bytes.Equal(post, p.IK):
+			m.refusePeerKey(p, "ancestor_ik", now)
+		case p.rejected(signer):
+			m.refusePeerKey(p, "rejected_ik", now)
+		default:
+			m.refusePeerKey(p, "unknown_ik", now)
+		}
 		return false
 	}
-	if bytes.Equal(signer, p.IK) {
+	if len(rots) > 0 && !m.applyIDLinks(p, rots, ep, now) {
+		return false // a conflict, or the record suspended
+	}
+	return !p.suspended() // the links may have made it suspend (K9, a flag set)
+}
+
+// rotsOutcome is the ik p's identity links rots lead to, worked out as
+// applyIDLinks would apply them but without acting: the leading links
+// already followed are skipped, and the rest must start at p's current ik,
+// resolve, and move to no ancestor or rejected ik. ok is false where Table
+// B would refuse a link. No links: p's current ik.
+func (p *Peer) rotsOutcome(rots []*handshake.Rotation) (ik []byte, ok bool) {
+	if len(rots) == 0 || p.suspended() {
+		return p.IK, len(rots) == 0
+	}
+	i := handshake.KnownPrefix(parseRotations(p.Chain), rots)
+	if i == len(rots) {
+		return p.IK, true
+	}
+	app := rots[i:]
+	if !bytes.Equal(app[0].OldIK, p.IK) {
+		return nil, false
+	}
+	end, _, err := handshake.ResolveChain(p.IK, app)
+	if err != nil {
+		return nil, false
+	}
+	for _, r := range app {
+		if p.ancestor(r.NewIK) || p.rejected(r.NewIK) {
+			return nil, false
+		}
+	}
+	return end, true
+}
+
+// updateIKOK is RK5's ik requirement against ik, the vault's current ik for
+// p once the update's links are applied: the update's ik (signer) is ik,
+// or the update's chain rots starts at it and ends at ik. An unknown
+// signer fails.
+func updateIKOK(ik, signer []byte, rots []*handshake.Rotation) bool {
+	if len(signer) != ed25519.PublicKeySize || len(ik) != ed25519.PublicKeySize {
+		return false
+	}
+	if bytes.Equal(signer, ik) {
 		return true
 	}
 	if len(rots) == 0 {
 		return false
 	}
 	end, _, err := handshake.ResolveChain(signer, rots)
-	return err == nil && bytes.Equal(end, p.IK)
+	return err == nil && bytes.Equal(end, ik)
 }
 
 // readdressQueued moves p's queued deposits that go on the held standing

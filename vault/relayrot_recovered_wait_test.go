@@ -118,7 +118,7 @@ func TestRelayRotInheritedUnansweredAtTheOpenIsNotHeldByThePhone(t *testing.T) {
 	// Lost-ok unlock 2, after the wait: the key is made current; the next
 	// key owed, stored by its second write, gets a 503. The attempt is
 	// made before the bundle, which names the new current mailbox: the
-	// phone's first try pairs.
+	// phone's second try (the open's bundle was its first) pairs.
 	io.rw.mu.Lock()
 	io.rw.rotate = []error{nil, relayErr(503, "")}
 	io.rw.mu.Unlock()

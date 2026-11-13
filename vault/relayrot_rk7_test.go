@@ -8,6 +8,7 @@ import (
 	"github.com/vettid/vettid-relay/relayauth"
 
 	"github.com/vettid/vettid-vault/vms/handshake"
+	"github.com/vettid/vettid-vault/vms/peerwire"
 )
 
 // VAULT-MESSAGING 0.90.4 §3.4.2 RK7: an hs.confirm, and an hs.fin to an
@@ -375,5 +376,55 @@ func TestRK7UnknownPositionCloses(t *testing.T) {
 	p.RelayClosures = []RelayClosure{{Epoch: bytes.Repeat([]byte{0xee}, 16), Key: k1}}
 	if !p.rk7Closed(ids[2], p.Epochs[2].EstAt, "m-0400", k0, false) {
 		t.Fatal("a record of unknown position did not close the pass")
+	}
+}
+
+// RK7's records: a record under a later epoch from an earlier key does not
+// cover one under an earlier epoch from a later key (each closes passes
+// the other does not): both are kept.
+func TestRK7RecordsKeyOrderKeepsBoth(t *testing.T) {
+	m, p, ids := rk7Fx(t)
+	k0, k1 := rkPub(rkKey(0x51)), rkPub(rkKey(0x52))
+	m.rk7Accepted(p, ids[0], k1)
+	m.rk7Accepted(p, ids[2], k0)
+	if len(p.RelayClosures) != 2 {
+		t.Fatalf("%d records, want 2", len(p.RelayClosures))
+	}
+	if !p.rk7Closed(ids[0], p.Epochs[0].EstAt, "m-0200", k0, false) {
+		t.Fatal("the record from the later key was lost")
+	}
+}
+
+// RK7 records only accepted messages: one from a later key under the
+// epoch that its handler refuses (an update refused relay_unlinked) closes
+// nothing, and the hs.confirm from K still passes.
+func TestRK7RefusedMessageClosesNothing(t *testing.T) {
+	f := newR29Fx(t)
+	f.longTokens()
+	f.rekey(0)
+	if f.deliver(0, 1, kHSInit) != 1 || f.deliver(1, 0, kHSResp) != 1 || f.deliver(0, 1, kHSFin) != 1 {
+		t.Fatal("setup: no rekey")
+	}
+	confirm := f.rkTake(kConfirm, rkAfter)
+	k1 := rkKey(rkK1)
+	u := &peerwire.AddressUpdate{Relay: rkAddr(k1), Token: f.rk8Tok(k1, "rf-st", 25*24*time.Hour),
+		Links: []*handshake.RelayLink{rkLink(t, f.m(1).keys.relay, k1)}}
+	f.do(1, func(m *Manager, p *Peer) {
+		b, err := u.Marshal()
+		if err != nil {
+			t.Fatal(err)
+		}
+		m.sendTo(p, peerwire.TypeRelayAddressUpdate, b, f.clk)
+	})
+	upd := f.rkTake(kOther, "rk-0700")
+	f.rkFollow()
+	upd.Sender = relayauth.EncodeKey(f.p(0).Relay.PK) // from K', the current key: its first old is not the sender
+	f.process(0, upd)
+	if f.activityCount(0, "drop.peer_key", "relay_unlinked") != 1 || len(f.p(0).RelayClosures) != 0 {
+		t.Fatal("setup: the update was not refused, or a closure was recorded for it")
+	}
+	f.process(0, confirm)
+	if f.superseded() != 0 {
+		t.Fatal("a refused message closed the pass")
 	}
 }

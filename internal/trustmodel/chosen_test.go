@@ -29,8 +29,9 @@ import (
 //     link, no relay link is followed.
 //   - RK5: RK5's ik requirement: Q follows an update's relay links only if
 //     the chain from the update's ik (the P-side signer of its epoch) ends
-//     at Q's current ik for P, or that ik is current. With BINDL on and RK5
-//     off, an I3 probe reports a follow that fails it.
+//     at Q's current ik for P, or that ik is current. An I3 check from
+//     ground truth (checkRK5Copy) reports a follow of a relay link made by
+//     an old copy taken before Q's current ik for P.
 //   - N1: RK6: Q, following a relay link, restarts its own open reconnect
 //     whose hs.init carried tokens naming a passed key and that has sent no
 //     hs.fin (not the one whose message made the follow); with no reconnect
@@ -359,6 +360,7 @@ func (q *Party) followRelayThen(r *PeerRec, L []RLink, pos Pos, then func()) boo
 			// for an identity link
 			q.w.markDead(q.ID, r.ID, resCopyRotated, "followed the copy's relay link")
 		}
+		q.w.checkRK5Copy(q, r, l)
 	}
 	r.Relay = L[len(L)-1].New
 	r.Toks = slices.DeleteFunc(r.Toks, func(t Token) bool { return t.Iss != r.Relay })
@@ -515,6 +517,25 @@ func (q *Party) holdFollow(r *PeerRec) {
 }
 
 // ---------- RK5's ik requirement ----------
+
+// checkRK5Copy: I3, RK5's guarantee, from ground truth: Q never follows a
+// relay link that an old copy of P made when the copy was taken before
+// the write that made Q's current ik for P (the copy never held that ik).
+// A copy replaying P's own link (made by P) is not caught here: following
+// it is what P's honest update would do.
+func (w *World) checkRK5Copy(q *Party, r *PeerRec, l RLink) {
+	by, ok := w.rlinkBy[l]
+	if !ok || q.Copy || !w.party(by.By).Copy {
+		return
+	}
+	c := w.party(by.By)
+	for il, ib := range w.iklinkBy {
+		if il.New == r.IK && ib.By == c.Origin && c.SnapW < ib.Write {
+			w.violate("I3", "%s follows relay link %v of old copy %s, taken before %s's current ik %d", q.Name, l, c.Name, w.party(c.Origin).Name, r.IK)
+			return
+		}
+	}
+}
 
 // rk5OK: RK5, after the update's identity links are applied, the chain
 // from the update's ik (the P-side signer of the epoch it travels under)

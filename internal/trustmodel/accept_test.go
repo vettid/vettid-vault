@@ -624,18 +624,12 @@ func (q *Party) ruleU(r *PeerRec, m *RMsg, pos Pos, rs rkSt) dec {
 			return refuse("relay_rollback", pre+"new-is-kept")
 		}
 	}
-	rk5 := q.rk5OK(r, m)
-	if q.w.ch("RK5") && !rk5 {
+	if q.w.ch("RK5") && !q.rk5OK(r, m) {
 		// RK5: Q follows no relay link from it and takes none of its
 		// tokens. SPEC FINDING: no refusal reason is named; the model
 		// refuses with ik_not_current.
 		q.w.stat("RK5: update's ik chain does not end at the current ik")
 		return refuse("ik_not_current", pre+"rk5")
-	}
-	if q.w.ch("BINDL") && !rk5 {
-		// I3 probe: with binding L, a followed update's ik chain ends at
-		// Q's current ik for P (RK5). Reachable only with RK5 off.
-		q.w.violate("I3", "%s follows relay links of an update whose ik chain does not end at its current ik for %s", q.Name, q.w.party(r.ID).Name)
 	}
 	kept, _ := q.ruleT(r, M.Toks, M.RelayPK)
 	hasStanding := false

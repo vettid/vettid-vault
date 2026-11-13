@@ -182,6 +182,11 @@ func TestAddressUpdateRefused(t *testing.T) {
 	if _, err := ParseAddressUpdate(setMember(t, b, "relay_links", nil)); !errors.Is(err, ErrRelayBody) || errors.Is(err, handshake.ErrRelayLink) {
 		t.Errorf("missing relay_links: %v, want a plain ErrRelayBody", err)
 	}
+	for name, v := range map[string]any{"a string": "x", "an object": json.RawMessage(links[0]), "a number": 1} {
+		if _, err := ParseAddressUpdate(setMember(t, b, "relay_links", v)); !errors.Is(err, ErrRelayBody) || errors.Is(err, handshake.ErrRelayLink) {
+			t.Errorf("relay_links as %s: %v, want a plain ErrRelayBody", name, err)
+		}
+	}
 }
 
 func TestMailboxClosed(t *testing.T) {

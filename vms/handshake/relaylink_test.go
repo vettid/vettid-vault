@@ -420,3 +420,29 @@ func TestRelayLinkFormMalformedWins(t *testing.T) {
 		}
 	}
 }
+
+// relay_links that is not an array (a string, an object) is a malformed
+// body only: no link was read, so no ErrRelayLink (relay_unlinked).
+func TestRelayLinksNotAnArray(t *testing.T) {
+	in := sampleInit(t, PurposeReconnect)
+	ib, err := in.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	k1, k2 := relayKey(0x71), relayKey(0x72)
+	addr := RelayAddr{URL: "https://relay.example.org", Mailbox: MailboxID(pubOf(k2)), PK: pubOf(k2)}
+	r := &Resp{Token: tokC, ReconnectToken: tokD, Suite: 2, Sig: make([]byte, 64), Relay: &addr, RelayLinks: relayChain(t, k1, k2)}
+	rb, err := r.Marshal(PurposeReconnect)
+	if err != nil {
+		t.Fatal(err)
+	}
+	link := json.RawMessage(r.RelayLinks[0].Marshal())
+	for name, v := range map[string]any{"a string": "x", "an object": link, "a number": 1} {
+		if _, err := ParseInit(replaceMember(t, ib, "relay_links", v)); !errors.Is(err, ErrBody) || errors.Is(err, ErrRelayLink) {
+			t.Errorf("hs.init relay_links as %s: %v, want ErrBody without ErrRelayLink", name, err)
+		}
+		if _, err := ParseResp(replaceMember(t, rb, "relay_links", v), PurposeReconnect); !errors.Is(err, ErrBody) || errors.Is(err, ErrRelayLink) {
+			t.Errorf("hs.resp relay_links as %s: %v, want ErrBody without ErrRelayLink", name, err)
+		}
+	}
+}

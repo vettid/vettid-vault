@@ -339,7 +339,10 @@ func ParseRelayAddr(ro strictjson.Object) (RelayAddr, error) {
 // MarshalRelayAddr encodes {url, mailbox, pk}.
 func MarshalRelayAddr(a RelayAddr) []byte { return marshalRelay(a) }
 
-// parseRelayLinks parses an optional relay_links array (§6.2).
+// parseRelayLinks parses an optional relay_links array (§6.2). A link's
+// form failure comes back as errors.Join(ErrBody, ErrRelayLink); the
+// callers hold it until the rest of the message is known to be well
+// formed (malformed wins over relay_unlinked).
 func parseRelayLinks(o strictjson.Object) ([]*RelayLink, bool, error) {
 	arr, present, err := o.OptArray("relay_links")
 	if err != nil {
@@ -412,6 +415,15 @@ func optOpaque(o strictjson.Object, name string) (json.RawMessage, bool, error) 
 
 // validate applies the field rules of §6.2 that depend on the purpose.
 func (in *Init) validate() error {
+	if err := in.validateForm(len(in.RelayLinks) > 0); err != nil {
+		return err
+	}
+	return in.checkRelayLinksEnd()
+}
+
+// validateForm applies every rule of validate but the relay chain's end;
+// linksPresent says relay_links is in the message, parsed or not.
+func (in *Init) validateForm(linksPresent bool) error {
 	if !in.Purpose.Valid() || !validCtx(in.Ctx) || in.Eph == nil {
 		return ErrBody
 	}
@@ -440,15 +452,8 @@ func (in *Init) validate() error {
 	if len(in.Rotations) > MaxRotations {
 		return ErrBody
 	}
-	if len(in.RelayLinks) > 0 {
-		// 0.90.0 §6.2: a reconnect only; 1 to 32 links; the last link's
-		// new is the announced key, from.relay.pk.
-		if in.Purpose != PurposeReconnect {
-			return ErrBody
-		}
-		if len(in.RelayLinks) > MaxRelayLinks || !suite.EqualPublic(lastNew(in.RelayLinks), in.From.Relay.PK) {
-			return errors.Join(ErrBody, ErrRelayLink) // relay_unlinked inside the malformed body
-		}
+	if linksPresent && in.Purpose != PurposeReconnect {
+		return ErrBody // 0.90.0 §6.2: relay_links in a reconnect only
 	}
 	if in.DeviceAttest != nil && in.Purpose != PurposeApp {
 		return ErrBody
@@ -465,6 +470,19 @@ func (in *Init) validate() error {
 		return ErrBody
 	}
 	return checkSASField(in.Purpose, in.SASCommit)
+}
+
+// checkRelayLinksEnd: 1 to 32 links, the last link's new the announced
+// key, from.relay.pk (0.90.0 §6.2). It runs after every other rule, so
+// that relay_unlinked is only for an otherwise well-formed message.
+func (in *Init) checkRelayLinksEnd() error {
+	if len(in.RelayLinks) == 0 {
+		return nil
+	}
+	if len(in.RelayLinks) > MaxRelayLinks || !suite.EqualPublic(lastNew(in.RelayLinks), in.From.Relay.PK) {
+		return errors.Join(ErrBody, ErrRelayLink) // relay_unlinked inside the malformed body
+	}
+	return nil
 }
 
 // Marshal encodes the hs.init body.
@@ -606,19 +624,38 @@ func ParseInit(body []byte) (*Init, error) {
 	if present && in.Purpose != PurposeReconnect && in.Purpose != PurposeRekey {
 		return nil, ErrBody
 	}
-	if in.RelayLinks, _, err = parseRelayLinks(o); err != nil {
-		return nil, err
+	// A link's form failure is held: it is relay_unlinked only if every
+	// other member and the purpose rules pass (malformed wins).
+	in.RelayLinks, present, err = parseRelayLinks(o)
+	linkErr := err
+	if err != nil && !errors.Is(err, ErrRelayLink) {
+		return nil, ErrBody
 	}
 	if in.SASCommit, err = optSASField(o, "sas_commit"); err != nil {
 		return nil, ErrBody
 	}
-	if err := in.validate(); err != nil {
+	if err := in.validateForm(present); err != nil {
+		return nil, err
+	}
+	if linkErr != nil {
+		return nil, linkErr
+	}
+	if err := in.checkRelayLinksEnd(); err != nil {
 		return nil, err
 	}
 	return in, nil
 }
 
 func (r *Resp) validate(p Purpose) error {
+	if err := r.validateForm(p, len(r.RelayLinks) > 0); err != nil {
+		return err
+	}
+	return r.checkRelayLinksEnd()
+}
+
+// validateForm applies every rule of validate but the relay chain's end;
+// linksPresent says relay_links is in the message, parsed or not.
+func (r *Resp) validateForm(p Purpose, linksPresent bool) error {
 	tr, rr := tokenRules(p)
 	if checkTokenRule(tr, r.Token) != nil || checkTokenRule(rr, r.ReconnectToken) != nil {
 		return ErrBody
@@ -632,18 +669,26 @@ func (r *Resp) validate(p Purpose) error {
 	if len(r.Rotations) > MaxRotations {
 		return ErrBody
 	}
-	if (r.Relay != nil) != (len(r.RelayLinks) > 0) {
+	if (r.Relay != nil) != linksPresent {
 		return ErrBody // 0.90.0 §6.2: relay with relay_links, and only then
 	}
-	if r.Relay != nil {
-		if p != PurposeReconnect || ValidateRelayAddr(*r.Relay) != nil {
-			return ErrBody
-		}
-		if len(r.RelayLinks) > MaxRelayLinks || !suite.EqualPublic(lastNew(r.RelayLinks), r.Relay.PK) {
-			return errors.Join(ErrBody, ErrRelayLink) // relay_unlinked inside the malformed body
-		}
+	if r.Relay != nil && (p != PurposeReconnect || ValidateRelayAddr(*r.Relay) != nil) {
+		return ErrBody
 	}
 	return checkSASField(p, r.SASNonce)
+}
+
+// checkRelayLinksEnd: 1 to 32 links, relay.pk the last link's new (0.90.0
+// §6.2). It runs after every other rule, so that relay_unlinked is only
+// for an otherwise well-formed message.
+func (r *Resp) checkRelayLinksEnd() error {
+	if r.Relay == nil || len(r.RelayLinks) == 0 {
+		return nil
+	}
+	if len(r.RelayLinks) > MaxRelayLinks || !suite.EqualPublic(lastNew(r.RelayLinks), r.Relay.PK) {
+		return errors.Join(ErrBody, ErrRelayLink) // relay_unlinked inside the malformed body
+	}
+	return nil
 }
 
 // Marshal encodes the hs.resp body for a handshake of purpose p.
@@ -720,10 +765,20 @@ func ParseResp(body []byte, p Purpose) (*Resp, error) {
 		}
 		r.Relay = &a
 	}
-	if r.RelayLinks, _, err = parseRelayLinks(o); err != nil {
+	// A link's form failure is held: it is relay_unlinked only if every
+	// other member and the purpose rules pass (malformed wins).
+	r.RelayLinks, present, err = parseRelayLinks(o)
+	linkErr := err
+	if err != nil && !errors.Is(err, ErrRelayLink) {
+		return nil, ErrBody
+	}
+	if err := r.validateForm(p, present); err != nil {
 		return nil, err
 	}
-	if err := r.validate(p); err != nil {
+	if linkErr != nil {
+		return nil, linkErr
+	}
+	if err := r.checkRelayLinksEnd(); err != nil {
 		return nil, err
 	}
 	return r, nil

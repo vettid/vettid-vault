@@ -339,3 +339,84 @@ func TestRespRelayLinks(t *testing.T) {
 		t.Fatal("a non-https relay.url accepted")
 	}
 }
+
+// Malformed wins (0.90.3): a link refused for its form is relay_unlinked
+// only when the rest of the message is well formed and relay_links is
+// allowed there; otherwise the whole message is plain malformed.
+func TestRelayLinkFormMalformedWins(t *testing.T) {
+	k := relayKey(0x71)
+	good := sampleInit(t, PurposeReconnect)
+	good.RelayLinks = relayChain(t, k, ed25519.NewKeyFromSeed(seed(0x10+2)))
+	gb, err := good.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var badLink map[string]any
+	_ = json.Unmarshal(good.RelayLinks[0].Marshal(), &badLink)
+	badLink["v"] = 2
+	bad := []any{badLink}
+	sas := base64.StdEncoding.EncodeToString(make([]byte, SASNonceSize))
+	badRot := []any{map[string]any{"v": 1}}
+	isUnlinked := func(err error) bool { return errors.Is(err, ErrBody) && errors.Is(err, ErrRelayLink) }
+	isMalformed := func(err error) bool { return errors.Is(err, ErrBody) && !errors.Is(err, ErrRelayLink) }
+
+	// hs.init
+	if _, err := ParseInit(replaceMember(t, gb, "relay_links", bad)); !isUnlinked(err) {
+		t.Fatalf("hs.init, a bad-form link alone: %v, want relay_unlinked", err)
+	}
+	initCases := map[string][]byte{
+		"sas_commit not base64 of 32": replaceMember(t, replaceMember(t, gb, "relay_links", bad), "sas_commit", "AAAA"),
+		"sas_commit in a reconnect":   replaceMember(t, replaceMember(t, gb, "relay_links", bad), "sas_commit", sas),
+		"bad rotations":               replaceMember(t, replaceMember(t, gb, "relay_links", bad), "rotations", badRot),
+		"unlock_secret in a reconnect": replaceMember(t, replaceMember(t, gb, "relay_links", bad), "unlock_secret",
+			base64.StdEncoding.EncodeToString(make([]byte, 32))),
+	}
+	for _, p := range []Purpose{PurposeApp, PurposeConnection, PurposeRekey} {
+		raw, _ := sampleInit(t, p).Marshal()
+		initCases["bad-form link in "+string(p)] = replaceMember(t, raw, "relay_links", bad)
+		initCases["0 links in "+string(p)] = replaceMember(t, raw, "relay_links", []any{})
+	}
+	// The chain-end check (last new = from.relay.pk) runs last too.
+	wrong := sampleInit(t, PurposeReconnect)
+	wrong.RelayLinks = relayChain(t, relayKey(0x71), relayKey(0x72))
+	wb, _ := json.Marshal([]json.RawMessage{wrong.RelayLinks[0].Marshal()})
+	initCases["end mismatch + sas_commit in a reconnect"] = replaceMember(t, replaceMember(t, gb, "relay_links", json.RawMessage(wb)), "sas_commit", sas)
+	for name, raw := range initCases {
+		if _, err := ParseInit(raw); !isMalformed(err) {
+			t.Errorf("hs.init, %s: %v, want plain ErrBody", name, err)
+		}
+	}
+
+	// hs.resp
+	k1, k2 := relayKey(0x71), relayKey(0x72)
+	addr := RelayAddr{URL: "https://relay.example.org", Mailbox: MailboxID(pubOf(k2)), PK: pubOf(k2)}
+	r := &Resp{Token: tokC, ReconnectToken: tokD, Suite: 2, Sig: make([]byte, 64), Relay: &addr, RelayLinks: relayChain(t, k1, k2)}
+	rb, err := r.Marshal(PurposeReconnect)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rbad := replaceMember(t, rb, "relay_links", bad)
+	if _, err := ParseResp(rbad, PurposeReconnect); !isUnlinked(err) {
+		t.Fatalf("hs.resp, a bad-form link alone: %v, want relay_unlinked", err)
+	}
+	other := RelayAddr{URL: addr.URL, Mailbox: MailboxID(pubOf(k1)), PK: pubOf(k1)}
+	for name, c := range map[string]struct {
+		b []byte
+		p Purpose
+	}{
+		"a rekey":                    {rbad, PurposeRekey},
+		"an app":                     {rbad, PurposeApp},
+		"a connection":               {rbad, PurposeConnection},
+		"no relay":                   {replaceMember(t, rbad, "relay", nil), PurposeReconnect},
+		"sas_nonce not base64 of 32": {replaceMember(t, rbad, "sas_nonce", "AAAA"), PurposeReconnect},
+		"sas_nonce in a reconnect":   {replaceMember(t, rbad, "sas_nonce", sas), PurposeReconnect},
+		"bad rotations":              {replaceMember(t, rbad, "rotations", badRot), PurposeReconnect},
+		"bad sig":                    {replaceMember(t, rbad, "sig", "AAAA"), PurposeReconnect},
+		"end mismatch + sas_nonce":   {replaceMember(t, replaceMember(t, rb, "relay", json.RawMessage(MarshalRelayAddr(other))), "sas_nonce", sas), PurposeReconnect},
+		"0 links, no relay":          {replaceMember(t, replaceMember(t, rb, "relay_links", []any{}), "relay", nil), PurposeReconnect},
+	} {
+		if _, err := ParseResp(c.b, c.p); !isMalformed(err) {
+			t.Errorf("hs.resp, bad-form link with %s: %v, want plain ErrBody", name, err)
+		}
+	}
+}

@@ -65,13 +65,24 @@ func (u *AddressUpdate) Marshal() ([]byte, error) {
 }
 
 func (u *AddressUpdate) validate() error {
+	if err := u.validateForm(); err != nil {
+		return err
+	}
+	if len(u.Links) == 0 || len(u.Links) > handshake.MaxRelayLinks {
+		return ErrRelayBody
+	}
+	return nil
+}
+
+// validateForm applies every rule of validate but the links'.
+func (u *AddressUpdate) validateForm() error {
 	if handshake.ValidateRelayAddr(u.Relay) != nil || !handshake.ValidToken(u.Token) {
 		return ErrRelayBody
 	}
 	if u.ReconnectToken != "" && !handshake.ValidToken(u.ReconnectToken) {
 		return ErrRelayBody
 	}
-	if len(u.Links) == 0 || len(u.Links) > handshake.MaxRelayLinks || len(u.Rotations) > handshake.MaxRotations {
+	if len(u.Rotations) > handshake.MaxRotations {
 		return ErrRelayBody
 	}
 	return nil
@@ -107,10 +118,12 @@ func ParseAddressUpdate(body []byte) (*AddressUpdate, error) {
 	if err != nil {
 		return nil, ErrRelayBody
 	}
+	// A link's form failure keeps handshake.ErrRelayLink (relay_unlinked),
+	// but only if every other member is well formed (malformed wins); both
+	// are fixed sentinels (§13.6: no input data in errors).
+	var linkErr error
 	if u.Links, err = handshake.ParseRelayLinks(arr); err != nil {
-		// a link-level failure keeps handshake.ErrRelayLink (relay_unlinked);
-		// both are fixed sentinels (§13.6: no input data in errors)
-		return nil, errors.Join(ErrRelayBody, handshake.ErrRelayLink)
+		linkErr = errors.Join(ErrRelayBody, handshake.ErrRelayLink)
 	}
 	rots, _, err := o.OptArray("rotations") // (0.90.3) [] is read as absent: Rotations stays nil
 	if err != nil || len(rots) > handshake.MaxRotations {
@@ -122,6 +135,12 @@ func ParseAddressUpdate(body []byte) (*AddressUpdate, error) {
 			return nil, ErrRelayBody
 		}
 		u.Rotations = append(u.Rotations, r)
+	}
+	if err := u.validateForm(); err != nil {
+		return nil, err
+	}
+	if linkErr != nil {
+		return nil, linkErr
 	}
 	if err := u.validate(); err != nil {
 		return nil, err

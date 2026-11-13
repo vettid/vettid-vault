@@ -275,3 +275,31 @@ func FuzzParseMailboxClosed(f *testing.F) {
 		}
 	})
 }
+
+// Malformed wins (0.90.3): a link refused for its form is relay_unlinked
+// only when every other member is well formed.
+func TestAddressUpdateMalformedWins(t *testing.T) {
+	u, _ := sampleUpdate(t)
+	b, _ := u.Marshal()
+	var l map[string]any
+	_ = json.Unmarshal(u.Links[0].Marshal(), &l)
+	l["v"] = 2
+	bad := setMember(t, b, "relay_links", []any{l})
+	if _, err := ParseAddressUpdate(bad); !errors.Is(err, ErrRelayBody) || !errors.Is(err, handshake.ErrRelayLink) {
+		t.Fatalf("a bad-form link alone: %v, want relay_unlinked", err)
+	}
+	otherPK := rrPub(rrKey(0x70))
+	for name, raw := range map[string][]byte{
+		"bad token":          setMember(t, bad, "token", "not-a-paseto"),
+		"no token":           setMember(t, bad, "token", nil),
+		"empty reconnect":    setMember(t, bad, "reconnect_token", ""),
+		"mailbox mismatch":   setMember(t, bad, "relay", map[string]string{"url": "https://relay.example.org", "mailbox": handshake.MailboxID(otherPK), "pk": b64(u.Relay.PK)}),
+		"bad rotations":      setMember(t, bad, "rotations", []any{map[string]any{"v": 1}}),
+		"rotations string":   setMember(t, bad, "rotations", "x"),
+		"0 links, bad token": setMember(t, setMember(t, b, "relay_links", []any{}), "token", "not-a-paseto"),
+	} {
+		if _, err := ParseAddressUpdate(raw); !errors.Is(err, ErrRelayBody) || errors.Is(err, handshake.ErrRelayLink) {
+			t.Errorf("bad-form link with %s: %v, want a plain ErrRelayBody", name, err)
+		}
+	}
+}

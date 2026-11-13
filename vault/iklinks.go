@@ -254,8 +254,20 @@ func (m *Manager) evidenceFirst(p *Peer, in *envelope.Inner, now time.Time) bool
 
 // followLinks follows identity links at the position of the message being
 // handled, which traveled under epoch msgEpoch (nil: a handshake), with
-// "Epochs after an ik link" and H5.
+// "Epochs after an ik link" and H5; strict F1 takes msgEpoch as E.
 func (m *Manager) followLinks(p *Peer, app []*handshake.Rotation, msgEpoch []byte, now time.Time) {
+	m.followLinksF1(p, app, msgEpoch, msgEpoch, now)
+}
+
+// followLinksF1 is followLinks for links applied at a handshake's last
+// message (msgEpoch nil: it opened under no epoch Q keeps, so "Pending
+// epochs at a link" makes no exception) where strict F1 still has an E
+// (owner decision 2026-11-12, §3.4.1 invariant I3): f1Epoch is the epoch
+// the rekey hs.init traveled under, or the epoch the reconnect hs.init
+// named; nil runs no strict F1. The demotion is by position, x being the
+// message handled (the hs.fin), so the epoch that message establishes,
+// recorded only after, is never among those demoted.
+func (m *Manager) followLinksF1(p *Peer, app []*handshake.Rotation, msgEpoch, f1Epoch []byte, now time.Time) {
 	if len(app) == 0 {
 		return
 	}
@@ -316,7 +328,7 @@ func (m *Manager) followLinks(p *Peer, app []*handshake.Rotation, msgEpoch []byt
 			m.note(now, "epoch_demoted", p.ID)
 		}
 	}
-	m.f1Demote(p, app, msgEpoch, now)
+	m.f1Demote(p, app, f1Epoch, now)
 	if demotedCurrent && !m.noLinkRestart {
 		m.restartAfterDemotion(p, now) // not beside the caller's own handshake
 	}

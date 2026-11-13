@@ -18,26 +18,34 @@ import (
 //     no rule E); P goes pending.
 //  4. The copy's hs.fin reaches Q: Q establishes E1, signed by the old ik.
 //     The copy takes Q's hs.confirm and confirms E1.
-//  5. P's hs.fin reaches Q: Q follows the link there and establishes E2.
-//  6. The copy sends a note under E1, deposited after the link.
-//  7. P's identity.rotate finally arrives.
+//     (flagged: the copy then sends a note under E1, before the link.)
+//  5. P's hs.fin reaches Q: Q follows the link there.
 //
-// As built (release 29), the gap reproduces: the link is followed at P's
-// hs.fin with no epoch (no strict F1), E1 was established before that
-// position (no demotion by position), and when P's identity.rotate comes
-// its link is already followed (ignored; R29-K9 judges only epochs Q began
-// as initiator). Q takes the copy's note under E1 and nothing is ever
-// visible. The test pins that behaviour; it fails once the gap is closed
-// (for example by strict F1 on a rekey's links at hs.fin, with E the
-// epoch the hs.init traveled under), and must then be inverted.
-func TestR29CopyInitiatorAfterLinkViaRekey(t *testing.T) {
+// Until the owner decision of 2026-11-12 the link was followed at P's hs.fin
+// with no strict F1, E1 was established before that position (no demotion
+// by position), and P's later identity.rotate found its link already
+// followed: Q took the copy's messages under E1 and nothing was visible.
+// Now the link applied at hs.fin runs strict F1 with E the epoch the
+// hs.init traveled under (§3.4.1 invariant I3).
+type i3Rekey struct {
+	f              *r29Fx
+	e0, e1, e2     []byte
+	oldIK          []byte
+	beforeFinNotes int // notes Q handled before P's hs.fin
+}
+
+// i3CopyBesideRekey runs steps 1 to 4; with flagged the copy sends a note
+// under E1 before P's hs.fin (its received flag set at Q). With oldRecord
+// Q's answer to P's rekey is made a record written before InitEpoch. Step 5
+// is the caller's.
+func i3CopyBesideRekey(t *testing.T, flagged, oldRecord bool) *i3Rekey {
+	t.Helper()
 	f := newR29Fx(t)
 	f.longTokens()
 	for s := 0; s < 2; s++ {
 		f.do(s, func(m *Manager, _ *Peer) { m.dirty = true })
 	}
-	e0 := append([]byte(nil), f.cur(1)...)
-	oldIK := append([]byte(nil), f.p(1).IK...)
+	x := &i3Rekey{f: f, e0: append([]byte(nil), f.cur(1)...), oldIK: append([]byte(nil), f.p(1).IK...)}
 	snap := f.snapshot(0)
 
 	// 1.
@@ -52,7 +60,7 @@ func TestR29CopyInitiatorAfterLinkViaRekey(t *testing.T) {
 	if f.deliver(1, 2, kHSResp) != 1 || f.p(2).Pending == nil {
 		t.Fatal("setup: the copy is not pending")
 	}
-	e1 := append([]byte(nil), f.p(2).Pending.ID...)
+	x.e1 = append([]byte(nil), f.p(2).Pending.ID...)
 
 	// 3.
 	if f.deliver(0, 1, kHSInit) != 1 {
@@ -61,47 +69,139 @@ func TestR29CopyInitiatorAfterLinkViaRekey(t *testing.T) {
 	if f.deliver(1, 0, kHSResp) != 1 || f.p(0).Pending == nil {
 		t.Fatalf("setup: P is not pending; Q's audits %v", auditEvents(f.m(1)))
 	}
-	e2 := append([]byte(nil), f.p(0).Pending.ID...)
+	x.e2 = append([]byte(nil), f.p(0).Pending.ID...)
+	recorded := 0
+	f.do(1, func(m *Manager, p *Peer) {
+		for _, aw := range m.st.Awaiting {
+			if aw.PeerID != p.ID || aw.Purpose != "rekey" || len(aw.Links) == 0 {
+				continue
+			}
+			recorded++
+			if !bytes.Equal(aw.InitEpoch, x.e0) {
+				t.Fatal("the answer to P's rekey does not record E0 as the epoch its hs.init traveled under")
+			}
+			if oldRecord {
+				aw.InitEpoch = nil
+				m.dirty = true
+			}
+		}
+	})
+	if recorded != 1 {
+		t.Fatalf("setup: %d answers to P's link-carrying rekey at Q", recorded)
+	}
 
 	// 4.
-	if f.deliver(2, 1, kHSFin) != 1 || !bytes.Equal(f.cur(1), e1) {
+	if f.deliver(2, 1, kHSFin) != 1 || !bytes.Equal(f.cur(1), x.e1) {
 		t.Fatal("setup: Q did not establish the copy's E1")
 	}
-	if e := f.p(1).epochMeta(e1); e == nil || !bytes.Equal(e.Signer, oldIK) {
+	if e := f.p(1).epochMeta(x.e1); e == nil || !bytes.Equal(e.Signer, x.oldIK) {
 		t.Fatal("setup: E1 is not signed by P's old ik at Q")
 	}
 	f.deliver(1, 2, kAny) // Q's hs.confirm for E1 reaches the copy
-	if !bytes.Equal(f.cur(2), e1) {
+	if !bytes.Equal(f.cur(2), x.e1) {
 		t.Fatal("setup: the copy did not confirm E1")
 	}
+	if flagged {
+		n := len(f.got[1])
+		f.note(2, "copy-under-e1-before-the-link")
+		f.deliver(2, 1, kNote)
+		if len(f.got[1]) != n+1 || !f.flag(1, x.e1) {
+			t.Fatal("setup: Q did not take the copy's note under E1 before the link")
+		}
+	}
+	x.beforeFinNotes = len(f.got[1])
+	return x
+}
+
+// The flag clear: strict F1 at P's hs.fin, E = E0, demotes E1 by position
+// (x = the hs.fin), audited connection.fork_suspected (ref epoch) with no
+// feed item and no suspension; Q establishes E2, and the copy's note under
+// E1 deposited after the link is refused (ancestor_ik).
+func TestR29CopyInitiatorAfterLinkViaRekey(t *testing.T) {
+	x := i3CopyBesideRekey(t, false, false)
+	f := x.f
 
 	// 5.
 	if f.deliver(0, 1, kHSFin) != 1 {
 		t.Fatal("setup: no hs.fin from P")
 	}
-	if bytes.Equal(f.p(1).IK, oldIK) || !bytes.Equal(f.cur(1), e2) {
-		t.Fatalf("setup: Q did not follow P's link and establish E2 at P's hs.fin; Q's audits %v", auditEvents(f.m(1)))
+	if bytes.Equal(f.p(1).IK, x.oldIK) || !bytes.Equal(f.cur(1), x.e2) {
+		t.Fatalf("Q did not follow P's link and establish E2 at P's hs.fin; Q's audits %v", auditEvents(f.m(1)))
 	}
-	if e := f.p(1).epochMeta(e1); e != nil {
-		t.Logf("after the link: E1 at Q demoted %v, destroyed %v, flag %v", e.Demoted, e.Destroyed, e.GotFromPeer)
+	e := f.p(1).epochMeta(x.e1)
+	if e == nil || !e.Demoted || e.Destroyed {
+		f.dump()
+		t.Fatal("E1 was not demoted by strict F1 at P's hs.fin")
+	}
+	if !f.audited(1, "epoch_demoted_f1") || !f.activity(1, "connection.fork_suspected", "epoch") {
+		t.Fatal("the demotion was not audited connection.fork_suspected (ref epoch)")
+	}
+	if f.p(1).suspended() || f.forkFeed(1) {
+		t.Fatal("suspended, or a feed item, with E1's flag clear")
+	}
+	for _, id := range [][]byte{x.e0, x.e2} {
+		if e := f.p(1).epochMeta(id); e == nil || e.Demoted || e.Destroyed {
+			t.Fatal("P's own epoch E0, or the hs.fin's own epoch E2, was judged")
+		}
 	}
 
-	// 6.
+	// The copy's note under E1, deposited after the link: refused.
+	n := len(f.got[1])
+	f.note(2, "copy-under-e1-after-the-link")
+	if f.deliver(2, 1, kNote) != 1 {
+		t.Fatal("setup: the copy sent nothing under E1")
+	}
+	if len(f.got[1]) != n || !f.activity(1, "drop.peer_key", "ancestor_ik") {
+		t.Fatal("Q took the copy's note under E1 deposited after the link")
+	}
+	if f.p(1).suspended() {
+		t.Fatal("a message under E1 deposited after the link suspended")
+	}
+
+	// P's identity.rotate arrives at last (links already followed:
+	// ignored), and P and Q talk under E2.
+	f.deliver(0, 1, kAny)
+	f.settle()
+	if f.p(1).suspended() || f.p(0).suspended() || !f.sameEpoch() || !bytes.Equal(f.cur(1), x.e2) {
+		t.Fatalf("P and Q did not settle on E2; Q's audits %v", auditEvents(f.m(1)))
+	}
+	f.talks()
+	if f.p(1).suspended() || f.forkFeed(1) {
+		t.Fatal("P's own messages under E2 were taken as fork evidence")
+	}
+}
+
+// The flag set (the copy sent under E1 before the link): strict F1 at P's
+// hs.fin suspends (ref epoch, the neutral feed item) and E2 is not
+// established.
+func TestR29CopyInitiatorAfterLinkViaRekeyFlagSuspends(t *testing.T) {
+	x := i3CopyBesideRekey(t, true, false)
+	f := x.f
+	f.deliver(0, 1, kHSFin)
+	if !f.suspendedRef(1, "epoch") || !f.forkFeed(1) {
+		f.dump()
+		t.Fatal("Q did not suspend (ref epoch) at P's hs.fin with E1's flag set")
+	}
+	if bytes.Equal(f.cur(1), x.e2) || f.p(1).epochMeta(x.e2) != nil {
+		t.Fatal("E2 was established on a suspended connection")
+	}
+}
+
+// An answer recorded before InitEpoch (an old record) is finished as
+// before: no strict F1 at hs.fin, E1 kept, the copy's note taken.
+func TestR29CopyInitiatorAfterLinkViaRekeyOldRecord(t *testing.T) {
+	x := i3CopyBesideRekey(t, false, true)
+	f := x.f
+	if f.deliver(0, 1, kHSFin) != 1 || !bytes.Equal(f.cur(1), x.e2) {
+		t.Fatal("setup: Q did not establish E2 at P's hs.fin")
+	}
+	if e := f.p(1).epochMeta(x.e1); e == nil || e.Demoted || e.Destroyed || f.audited(1, "epoch_demoted_f1") {
+		t.Fatal("an old record ran strict F1")
+	}
 	n := len(f.got[1])
 	f.note(2, "copy-under-e1-after-the-link")
 	f.deliver(2, 1, kNote)
-	accepted := len(f.got[1]) == n+1
-	t.Logf("Q handled the copy's note under E1 deposited after the link: %v; Q suspended %v; Q's fork feed %v; Q's current is E2 %v, confirmed is E1 %v, E2 %v",
-		accepted, f.p(1).suspended(), f.forkFeed(1), bytes.Equal(f.cur(1), e2), bytes.Equal(f.p(1).confirmedID(), e1), bytes.Equal(f.p(1).confirmedID(), e2))
-
-	// 7.
-	f.deliver(0, 1, kAny)
-	t.Logf("after P's identity.rotate: Q suspended %v, fork feed %v, Q's audits %v", f.p(1).suspended(), f.forkFeed(1), auditEvents(f.m(1)))
-	_ = e0
-	if !accepted || f.p(1).suspended() || f.forkFeed(1) {
-		t.Fatal("the gap no longer reproduces: invert this test (the copy's message must be refused, or Q suspend)")
-	}
-	if e := f.p(1).epochMeta(e1); e == nil || e.Demoted || e.Destroyed {
-		t.Fatal("E1 is no longer kept at Q")
+	if len(f.got[1]) != n+1 || f.p(1).suspended() {
+		t.Fatal("an old record's behaviour changed")
 	}
 }

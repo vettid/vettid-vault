@@ -79,18 +79,10 @@ func (m *Manager) mint(p *Peer, kind string, ttl time.Duration, quota *relayauth
 // heldToken validates a token another principal issued to the vault: its
 // signature by the principal's relay key, iss = its mailbox, sub = the
 // vault's relay key, aud = its relay URL, and a deposit scope
-// (peerwire.VerifyHeldToken).
+// (peerwire.VerifyHeldToken); with relay-key rotation also rule T's "has
+// not expired" (heldTokenFrom).
 func (m *Manager) heldToken(tok string, p *Peer) (HeldToken, error) {
-	c, err := peerwire.VerifyHeldToken(tok, p.Relay.PK, p.Relay.Mailbox, p.Relay.URL, m.keys.relay.Public().(ed25519.PublicKey))
-	if err != nil {
-		return HeldToken{}, err
-	}
-	for _, r := range p.RevokedHeld {
-		if r.JTI == c.Jti {
-			return HeldToken{}, errRevokedHeld // 0.88.2 §8.6: never used again
-		}
-	}
-	return HeldToken{Token: tok, Exp: c.Exp}, nil
+	return m.heldTokenFrom(tok, p, p.Relay)
 }
 
 // tokenBackdate is how far relayclient backdates iat (RELAY-PROTOCOL §5.2,

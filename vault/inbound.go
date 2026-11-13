@@ -466,6 +466,9 @@ func (m *Manager) dispatch(ctx context.Context, p *Peer, in *envelope.Inner, ep 
 	if m.opt.RelayKeyRotation && m.tableARefuses(p, in, sender, now) {
 		return ackAfterFlush // §3.4.1 acceptFrom step 4, Table A: an earlier key after its cut-off
 	}
+	if m.ruleTDefers(p, in, now) {
+		return noAck // §3.4.1 rule T: a relay.token.issued from a mailbox not yet known, deferred
+	}
 	if m.beforeAccept(p, ep, in, now) {
 		return ackAfterFlush
 	}

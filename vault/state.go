@@ -64,6 +64,10 @@ type State struct {
 	// handshake is complete and which await approval (§6.4, §6.7,
 	// 0.10.3), by pending_id (incoming) or connection_id (outgoing).
 	Requests map[string]*Request `json:"requests,omitempty"`
+	// Deferred are the messages left unacked under §3.4.1 rule T's
+	// "defer", by relay msg_id, so that a restart does not reset their
+	// time (only with Options.RelayKeyRotation; ruleTDefers).
+	Deferred map[string]*DeferredMsg `json:"deferred,omitempty"`
 
 	SeenMsgIDs map[string]time.Time `json:"seen_msg_ids"` // relay msg_id dedupe (16 d)
 	SeenInner  map[string]time.Time `json:"seen_inner"`   // principal|inner id (16 d)

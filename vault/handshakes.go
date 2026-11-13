@@ -406,8 +406,17 @@ func (m *Manager) respondReconnect(pi *handshake.PendingInit, p *Peer, sender ed
 	default:
 		named = append(named, p.LastEpochID...)
 	}
-	st, err1 := m.heldToken(body.Token, p)
-	rt, err2 := m.heldToken(body.ReconnectToken, p)
+	// §3.4.1 rule T: a reconnect hs.init's tokens are minted by the mailbox
+	// its from.relay names, used only to deposit this handshake's answer.
+	// From an earlier relay key before its cut-off that is the earlier
+	// key's mailbox (the library checks that from.relay.pk is the sender),
+	// not the one on record; otherwise the one on record, as before.
+	answerTo := p.Relay
+	if rstate == relayEarlierBefore && suite.EqualPublic(body.From.Relay.PK, sender) {
+		answerTo = relayOf(body.From.Relay)
+	}
+	st, err1 := m.heldTokenFrom(body.Token, p, answerTo)
+	rt, err2 := m.heldTokenFrom(body.ReconnectToken, p, answerTo)
 	if err1 != nil || err2 != nil {
 		m.audit(now, "reconnect_bad_token", p.ID)
 		pi.Discard()
@@ -466,7 +475,7 @@ func (m *Manager) respondReconnect(pi *handshake.PendingInit, p *Peer, sender ed
 	}
 	m.markInit(th1, now)
 	id := m.newID(now)
-	oe := &OutboxEntry{Op: OpDeposit, PeerID: p.ID, RelayURL: p.Relay.URL, Mailbox: p.Relay.Mailbox,
+	oe := &OutboxEntry{Op: OpDeposit, PeerID: p.ID, RelayURL: answerTo.URL, Mailbox: answerTo.Mailbox,
 		Token:   st.Token, // the standing token the hs.init brought: ours may have expired
 		Payload: env, Handshake: true, CarriedTok: true}
 	m.queueDeposit(oe, now)

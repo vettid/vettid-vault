@@ -1037,6 +1037,9 @@ func (m *Manager) housekeeping(now time.Time) {
 	m.pruneIssued(now)
 	m.pruneEarlierRelays(now) // §3.4.1: an earlier relay key ends with the last token issued to it
 	m.pruneRetiredKEMs(now)
+	if m.opt.RelayKeyRotation {
+		m.pruneDeferred(now) // §3.4.1 rule T's deferrals whose message is gone
+	}
 	for id, fr := range m.featureReqs {
 		if now.Sub(fr.at) > featureReqTTL {
 			delete(m.featureReqs, id)

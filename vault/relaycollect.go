@@ -36,15 +36,6 @@ const (
 	// collectedToWindow is RELAY-PROTOCOL §4.1's freshness window, which a
 	// mailbox's collected-to time is less (§3.4.1 "Order of processing").
 	collectedToWindow = 90 * time.Second
-	// oldFailBound is how long an old mailbox's collects may fail (any
-	// answer but mailbox_unknown: a 401, a 403, a 5xx, no answer) with no
-	// collect succeeding before it stops holding back what the vault
-	// processes from its other mailboxes: it is still collected, and its
-	// collected-to counts again after a collect that returned fewer than
-	// max. Without it a failing old mailbox would hold every message of
-	// the current one, device requests too, until its stop. A reading of
-	// this release (the spec should confirm).
-	oldFailBound = 10 * time.Minute
 )
 
 // collectRec is the RK14 record of one of the vault's own mailboxes: the
@@ -319,12 +310,6 @@ func collectMailbox(c Collector, msgID, current string) string {
 
 // --- the collector of several mailboxes ---
 
-// oldFailRec is an old mailbox's failure record (relayKeyRun.oldFail).
-type oldFailRec struct {
-	since   time.Time
-	unbound bool
-}
-
 // collectPart is one mailbox of a multiCollector.
 type collectPart struct {
 	mailbox string
@@ -336,12 +321,6 @@ type collectPart struct {
 	stream bool
 	to     time.Time // collected-to: zero until a collect returned fewer than max
 	gone   bool      // left the set (mailbox_unknown, or its collects ended)
-	// failSince is the start of the first of the collects in a row that
-	// failed (zero after one that succeeded); unbound: an old mailbox
-	// whose collects failed for oldFailBound, out of the release limit
-	// until a collect returns fewer than max.
-	failSince time.Time
-	unbound   bool
 }
 
 type heldMsg struct {
@@ -372,15 +351,6 @@ type multiCollector struct {
 	// drained reports a full drain of a mailbox (pruneUnhanded): what it
 	// gave and what is still held here from it. It takes the vault's lock.
 	drained func(mailbox string, got, held map[string]bool, at time.Time)
-	// failed keeps an old mailbox's failure record on the vault, for the
-	// next collector; it takes the vault's lock.
-	failed func(mailbox string, rec oldFailRec)
-}
-
-func (c *multiCollector) keepFail(p *collectPart) {
-	if c.failed != nil {
-		c.failed(p.mailbox, oldFailRec{since: p.failSince, unbound: p.unbound})
-	}
 }
 
 func (c *multiCollector) mailboxOf(id string) string {
@@ -423,24 +393,17 @@ func (c *multiCollector) Next(ctx context.Context) ([]Message, error) {
 			if p.main {
 				return nil, err
 			}
-			// A failure: its collected-to does not move, and after
-			// oldFailBound of failures it holds nothing back.
-			if p.failSince.IsZero() {
-				p.failSince = start
-			}
-			if !start.Before(p.failSince.Add(oldFailBound)) {
-				p.unbound = true
-			}
-			c.keepFail(p)
+			// A failure: its collected-to does not move, and it holds back
+			// what was deposited later in the other mailboxes until it is
+			// collected past it, its stop (RK14 step 1) or mailbox_unknown:
+			// a relay.address.update waiting in it must be processed before
+			// a later message from the peer's earlier key, which it
+			// supersedes (§3.4.1 "Order of processing"). Its collects do not
+			// end on failures either: that update would be lost.
 			continue
 		}
-		p.failSince = time.Time{}
 		if len(msgs) < MaxBatch && !p.stream {
 			p.to = start.Add(-collectedToWindow)
-			p.unbound = false
-		}
-		if !p.main {
-			c.keepFail(p)
 		}
 		ids := make([]string, 0, len(msgs))
 		for _, msg := range msgs {
@@ -508,13 +471,13 @@ func (c *multiCollector) hasMain() bool {
 }
 
 // release returns the held messages deposited no later than the earliest
-// collected-to time of the mailboxes still in the set (less those unbound
-// by their failures), in order, at most a batch.
+// collected-to time of the mailboxes still in the set, in order, at most
+// a batch.
 func (c *multiCollector) release() []Message {
 	var limit time.Time
 	first := true
 	for _, p := range c.parts {
-		if p.gone || p.unbound {
+		if p.gone {
 			continue
 		}
 		if first || p.to.Before(limit) {
@@ -606,8 +569,7 @@ func (m *Manager) rotationCollector(ctx context.Context, main Collector) Collect
 		} else {
 			continue
 		}
-		f := m.rk.oldFail[o.Mailbox] // a failure that began under an earlier collector
-		parts = append(parts, &collectPart{mailbox: o.Mailbox, c: c, failSince: f.since, unbound: f.unbound})
+		parts = append(parts, &collectPart{mailbox: o.Mailbox, c: c})
 	}
 	switch {
 	case len(parts) == 0:
@@ -630,18 +592,6 @@ func (m *Manager) rotationCollector(ctx context.Context, main Collector) Collect
 			m.mu.Lock()
 			defer m.mu.Unlock()
 			m.noteDrained(mb, got, held, at)
-		},
-		failed: func(mb string, rec oldFailRec) {
-			m.mu.Lock()
-			defer m.mu.Unlock()
-			if rec == (oldFailRec{}) {
-				delete(m.rk.oldFail, mb)
-				return
-			}
-			if m.rk.oldFail == nil {
-				m.rk.oldFail = map[string]oldFailRec{}
-			}
-			m.rk.oldFail[mb] = rec
 		},
 		given: func(mb string, ids []string) {
 			m.mu.Lock()

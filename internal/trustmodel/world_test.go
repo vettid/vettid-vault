@@ -804,6 +804,18 @@ func (p *Party) deposit(e *Entry, r *PeerRec) {
 			p.holdMU(r, e) // RK14
 			break
 		}
+		if w.relayRot && w.optA && !p.Device && !r.Device {
+			// without RK14's hold (0.88): mailbox_unknown is a definite
+			// refusal that ends the entry, and the peer is unreachable
+			e.Ended = true
+			p.notDelivered(e, "not delivered: mailbox_unknown (no hold)")
+			if r.Status == stActive {
+				w.stat("no HOLD: stale at mailbox_unknown")
+				p.markStale(r, "mailbox_unknown (no hold)")
+				p.h5(r, -1)
+			}
+			break
+		}
 		if e.HoldSince == 0 {
 			e.HoldSince = w.Now
 		}

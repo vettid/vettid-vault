@@ -900,11 +900,31 @@ func (w *World) checkEnd(liveness bool) {
 			}
 			w.statWait(inv, pr[0], pr[1], "a message was silently unreadable")
 			w.violate(inv, "a message %s->%s was silently unreadable (%s)", w.party(pr[0]).Name, w.party(pr[1]).Name, ft)
+		case ft == "deleted with the old mailbox" && w.oldMailboxLoss(pr[0], pr[1]):
+			// RK14's telling: a message deleted with an old mailbox is
+			// deposited again, or told delivery_unconfirmed
+			w.statWait("I1-loss", pr[0], pr[1], "a message was deleted with an old mailbox")
+			w.violate("I1-loss", "a message %s->%s was deleted with an old mailbox, neither deposited again nor told delivery_unconfirmed", w.party(pr[0]).Name, w.party(pr[1]).Name)
 		case ft == "":
 			w.statWait("I1-loss", pr[0], pr[1], "a message vanished")
 			w.violate("I1-loss", "a message %s->%s vanished (no fate)", w.party(pr[0]).Name, w.party(pr[1]).Name)
 		}
 	}
+}
+
+// oldMailboxLoss: a message a->b deleted with b's old mailbox counts as a
+// loss (RK14's telling): with relay-key rotation, between two vaults
+// active at both sides at the end, in a run with no old copy and no
+// injected loss. Long locks are included: the telling is what recovers a
+// message an old mailbox took while its owner was away. Devices have no
+// telling (§3.4.1 Residuals, relay-key rotation).
+func (w *World) oldMailboxLoss(a, b PID) bool {
+	x, y := w.party(a), w.party(b)
+	if !w.relayRot || !w.optA || x.Device || y.Device || len(w.copies()) > 0 || w.injLoss {
+		return false
+	}
+	rx, ry := x.st.peer(b), y.st.peer(a)
+	return rx != nil && ry != nil && rx.Status == stActive && ry.Status == stActive
 }
 
 // copyForked: an old copy of p made an identity link of its own (a fork).

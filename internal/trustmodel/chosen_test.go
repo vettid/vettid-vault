@@ -427,15 +427,34 @@ func (q *Party) updateIK(r *PeerRec, M *Msg, pos Pos) (dec, bool) {
 // holdMU: RK14, between two vaults, an outbox entry refused
 // mailbox_unknown is held while the connection exists and p has not
 // followed r to a newer mailbox. One anchor per peer (relay_held's since,
-// the first refusal of the episode). A handshake message is not held: it
-// ends as a refusal of its carried token does. After the hold's limit in
+// the first refusal of the episode). A handshake message (hs.confirm
+// included) is not held: it ends as a refusal of its carried token does. After the hold's limit in
 // this episode, mailbox_unknown ends an entry at once.
 func (p *Party) holdMU(r *PeerRec, e *Entry) {
 	w := p.w
 	switch {
-	case e.M.Kind == KInit || e.M.Kind == KResp || e.M.Kind == KFin:
+	case e.M.Kind == KInit || e.M.Kind == KResp || e.M.Kind == KFin || e.M.Kind == KConfirm:
+		// a handshake message, hs.confirm included, is not held: it ends
+		// as a refusal of its carried token does (§6.3.1 "A carried token
+		// refused"): R drops the answer whose hs.resp it is; I abandons
+		// the pending epoch whose hs.fin it is and reconnects (not a
+		// failed try). Its carried tokens are not discarded (a model
+		// limit: the model does not tie kept tokens to their handshake).
 		e.Ended = true
 		w.stat("HOLD: handshake message refused mailbox_unknown ends")
+		switch e.M.Kind {
+		case KResp:
+			if slices.ContainsFunc(r.Ans, func(a HS) bool { return a.ID == e.M.HS }) {
+				w.stat("HOLD: answer dropped (its hs.resp refused mailbox_unknown)")
+				p.dropAnswer(r, e.M.HS)
+			}
+		case KFin:
+			if pe := r.Pend; pe != nil && pe.ID == e.M.NewEpoch {
+				w.stat("HOLD: pending epoch abandoned (its hs.fin refused mailbox_unknown)")
+				p.abandonPending(r, "hs.fin refused mailbox_unknown", false)
+				p.wantReconnect(r)
+			}
+		}
 	case r.HoldOver:
 		e.Ended = true
 		w.stat("HOLD: mailbox_unknown after the hold's limit ends the entry")
@@ -797,6 +816,9 @@ func (p *Party) tickKept() {
 		switch {
 		case k.PinUntil != 0 && w.Now > k.PinUntil:
 			w.stat("TELL: delivery_unconfirmed (no telling 60 days after the follow)")
+			if k.M.Kind == KSession && k.M.Probe > 0 && !p.Copy {
+				w.probeFate[k.M.Probe] = "delivery_unconfirmed" // the member is told
+			}
 			return true
 		case k.PinUntil == 0 && w.Now > k.At+keepFor:
 			return true

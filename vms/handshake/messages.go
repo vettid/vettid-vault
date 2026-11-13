@@ -98,9 +98,14 @@ type Init struct {
 	Token          string // "" when absent (rekey only)
 	ReconnectToken string // "" when absent
 	Suites         []int
-	Profile        json.RawMessage       // optional object
-	Rotations      []*Rotation           // reconnect, and rekey (0.85.0 S8)
-	DeviceAttest   *altchan.DeviceAttest // purpose app only (§6.7, §11.7)
+	Profile        json.RawMessage // optional object
+	Rotations      []*Rotation     // reconnect, and rekey (0.85.0 S8)
+	// RelayLinks (0.90.0 §6.2, §3.4.2 RK8): a reconnect only, deposited
+	// with a key earlier than from.relay.pk: the signed relay links from
+	// the deposit key up to from.relay.pk. Parsed, not verified
+	// (VerifyRelayChain).
+	RelayLinks   []*RelayLink
+	DeviceAttest *altchan.DeviceAttest // purpose app only (§6.7, §11.7)
 	// APIKey is the new app's app key, SPKI DER (0.15.0, §6.2, §11.12):
 	// purpose app only; the vault requires it in a transfer's hs.init.
 	APIKey []byte
@@ -122,6 +127,13 @@ type Resp struct {
 	// SASNonce is n_R, present exactly for purposes with a SAS (0.10.3).
 	SASNonce []byte
 	Sig      []byte
+	// Relay and RelayLinks (0.90.0 §6.2, §3.4.2 RK8): a reconnect's answer
+	// deposited with a key earlier than the one it announces: Relay is the
+	// announced address, RelayLinks the signed relay links from the
+	// deposit key up to Relay.PK. Both present or both absent. Parsed, not
+	// verified (VerifyRelayChain).
+	Relay      *RelayAddr
+	RelayLinks []*RelayLink
 }
 
 // Fin is the hs.fin body (§6.2).
@@ -296,23 +308,54 @@ func ParsePrincipal(o strictjson.Object) (Principal, error) {
 	if err != nil {
 		return p, ErrBody
 	}
-	var r RelayAddr
-	if r.URL, err = ro.String("url"); err != nil {
-		return p, ErrBody
-	}
-	if r.Mailbox, err = ro.String("mailbox"); err != nil {
-		return p, ErrBody
-	}
-	pk, err := ro.Base64("pk", ed25519.PublicKeySize)
+	r, err := ParseRelayAddr(ro)
 	if err != nil {
-		return p, ErrBody
-	}
-	r.PK = pk
-	if err := ValidateRelayAddr(r); err != nil {
 		return p, err
 	}
 	return Principal{IK: ik, KEM: kem, Relay: r}, nil
 }
+
+// ParseRelayAddr parses and validates a relay address {url, mailbox, pk}
+// (ValidateRelayAddr).
+func ParseRelayAddr(ro strictjson.Object) (RelayAddr, error) {
+	var r RelayAddr
+	var err error
+	if r.URL, err = ro.String("url"); err != nil {
+		return r, ErrBody
+	}
+	if r.Mailbox, err = ro.String("mailbox"); err != nil {
+		return r, ErrBody
+	}
+	if r.PK, err = ro.Base64("pk", ed25519.PublicKeySize); err != nil {
+		return r, ErrBody
+	}
+	if err := ValidateRelayAddr(r); err != nil {
+		return r, err
+	}
+	return r, nil
+}
+
+// MarshalRelayAddr encodes {url, mailbox, pk}.
+func MarshalRelayAddr(a RelayAddr) []byte { return marshalRelay(a) }
+
+// parseRelayLinks parses an optional relay_links array (§6.2).
+func parseRelayLinks(o strictjson.Object) ([]*RelayLink, bool, error) {
+	arr, present, err := o.OptArray("relay_links")
+	if err != nil {
+		return nil, present, ErrBody
+	}
+	if !present {
+		return nil, false, nil
+	}
+	ls, err := ParseRelayLinks(arr)
+	if err != nil {
+		return nil, true, ErrBody
+	}
+	return ls, true, nil
+}
+
+// lastNew is the new key of a chain's last link.
+func lastNew(ls []*RelayLink) ed25519.PublicKey { return ls[len(ls)-1].New }
 
 func validatePrincipal(p Principal) error {
 	if len(p.IK) != ed25519.PublicKeySize || p.KEM == nil {
@@ -393,6 +436,14 @@ func (in *Init) validate() error {
 	if len(in.Rotations) > MaxRotations {
 		return ErrBody
 	}
+	if len(in.RelayLinks) > 0 {
+		// 0.90.0 §6.2: a reconnect only; 1 to 32 links; the last link's
+		// new is the announced key, from.relay.pk.
+		if in.Purpose != PurposeReconnect || len(in.RelayLinks) > MaxRelayLinks ||
+			!suite.EqualPublic(lastNew(in.RelayLinks), in.From.Relay.PK) {
+			return ErrBody
+		}
+	}
 	if in.DeviceAttest != nil && in.Purpose != PurposeApp {
 		return ErrBody
 	}
@@ -436,6 +487,9 @@ func (in *Init) Marshal() ([]byte, error) {
 	}
 	if len(in.Rotations) > 0 {
 		b.Raw("rotations", marshalRotations(in.Rotations))
+	}
+	if len(in.RelayLinks) > 0 {
+		b.Raw("relay_links", MarshalRelayLinks(in.RelayLinks))
 	}
 	if in.DeviceAttest != nil {
 		c, err := in.DeviceAttest.Marshal()
@@ -546,6 +600,9 @@ func ParseInit(body []byte) (*Init, error) {
 	if present && in.Purpose != PurposeReconnect && in.Purpose != PurposeRekey {
 		return nil, ErrBody
 	}
+	if in.RelayLinks, _, err = parseRelayLinks(o); err != nil {
+		return nil, ErrBody
+	}
 	if in.SASCommit, err = optSASField(o, "sas_commit"); err != nil {
 		return nil, ErrBody
 	}
@@ -568,6 +625,15 @@ func (r *Resp) validate(p Purpose) error {
 	}
 	if len(r.Rotations) > MaxRotations {
 		return ErrBody
+	}
+	if (r.Relay != nil) != (len(r.RelayLinks) > 0) {
+		return ErrBody // 0.90.0 §6.2: relay with relay_links, and only then
+	}
+	if r.Relay != nil {
+		if p != PurposeReconnect || len(r.RelayLinks) > MaxRelayLinks || ValidateRelayAddr(*r.Relay) != nil ||
+			!suite.EqualPublic(lastNew(r.RelayLinks), r.Relay.PK) {
+			return ErrBody
+		}
 	}
 	return checkSASField(p, r.SASNonce)
 }
@@ -592,6 +658,10 @@ func (r *Resp) Marshal(p Purpose) ([]byte, error) {
 		b.Base64("sas_nonce", r.SASNonce)
 	}
 	b.Base64("sig", r.Sig)
+	if r.Relay != nil {
+		b.Raw("relay", marshalRelay(*r.Relay))
+		b.Raw("relay_links", MarshalRelayLinks(r.RelayLinks))
+	}
 	return b.Bytes(), nil
 }
 
@@ -629,6 +699,20 @@ func ParseResp(body []byte, p Purpose) (*Resp, error) {
 		return nil, ErrBody
 	}
 	if r.SASNonce, err = optSASField(o, "sas_nonce"); err != nil {
+		return nil, ErrBody
+	}
+	if o.Has("relay") {
+		ro, err := o.Object("relay")
+		if err != nil {
+			return nil, ErrBody
+		}
+		a, err := ParseRelayAddr(ro)
+		if err != nil {
+			return nil, ErrBody
+		}
+		r.Relay = &a
+	}
+	if r.RelayLinks, _, err = parseRelayLinks(o); err != nil {
 		return nil, ErrBody
 	}
 	if err := r.validate(p); err != nil {

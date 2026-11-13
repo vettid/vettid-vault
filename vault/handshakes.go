@@ -863,7 +863,7 @@ func (m *Manager) handleFin(ctx context.Context, id string, raw []byte, sender e
 	if aw.New == nil && m.tableAHandshake(m.peer(aw.PeerID), sender, now) {
 		return ackAfterFlush // §3.4.1 Table A: refused, the answer kept (S2)
 	}
-	fr, err := r.HandleFin(raw, sender, now)
+	fr, err := r.HandleFin(raw, m.unpinnedSender(aw.New == nil, aw.PeerID, r.CollectSender(), sender), now)
 	switch {
 	case errors.Is(err, handshake.ErrType):
 		// A message in the new epoch that arrived before hs.fin: the epoch
@@ -1296,7 +1296,7 @@ func (m *Manager) handleResp(ctx context.Context, id string, raw []byte, sender 
 		m.tableAHandshake(m.peer(og.PeerID), sender, now)
 		return ackAfterFlush
 	}
-	res, err := ini.HandleResp(raw, sender, now)
+	res, err := ini.HandleResp(raw, m.unpinnedSender(og.New == nil, og.PeerID, ini.ResponderRelayKey(), sender), now)
 	if err != nil {
 		if _, xerr := ini.Export(); errors.Is(xerr, handshake.ErrDone) {
 			// Aborted (§6.3): the handshake is gone.

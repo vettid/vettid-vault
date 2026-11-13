@@ -421,6 +421,32 @@ func (m *Manager) rk6Ticks(now time.Time) {
 	}
 }
 
+// unpinnedSender is the collect sender handed to the handshake library for
+// an hs.resp or hs.fin of a handshake with an existing peer (existing)
+// whose library state pins the peer's relay key at its start (pinned).
+// Rule U: "A handshake does not pin P's relay key ... acceptFrom decides
+// each later message", and S2 re-deposits an hs.resp or hs.fin with the
+// new key once the vault's token for it arrives. So, with relay-key
+// rotation, when acceptFrom has judged sender to be the peer's current key
+// or an earlier one before its cut-off (an earlier one after it was
+// refused by Table A first), and pinned is a key the vault keeps for the
+// peer, the library is given pinned: the sender check is acceptFrom's.
+// Otherwise sender is passed as is, and a foreign one is refused there.
+func (m *Manager) unpinnedSender(existing bool, peerID string, pinned, sender ed25519.PublicKey) ed25519.PublicKey {
+	if !m.opt.RelayKeyRotation || !existing || suite.EqualPublic(pinned, sender) {
+		return sender
+	}
+	p := m.peer(peerID)
+	if p == nil || !p.keepsRelayKey(pinned) {
+		return sender
+	}
+	switch m.relayStateOf(p, sender) {
+	case relayCurrent, relayEarlierBefore:
+		return pinned
+	}
+	return sender
+}
+
 // issuedRecorded reports whether a token with jti is in the issued
 // registry.
 func (m *Manager) issuedRecorded(jti string) bool {

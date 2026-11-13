@@ -1368,8 +1368,21 @@ func (q *Party) tableBFin(r *PeerRec, M *Msg, pos Pos) dec {
 			}
 		}
 	}
+	pre := r.Cur
 	if len(app) > 0 && q.followIK(r, app, pos, false) {
 		return dec{"suspend", "fork", cell + ":K4-flag"}
+	}
+	if len(app) > 0 && !q.w.noF1Fin {
+		// VAULT-MESSAGING 0.90.4 (erratum to Strict F1): the links an
+		// hs.init carried, applied at its verified hs.fin, run Strict F1
+		// with E the epoch the rekey traveled under or the reconnect named
+		// (the answer's ctx) and x this hs.fin; it demotes with no
+		// reconnect started (the handshake establishes next), or suspends
+		// on a received flag
+		under := Msg{Epoch: a.Ctx}
+		if q.f1DemoteRestart(r, &under, app, pos, pre, false) {
+			return dec{"suspend", "fork", cell + ":K7-flag"}
+		}
 	}
 	if len(app) > 0 && q.newSpec() && r.Status == stActive && r.Pend != nil {
 		// the links applied here also abandon, by the link, a pending
@@ -1641,7 +1654,11 @@ func (w *World) checkI3(q *Party, r *PeerRec, m *RMsg, d dec) {
 }
 
 // abandonedResidual: the residual "A copy using an epoch Q abandoned while
-// pending, outside R29-K9" (owner decision b, 0.87.1) covers epoch ep for
+// pending, outside R29-K9" (owner decision b, 0.87.1), and with it §3.4.1
+// I3's 0.90.4 residual (Q's own rekey answered by the copy, abandoned while
+// pending at P's later rekey whose hs.fin applies the link: Strict F1
+// there leaves abandoned epochs alone, and only R29-K9 judges the epoch at
+// P's identity.rotate), covers epoch ep for
 // P's ik link l: an epoch Q began and abandoned while pending (not by a
 // link: that one is demoted from the start, K2), not ended, which K9 did
 // not judge: not later than the epoch of an identity.rotate carrying l, or
@@ -1727,8 +1744,8 @@ func (q *Party) f1DemoteRestart(r *PeerRec, M *Msg, app []IKLink, x Pos, pre int
 		}
 		q.w.audits[pairKey(q.ID, r.ID)]++
 		q.w.stat("A:F1-demoted")
-		q.w.logf("%s: strict F1 for %s: %d epoch(s) after E%d DEMOTED; reconnect naming E%d", q.Name, q.w.party(r.ID).Name, len(set), M.Epoch, M.Epoch)
 		if !restart {
+			q.w.logf("%s: strict F1 for %s: %d epoch(s) after E%d DEMOTED; no reconnect", q.Name, q.w.party(r.ID).Name, len(set), M.Epoch)
 			r.Cur = 0 // no K7 reconnect naming E here: a later reconnect names as K5 says
 			q.holdFor(r)
 			if o := r.Own; o != nil && !o.Reconnect {
@@ -1736,6 +1753,7 @@ func (q *Party) f1DemoteRestart(r *PeerRec, M *Msg, app []IKLink, x Pos, pre int
 			}
 			return false
 		}
+		q.w.logf("%s: strict F1 for %s: %d epoch(s) after E%d DEMOTED; reconnect naming E%d", q.Name, q.w.party(r.ID).Name, len(set), M.Epoch, M.Epoch)
 		r.Cur, r.DemName = 0, M.Epoch
 		q.afterDemotion(r, "K7 reconnect (strict F1)")
 		return false

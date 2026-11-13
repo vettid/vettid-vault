@@ -968,6 +968,7 @@ func runActions(cfg Config, seed uint64, acts []Action, verbose bool) *World {
 	w.ruleEKeepFin = os.Getenv("TRUSTMODEL_RULEEFIN") == "keep"
 	w.noRefusedLinks = os.Getenv("TRUSTMODEL_NOM1") != "" // attribution: 0.88.2's links of a refused reconnect off
 	w.rotBurst = os.Getenv("TRUSTMODEL_ROTBURST") != ""
+	w.noF1Fin = os.Getenv("TRUSTMODEL_NOF1FIN") != "" // attribution: 0.90.4's Strict F1 at hs.fin off
 	w.loadChosen()
 	defer w.expoStats()
 	defer w.rcStats()

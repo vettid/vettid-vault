@@ -249,6 +249,14 @@ func (m *Manager) storeIssuedTo(p *Peer, body json.RawMessage, now time.Time) {
 	}
 	if kind == TokReconnect {
 		if p.Kind == KindConnection {
+			if !ht.Exp.After(p.Reconnect.Exp) {
+				// As §6.3.1 adopts a carried token: it replaces the held
+				// token of its kind only if its exp is later. An older or
+				// shorter-lived one (a late honest one, or an old copy's)
+				// is refused, so the held reconnect token stays.
+				m.audit(now, "issued_token_not_newer", p.ID)
+				return
+			}
 			p.Reconnect = ht
 			if h := m.opt.Hooks.Adopt; h != nil {
 				h(p.ID, TokReconnect, ht.Token, "issued")

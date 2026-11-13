@@ -334,3 +334,46 @@ func TestRK7NonExemptAnswerNotCurrentIKRefused(t *testing.T) {
 		t.Fatal("not refused superseded_relay with the answer kept")
 	}
 }
+
+// RK7, hs.fin: the answer expects its hs.fin from the key its hs.init was
+// deposited with; once that key is no longer kept (pruned between the
+// hs.init and the hs.fin), an hs.fin from a later earlier key after its
+// cut-off is refused superseded_relay, the answer kept.
+func TestRK7HsFinRefusedWhenInitKeyPruned(t *testing.T) {
+	f := newR29Fx(t)
+	f.longTokens()
+	f.m(0).opt.RelayKeyRotation = true
+	f.rekey(1)
+	if f.deliver(1, 0, kHSInit) != 1 || f.deliver(0, 1, kHSResp) != 1 {
+		t.Fatal("setup: no rekey")
+	}
+	fin := f.rkTake(kHSFin, rkAfter)
+	k, k1, k2 := f.m(1).keys.relay, rkKey(rkK1), rkKey(rkK2)
+	f.do(0, func(m *Manager, p *Peer) {
+		m.relayAt, m.msgID = f.clk, rkCut
+		if err := m.followRelayLinks(p, []*handshake.RelayLink{rkLink(t, k, k1), rkLink(t, k1, k2)}, rkAddr(k2)); err != nil {
+			t.Fatal(err)
+		}
+		p.EarlierRelays = p.EarlierRelays[1:] // K pruned
+		// K1 can still deposit (a token issued to it), so it stays earlier.
+		m.st.Issued = append(m.st.Issued, IssuedToken{JTI: "k1-st", Kind: TokStanding, Sub: relayauth.EncodeKey(rkPub(k1)),
+			PeerID: p.ID, Exp: f.clk.Add(30 * 24 * time.Hour)})
+	})
+	fin.Sender = relayauth.EncodeKey(rkPub(k1)) // deposited with K1, earlier, after its cut-off
+	n := f.answerCount(0)
+	f.process(0, fin)
+	if f.superseded() != 1 || f.answerCount(0) != n || n == 0 {
+		t.Fatalf("not refused with the answer kept: refused %d, answers %d -> %d", f.superseded(), n, f.answerCount(0))
+	}
+}
+
+// RK7: a record whose position is not known counts as later (fail
+// closed): it closes the pass of an epoch whatever that epoch's position.
+func TestRK7UnknownPositionCloses(t *testing.T) {
+	_, p, ids := rk7Fx(t)
+	k0, k1 := rkPub(rkKey(0x51)), rkPub(rkKey(0x52))
+	p.RelayClosures = []RelayClosure{{Epoch: bytes.Repeat([]byte{0xee}, 16), Key: k1}}
+	if !p.rk7Closed(ids[2], p.Epochs[2].EstAt, "m-0400", k0, false) {
+		t.Fatal("a record of unknown position did not close the pass")
+	}
+}

@@ -146,12 +146,13 @@ func (q *Party) abandonPending(r *PeerRec, why string, restart bool) {
 	r.AbanIDs = append(r.AbanIDs, pe.ID)
 	if r.Device && !q.Device && !pe.Reconnect {
 		q.markF(r, why) // finding F: until a newer epoch is confirmed
-		if !q.Copy {
-			// probes the vault sent while this pending epoch was open are
-			// lost, if lost, through the device exception: the device may
-			// already be on the abandoned epoch
+		if dr := q.w.party(r.ID).st.peer(q.ID); !q.Copy && dr != nil && dr.Cur == pe.ID {
+			// the device holds the epoch the vault abandoned: a probe the
+			// vault sent while it was pending, sealed under another epoch,
+			// is lost to it through the device exception (as fLoss judges
+			// with the device's current epoch)
 			for id, ep := range q.w.probePend {
-				if ep == pe.ID {
+				if ep == pe.ID && q.w.probeEpoch[id] != dr.Cur {
 					q.w.probeF[id] = true
 				}
 			}

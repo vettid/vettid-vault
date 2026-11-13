@@ -71,37 +71,49 @@ func (m *Manager) tableAHandshake(p *Peer, sender ed25519.PublicKey, now time.Ti
 // refuses with its handshake kept: the answer is opened on a copy of the
 // handshake (the handshake itself stays as it is), and its identity links
 // are checked by rule C and kept as seen, as the accepted path checks
-// them. An answer that does not open or verify carries no evidence.
-func (m *Manager) respLinksEvidence(p *Peer, ini *handshake.Initiator, raw []byte, sender ed25519.PublicKey, now time.Time) {
+// them. An answer that does not open or verify carries no evidence. It
+// returns the opened answer (its epoch destroyed), or nil.
+func (m *Manager) respLinksEvidence(p *Peer, ini *handshake.Initiator, raw []byte, sender ed25519.PublicKey, now time.Time) *handshake.Result {
+	res := m.peekResp(p, ini, raw, sender, now)
+	if res == nil {
+		return nil
+	}
+	for _, r := range res.Resp.Rotations {
+		if m.rotationConflict(p, r, now) {
+			return nil
+		}
+	}
+	return res
+}
+
+// peekResp opens an hs.resp on a copy of the handshake ini, which stays as
+// it is, and returns the result with its epoch destroyed, or nil if it
+// does not open or verify. The handshake pins the relay key on record
+// when it began; the sender is an earlier key of p's (acceptFrom judged
+// it), so the library is given the pinned key when both are keys the
+// vault keeps for p, as unpinnedSender does for an accepted answer.
+func (m *Manager) peekResp(p *Peer, ini *handshake.Initiator, raw []byte, sender ed25519.PublicKey, now time.Time) *handshake.Result {
 	if p == nil || ini == nil {
-		return
+		return nil
 	}
 	st, err := ini.Export()
 	if err != nil {
-		return
+		return nil
 	}
 	c, err := handshake.RestoreInitiator(st, m.keys.ik)
 	if err != nil {
-		return
+		return nil
 	}
-	// The handshake pins the relay key on record when it began; the sender
-	// is an earlier key of p's (acceptFrom judged it), so the library is
-	// given the pinned key when both are keys the vault keeps for p, as
-	// unpinnedSender does for an accepted answer.
 	from := sender
 	if pinned := c.ResponderRelayKey(); p.keepsRelayKey(pinned) && p.keepsRelayKey(sender) {
 		from = pinned
 	}
 	res, err := c.HandleResp(raw, from, now)
 	if err != nil {
-		return
+		return nil
 	}
 	res.Epoch.Destroy()
-	for _, r := range res.Resp.Rotations {
-		if m.rotationConflict(p, r, now) {
-			return
-		}
-	}
+	return res
 }
 
 // recordRelayKey is the key a rekey or reconnect hs.init of p's deposited

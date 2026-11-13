@@ -771,6 +771,11 @@ type PendingReconnect struct {
 	ForkRef string `json:"fork_ref,omitempty"`
 	// TS is the hs.init's inner ts.
 	TS time.Time `json:"ts"`
+	// RelayLinks and Announced (§3.4.2 RK8, only with relay-key rotation):
+	// the hs.init's relay links from the key it was deposited with to the
+	// key it announces, and the announced address; followed at hs.fin.
+	RelayLinks []json.RawMessage `json:"relay_links,omitempty"`
+	Announced  *PeerRelay        `json:"announced,omitempty"`
 }
 
 // OutgoingHS is a handshake the vault initiated, awaiting hs.resp.

@@ -173,6 +173,22 @@ type Options struct {
 	// release turns it on before the whole of §3.4.2 is built (RK0: the
 	// vault does not advertise relay_follow).
 	RelayKeyRotation bool
+	// RelayKeyRotationUnfinished must be set with RelayKeyRotation, or no
+	// vault is made or opened (ErrRelayKeyRotationUnfinished): tests and
+	// the harness only, until relay.address.update and relay.mailbox.closed
+	// are sent. Without them a vault that rotated its relay key would lose
+	// everything deposited to its old mailbox after RK14's stop.
+	RelayKeyRotationUnfinished bool
+}
+
+// ErrRelayKeyRotationUnfinished refuses Options.RelayKeyRotation without
+// Options.RelayKeyRotationUnfinished.
+var ErrRelayKeyRotationUnfinished = errors.New("vault: relay-key rotation is unfinished: tests and harness only")
+
+// relayRotationRefused reports Options that turn the switch on without the
+// test-only companion.
+func (o *Options) relayRotationRefused() bool {
+	return o.RelayKeyRotation && !o.RelayKeyRotationUnfinished
 }
 
 // LifecycleEvent is reported to the parent, which writes it to the vault
@@ -270,11 +286,18 @@ type Manager struct {
 	// msgID is the relay msg_id of the message being handled: with
 	// relayAt, its position (§3.4.1 "Terms", 0.86.0).
 	msgID string
+	// msgMailbox is the vault's own mailbox the message being handled was
+	// collected from (§3.4.1 "Cut-off"; "" outside a batch: the current
+	// one).
+	msgMailbox string
 	// msgSender is the collect sender of the message being dispatched
 	// (rule U's end checks, §3.4.1).
 	msgSender ed25519.PublicKey
-	// peerKeyRefusals counts drop.peer_key refusals, so that a message's
-	// handling can tell whether it refused (RK7 records accepted ones only).
+	// peerKeyRefusals counts drop.peer_key refusals (refusePeerKey) only,
+	// so that a message's handling can tell whether §3.4.1 refused it:
+	// RK7 records the messages accepted under an epoch, and a message
+	// accepted there that a handler then answers with an error (a
+	// request's bad_request, say) still counts as accepted.
 	peerKeyRefusals int
 	// msgJTI is the collect jti of the message being handled (RELAY-PROTOCOL 0.4.0 §6.3): the token it was deposited
 	// under, "" when the relay gave none.
@@ -310,6 +333,18 @@ type Manager struct {
 	relay     Relay
 	limits    Limits
 	collector Collector
+	// rk is the runtime of the vault's own relay-key rotation (§3.4;
+	// relayrotate.go).
+	rk relayKeyRun
+	// moveDecided: this unlock confirms or abandons a release move, which
+	// only its ok answer completes (the old header deleted, moved).
+	moveDecided bool
+	// storedHeaderSeq is the header_seq of the header last known stored
+	// (read at the load, or put by writeHeaderWith). m.hdr.HeaderSeq runs
+	// ahead of it after a put that failed: such a put may still have
+	// stored, so the seq is not used again, and an answer reports this
+	// one, a floor the phone may safely keep (§11.4, §13.2).
+	storedHeaderSeq uint64
 
 	sessions map[string]*handshake.Keyring
 	awaiting map[string]*handshake.Responder
@@ -498,6 +533,10 @@ type keyset struct {
 	ik      ed25519.PrivateKey
 	kem     *suite.PrivateKey
 	retired []*suite.PrivateKey
+	// pendingRelay is RelayState.Pending's key, oldRelay the old relay
+	// keys of RelayState.Old, in order (§3.4).
+	pendingRelay ed25519.PrivateKey
+	oldRelay     []ed25519.PrivateKey
 }
 
 func (k *keyset) destroy() {
@@ -505,6 +544,10 @@ func (k *keyset) destroy() {
 		return
 	}
 	suite.Wipe(k.relay)
+	suite.Wipe(k.pendingRelay)
+	for _, o := range k.oldRelay {
+		suite.Wipe(o)
+	}
 	suite.Wipe(k.ik)
 	if k.kem != nil {
 		k.kem.Destroy()
@@ -580,6 +623,9 @@ type EnrollApp struct {
 // and sealed header written create-only. The vault is returned unlocked.
 func Create(ctx context.Context, p CreateParams) (*Manager, error) {
 	p.Options.defaults()
+	if p.Options.relayRotationRefused() {
+		return nil, ErrRelayKeyRotationUnfinished
+	}
 	now := p.Now()
 	if p.VaultID == "" {
 		b, err := suite.RandomBytes(16)
@@ -642,7 +688,7 @@ func Create(ctx context.Context, p CreateParams) (*Manager, error) {
 		return nil, err
 	}
 	m := newManager(p.Options, st, hdr, dek)
-	m.storedView = nil
+	m.storedView, m.storedHeaderSeq = nil, 0 // its header is not stored yet
 	if len(hdr.AppKey) > 0 {
 		m.acked, m.pinned, m.enrolling = nil, ackedKey{}, true // the first header: the host confirms it
 	}
@@ -750,6 +796,9 @@ func newManager(o Options, st *State, hdr *Header, dek []byte) *Manager {
 		awaiting: map[string]*handshake.Responder{}, outgoing: map[string]*handshake.Initiator{},
 		ephemeralSeen: map[string]time.Time{}, rates: map[string]*rateWindow{}, requests: map[string]string{}, requestTypes: map[string]string{},
 		unlockID: newUnlockID(),
+	}
+	if hdr != nil {
+		m.storedHeaderSeq = hdr.HeaderSeq
 	}
 	if o.Now != nil {
 		m.openedAt = o.Now()
@@ -886,7 +935,11 @@ func (m *Manager) loadKeys() error {
 		}
 		k.retired = append(k.retired, rk)
 	}
+	if err := k.loadRelayRotation(&m.st.Relay); err != nil {
+		return err
+	}
 	m.keys = k
+	m.rk.loaded(k)
 	return nil
 }
 
@@ -1097,6 +1150,8 @@ func (m *Manager) persistState(ctx context.Context, create bool) error {
 	m.unstored = nil
 	m.stateWritten = true
 	m.st.loadedClean = false // a write since the load: the store no longer says clean
+	// §3.4: step 2 follows the write that stored the pending key.
+	m.rk.stored = m.pendingMailbox()
 	// The header is behind until its write below succeeds.
 	m.headerBehind = true
 	if err := m.promote(); err != nil { // step 3, written below
@@ -1165,6 +1220,7 @@ func (m *Manager) writeHeaderWith(ctx context.Context, features bool) error {
 		return err
 	}
 	m.headerVer = v
+	m.storedHeaderSeq = m.hdr.HeaderSeq
 	m.storedView = viewOf(m.hdr)
 	if len(m.hdr.AppKey) > 0 {
 		m.pin(m.hdr.AppKey, m.hdr.AppKeySeq) // the stored header names it now
@@ -1350,6 +1406,12 @@ func (m *Manager) zeroize() {
 			m.st.PendingUnlink.wipe() // the kept send key (§11.14.10); stored under the DEK
 		}
 		suite.Wipe(m.st.Relay.Seed)
+		if pr := m.st.Relay.Pending; pr != nil {
+			suite.Wipe(pr.Seed)
+		}
+		for _, o := range m.st.Relay.Old {
+			suite.Wipe(o.Seed)
+		}
 		suite.Wipe(m.st.IdentitySeed)
 		suite.Wipe(m.st.KEMSeed)
 		suite.Wipe(m.st.WakeSeed)

@@ -137,6 +137,9 @@ func RecoveryOpen(ctx context.Context, p RecoveryOpenParams) (*Manager, *Recover
 	if !validRelease(own) || p.Store == nil || p.Sealer == nil {
 		return drop()
 	}
+	if p.Options.relayRotationRefused() {
+		return nil, out.fail(OpenRetry) // before anything is read or spent
+	}
 	hkey := store.HeaderKey(p.VaultID, own.PCR0)
 	hblob, hver, err := p.Store.Get(ctx, hkey)
 	if err != nil {
@@ -509,7 +512,7 @@ func (m *Manager) completeRecoveryR(ctx context.Context, p RecoveryOpenParams, r
 		rep.next.AppKey, rep.next.AppKeySeq = append([]byte(nil), r.App.APIKey...), m.hdr.AppKeySeq+1
 	}
 	// The event in the state (step 2), the attempt's success recorded.
-	m.recoveryEvent(r, now)
+	m.recoveryEvent(ctx, p, r, now)
 	m.record(Activity{Kind: "recovery.completed", Ref: r.ID, Audit: true, Feed: true}, now)
 	recID := r.ID
 	appKeyFn := m.replacementPromoteFn(rep.next)
@@ -532,10 +535,11 @@ func (m *Manager) completeRecoveryR(ctx context.Context, p RecoveryOpenParams, r
 // in memory, for the step-2 write to store: the phone's first handshake
 // (ctx = recovery_id, no approval), the other apps removed, a transfer's
 // held credential key statement and the old phone's notice sent, and the
-// vault's keys rotated. A first open and a repeat whose step 2 was not
-// stored (§11.14.2: that state was never stored, so the event is applied
-// again under DEK_1) both call it, so that they make the same event.
-func (m *Manager) recoveryEvent(r *RecoveryRecord, now time.Time) {
+// vault's keys rotated, a relay key left pending completed first (§3.4 "A
+// recovery's inherited key"). A first open and a repeat whose step 2 was
+// not stored (§11.14.2: that state was never stored, so the event is
+// applied again under DEK_1) both call it, so that they make the same event.
+func (m *Manager) recoveryEvent(ctx context.Context, p RecoveryOpenParams, r *RecoveryRecord, now time.Time) {
 	m.setRecoveredInvite(&Invite{ID: r.ID, Kind: KindApp, Exp: now.Add(RecoveredInviteWindow), EnrollIK: r.App.IK, EnrollRelayPK: r.App.RelayPK,
 		EnrollKEM: r.App.KEM, EnrollAttest: r.App.Attestation, CreatedBy: inviteByRecovery}, now)
 	// The vault's signer binding (the old app's, or the one kept across
@@ -562,9 +566,15 @@ func (m *Manager) recoveryEvent(r *RecoveryRecord, now time.Time) {
 	if t := m.st.RotationOwed.Transfer; t != "" {
 		ref = t
 	}
+	// §3.4 "A recovery's inherited key": a relay key left pending is
+	// completed in one attempt first, before the step-2 write. A relay key
+	// this open stores as pending is the recovery's own (recoveryWaits).
+	m.rk.openRecovery = r.ID
+	m.inheritedKeyAtOpen(ctx, p, now)
 	if err := m.rotateIdentity(now); err != nil {
 		m.record(Activity{Kind: "identity.rotation_failed", Ref: ref, Audit: true, Feed: true, Priority: "high"}, now)
 	}
+	m.rk.openRecovery = ""
 }
 
 // completionStatusTimeout bounds the counter's status read after a
@@ -579,9 +589,17 @@ func (m *Manager) finishOpen(ctx context.Context, p RecoveryOpenParams, mv *Mani
 	now time.Time) (*Manager, *RecoveryOpenOutcome) {
 	var err error
 	m.relay = p.Relay(m.st.Relay.URL, m.keys.relay)
-	if m.limits, err = m.relay.Register(ctx); err != nil {
+	m.rk.pending, m.rk.old = nil, nil // built again on this Relay
+	if !m.openRegisters() {
+		if pr := m.st.Relay.Pending; pr != nil && pr.Limits != nil && m.limits == (Limits{}) {
+			m.limits = *pr.Limits
+		}
+	} else if m.limits, err = m.relay.Register(ctx); err != nil {
 		m.zeroize()
 		return nil, out.fail(OpenRetry)
+	}
+	if m.relayRotation() {
+		m.keepRelayLimits() // the recovery's pending key (§3.4)
 	}
 	if mv != nil && mv.Serial > m.hdr.ManifestSerial {
 		m.hdr.ManifestSerial = mv.Serial
@@ -731,7 +749,7 @@ func resumeRecovery(ctx context.Context, p RecoveryOpenParams, hdr *Header, hver
 			m.zeroize()
 			return nil, out.fail(OpenNoRecovery)
 		}
-		m.recoveryEvent(r, now)
+		m.recoveryEvent(ctx, p, r, now)
 	} else {
 		if err := m.loadKeys(); err != nil {
 			m.zeroize()
@@ -793,6 +811,13 @@ func (m *Manager) setRecoveredInvite(inv *Invite, now time.Time) {
 		if old.CreatedBy == inviteByRecovery && id != inv.ID {
 			m.dropRecoveredHandshake(id, now)
 			delete(m.st.Invites, id)
+			// The same phone under a later recovery: the relay key the
+			// earlier recovery's open stored still waits for its first
+			// handshake (recoveryWaits), in this same write.
+			if pr := m.st.Relay.Pending; pr != nil && pr.Recovery == id && old.EnrollIK != nil && inv.EnrollIK != nil &&
+				suite.EqualPublic(old.EnrollIK, inv.EnrollIK) {
+				pr.Recovery = inv.ID
+			}
 		}
 	}
 	m.st.Invites[inv.ID] = inv

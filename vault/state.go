@@ -191,6 +191,120 @@ type RelayState struct {
 	URL     string `json:"url"`
 	Seed    []byte `json:"seed"`
 	Mailbox string `json:"mailbox"`
+
+	// The vault's own relay-key rotation (§3.4 "The order of a relay-key
+	// rotation"), only with Options.RelayKeyRotation; a state without
+	// these members has none in progress.
+	//
+	// Pending is the new relay key between the rotation's first write and
+	// the second write that makes it current.
+	Pending *PendingRelay `json:"pending,omitempty"`
+	// Anchor is the current key's anchor (§3.4.2 RK14 step 1): the start
+	// of the first rotate attempt away from it, stored just before that
+	// attempt. Not secret.
+	Anchor time.Time `json:"anchor,omitzero"`
+	// Old are the earlier relay keys, kept for deposits (§3.4 "Resending
+	// the new address" (a)), oldest first.
+	Old []OldRelayKey `json:"old,omitempty"`
+	// Recipients are, per recipient (a device or connection id), what the
+	// second write recorded for §3.4.1 S1 and the new address's update.
+	Recipients map[string]*RelayRecipient `json:"recipients,omitempty"`
+	// Collect is what the vault collected from the current mailbox
+	// (§3.4.2 RK14 step 1): kept while a key is pending, and passed to
+	// the old key at the second write.
+	Collect MailboxCollect `json:"collect,omitzero"`
+}
+
+// MailboxCollect is RK14 step 1's record of one of the vault's own
+// mailboxes (§3.4.2). LastMsgID is the largest msg_id such that every
+// message the relay gave from that mailbox up to it was processed and
+// flushed. Unprocessed are the msg_ids given (collected, held back by the
+// order of processing, or left unacked) and not yet processed, Done those
+// processed above LastMsgID, in order, each at most collectTrack; GivenAt
+// is when each of Unprocessed was last given. Ceiling is the lowest
+// msg_id Unprocessed could not keep, set at CeilingAt, which LastMsgID
+// does not pass (erring low costs only re-deposits). A full drain of the
+// mailbox later than two leases after an id was given, or the ceiling
+// set, without it shows the relay no longer has it: it is pruned. Stopped is when the
+// vault ended its collects of the mailbox (zero: not ended); TellingDue:
+// relay.mailbox.closed is owed for it (sent by a later change).
+type MailboxCollect struct {
+	LastMsgID   string               `json:"last_msg_id,omitempty"`
+	Unprocessed []string             `json:"unprocessed,omitempty"`
+	Done        []string             `json:"done,omitempty"`
+	GivenAt     map[string]time.Time `json:"given_at,omitempty"`
+	Ceiling     string               `json:"ceiling,omitempty"`
+	CeilingAt   time.Time            `json:"ceiling_at,omitzero"`
+	Stopped     time.Time            `json:"stopped,omitzero"`
+	TellingDue  bool                 `json:"telling_due,omitempty"`
+}
+
+// PendingRelay is a relay key stored before the relay's rotate (§3.4 step
+// 1): sealed in the state like every other key, never logged.
+type PendingRelay struct {
+	Seed []byte `json:"seed"`
+	// Held are the new tokens minted for every recipient (step 2), held
+	// until the second write, by recipient id.
+	Held map[string]*HeldTokens `json:"held,omitempty"`
+	// RetryAfter is when a relay's retry_after runs out (not secret): no
+	// attempt is made before it, at an unlock either.
+	RetryAfter time.Time `json:"retry_after,omitzero"`
+	// Refused is the code of a definite refusal: the refused state.
+	Refused string `json:"refused,omitempty"`
+	// Marks are the owed marks (§11.14.10) found when the key was made:
+	// its second write clears them. Named are those an earlier key's
+	// identity.rotated already named. Next are the marks of rotations
+	// made while this key was pending: they pass to the next key, which
+	// this key's second write stores (§3.4 "Owed marks").
+	Marks *RotationOwed `json:"marks,omitempty"`
+	Named *RotationOwed `json:"named,omitempty"`
+	Next  *RotationOwed `json:"next,omitempty"`
+	// Limits are the relay's limits as last registered: an unlock with a
+	// key pending registers no key (§3.4 "Retrying with the same key").
+	Limits *Limits `json:"limits,omitempty"`
+	// Recovery is the id of the recovery whose open stored this key (the
+	// recovery's own relay key, §11.14.6 step 6; never a key the open
+	// inherited): its attempts wait for that recovery's phone to pair
+	// while the current mailbox lives (recoveryWaits).
+	Recovery string `json:"recovery,omitempty"`
+	// Created is when the relay answered a registration that may have
+	// created the key's mailbox afresh (relayKeyCall): the second write
+	// waits until freshMailboxWait after it. Not secret.
+	Created time.Time `json:"created,omitzero"`
+}
+
+// HeldTokens are one recipient's tokens for a pending relay key, and their
+// entries for the issued-token registry (State.Issued at the second
+// write).
+type HeldTokens struct {
+	Standing  string        `json:"standing,omitempty"`
+	Reconnect string        `json:"reconnect,omitempty"`
+	Issued    []IssuedToken `json:"issued,omitempty"`
+}
+
+// OldRelayKey is an earlier relay key of the vault's (§3.4 (a)). MadeOld
+// is its second write; Anchor its anchor, kept as the base of the stop of
+// its collects (§3.4.2 RK14 step 1).
+type OldRelayKey struct {
+	Seed    []byte         `json:"seed"`
+	Mailbox string         `json:"mailbox"`
+	MadeOld time.Time      `json:"made_old"`
+	Anchor  time.Time      `json:"anchor,omitzero"`
+	Collect MailboxCollect `json:"collect,omitzero"`
+}
+
+// RelayRecipient is one recipient's record of the vault's relay-key
+// rotation. KeyFor is the vault's key for it (§3.4.1 S1: the relay key
+// its newest relay.token.issued names, the old key at the second write),
+// S1Since the start of S1's clock (§3.4.2 RK13). Standing and Reconnect
+// are the new tokens the update carries; UpdateDue: the update is owed
+// (sent by §3.4.1 S1 and §3.4.2 RK5, a later change).
+type RelayRecipient struct {
+	KeyFor    string    `json:"key_for"`
+	S1Since   time.Time `json:"s1_since"`
+	Standing  string    `json:"standing,omitempty"`
+	Reconnect string    `json:"reconnect,omitempty"`
+	UpdateDue bool      `json:"update_due,omitempty"`
 }
 
 // RotationOwed holds the owed rotation marks (see State.RotationOwed).
@@ -204,6 +318,10 @@ type RotationOwed struct {
 	Transfer   string    `json:"transfer,omitempty"`
 	DEKVersion uint64    `json:"dek_version,omitempty"`
 	At         time.Time `json:"at,omitzero"`
+	// RelayKey is a relay-key rotation owed (§3.4 "A rotation made while
+	// a relay key is pending"), with the time it was set: the pending
+	// key's second write stores the next key, which meets it.
+	RelayKey time.Time `json:"relay_key,omitzero"`
 }
 
 // RetiredKEM is a retired static KEM key, kept 400 days for reconnects.
@@ -658,6 +776,9 @@ type IssuedToken struct {
 	PeerID string    `json:"peer_id,omitempty"`
 	Exp    time.Time `json:"exp"`
 	Denied bool      `json:"denied,omitempty"`
+	// Iss is the vault mailbox that issued it (only with
+	// Options.RelayKeyRotation): a revocation goes to it (§3.4.1 S7).
+	Iss string `json:"iss,omitempty"`
 	// Handshake: minted in a handshake's hs.init or hs.resp (recorded at
 	// activation). A refresh after quota_exceeded spares the newest such
 	// standing token, which the peer may not yet have adopted (0.88.2 §7.2,

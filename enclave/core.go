@@ -63,6 +63,11 @@ type Core struct {
 
 // NewCore checks the dependencies and creates the Recipient key.
 func NewCore(d CoreDeps) (*Core, error) {
+	if d.Vault.RelayKeyRotation && !d.Vault.RelayKeyRotationUnfinished {
+		// The vault's own relay-key rotation is not finished: no enclave
+		// runs it (the vault refuses it too, at every create and open).
+		return nil, vault.ErrRelayKeyRotationUnfinished
+	}
 	if d.Store == nil || d.KMS == nil || d.AttestRecipient == nil || d.AttestVault == nil || d.Config.DeviceAttest == nil ||
 		!manifest.ValidPCR(d.Meas.PCR0) || d.Meas.IsDebug() {
 		return nil, ErrConfig

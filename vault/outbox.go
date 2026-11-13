@@ -205,7 +205,7 @@ func (m *Manager) sendLocking(ctx context.Context) map[string]bool {
 		body := json.RawMessage(lb.String("unlock_id", m.unlockID).Bytes())
 		in := &envelope.Inner{ID: m.newID(now), Type: "vault.locking", TS: now, Exp: now.Add(time.Minute), Body: body}
 		if raw, err := m.sealFor(p, kr.Current(), in); err == nil {
-			if _, err := m.relay.Deposit(ctx, p.Relay.URL, p.Relay.Mailbox, p.Standing.Token, raw); err == nil {
+			if _, err := m.relayFor(p.Standing.Token).Deposit(ctx, p.Relay.URL, p.Relay.Mailbox, p.Standing.Token, raw); err == nil {
 				ok[p.ID] = true
 			}
 		}
@@ -695,7 +695,7 @@ func (m *Manager) drainOutbox(ctx context.Context) {
 				m.unlinkOutcome(e, err, now) // §11.14.10: the notice settled, or not
 			}
 		case OpRevoke:
-			err = m.relay.Revoke(ctx, e.Kind, e.Value)
+			err = m.revoke(ctx, e.Kind, e.Value) // §3.4.1 S7: to the issuing mailbox
 		case OpDeleteClaim:
 			err = m.relay.DeleteClaim(ctx, e.Value)
 			if RelayCode(err) == CodeClaimUnknown {
@@ -747,7 +747,7 @@ func (m *Manager) drainOutbox(ctx context.Context) {
 			continue // lost: the requester retransmits, which re-executes
 		}
 		if p := m.peer(e.PeerID); p != nil && p.Standing.Token != "" {
-			_, _ = m.relay.Deposit(ctx, e.RelayURL, e.Mailbox, p.Standing.Token, e.Payload)
+			_, _ = m.relayFor(p.Standing.Token).Deposit(ctx, e.RelayURL, e.Mailbox, p.Standing.Token, e.Payload)
 		}
 		suite.Wipe(e.Payload)
 	}
@@ -815,7 +815,9 @@ func (m *Manager) deposit(ctx context.Context, e *OutboxEntry, now time.Time) er
 		e.Done = true
 		return nil
 	}
-	_, err := m.relay.Deposit(withOneAttempt(ctx), e.RelayURL, e.Mailbox, tok, e.Payload)
+	// Signed with the key the token was issued to: an old relay key while
+	// the recipient holds none for the current one (§3.4 (a)).
+	_, err := m.relayFor(tok).Deposit(withOneAttempt(ctx), e.RelayURL, e.Mailbox, tok, e.Payload)
 	if mayHaveStored(err) {
 		e.Tried = true // 0.88.7 §8.3: it may have reached the relay
 	}
@@ -1045,6 +1047,8 @@ func (m *Manager) housekeeping(now time.Time) {
 	m.pruneEarlierRelays(now) // §3.4.1: an earlier relay key ends with the last token issued to it
 	m.pruneRetiredKEMs(now)
 	if m.opt.RelayKeyRotation {
+		// §3.4.2 RK14 step 1: the timed stops, written by this batch.
+		m.stopOldCollects(now)
 		m.pruneDeferred(now) // §3.4.1 rule T's deferrals whose message is gone
 		m.rk6Ticks(now)      // §3.4.2 RK6: owed restarts
 	}

@@ -125,6 +125,12 @@ type AttBlob struct {
 	SHA256  []byte    `json:"sha256"`
 	Size    int       `json:"size"`
 	Expires time.Time `json:"expires,omitempty"`
+	// Mailbox is the vault's own mailbox the message that named the blob
+	// was collected from, where the blob was put (only with
+	// Options.RelayKeyRotation; "" is the current one): after the vault
+	// rotates its relay key, a blob in its old mailbox is fetched and
+	// deleted with the old key (RELAY-PROTOCOL §6.8).
+	Mailbox string `json:"mailbox,omitempty"`
 }
 
 // AttEntry is one attachment of the index (§10.5.1 "The index").
@@ -514,7 +520,8 @@ func (h managerHost) AttachSend(s *Session, conn, msgID string, sentAt time.Time
 	e.Name, e.HasName = d.Blob.Name, d.Blob.HasName
 	e.State, e.SentAt = AttPreparing, sentAt
 	e.Thumb = append([]byte(nil), d.Thumb...)
-	e.Blob = &AttBlob{ID: d.Blob.ID, Key: append([]byte(nil), d.Blob.Key...), SHA256: append([]byte(nil), d.Blob.SHA256[:]...), Size: d.Blob.Size}
+	e.Blob = &AttBlob{ID: d.Blob.ID, Key: append([]byte(nil), d.Blob.Key...), SHA256: append([]byte(nil), d.Blob.SHA256[:]...), Size: d.Blob.Size,
+		Mailbox: m.blobMailbox()}
 	e.Uploader = s.from.ID
 	e.Caption, e.HasCaption = caption, hasCaption
 	m.st.attach().Entries[e.ID] = e
@@ -647,7 +654,7 @@ func (h managerHost) AttachReceive(s *Session, msgID string, v *attwire.PeerView
 	e.Thumb = append([]byte(nil), v.Thumb...)
 	if v.Blob != nil {
 		e.Blob = &AttBlob{ID: v.Blob.ID, Key: append([]byte(nil), v.Blob.Key...), SHA256: append([]byte(nil), v.Blob.SHA256[:]...),
-			Size: v.Blob.Size, Expires: v.Expires}
+			Size: v.Blob.Size, Expires: v.Expires, Mailbox: m.blobMailbox()}
 		e.Name, e.HasName = v.Blob.Name, v.Blob.HasName
 	}
 	a.Accepted[conn] = append(a.Accepted[conn], AttStamp{At: now, Bytes: add, Att: e.ID})
@@ -742,7 +749,7 @@ func (h managerHost) AttachRedeliver(s *Session, msgID string, v *attwire.PeerVi
 		suite.Wipe(e.Blob.Key)
 	}
 	e.Blob = &AttBlob{ID: v.Blob.ID, Key: append([]byte(nil), v.Blob.Key...), SHA256: append([]byte(nil), v.Blob.SHA256[:]...),
-		Size: v.Blob.Size, Expires: v.Expires}
+		Size: v.Blob.Size, Expires: v.Expires, Mailbox: m.blobMailbox()}
 	if v.Blob.HasName && !e.HasName {
 		e.Name, e.HasName = v.Blob.Name, true
 	}
@@ -1233,7 +1240,7 @@ func (m *Manager) PutBlobTo(ctx context.Context, conn string, data []byte) (stri
 		m.mu.Unlock()
 		return "", time.Time{}, ErrNoSession
 	}
-	url, mb, tok, r := p.Relay.URL, p.Relay.Mailbox, p.Standing.Token, m.relay
+	url, mb, tok, r := p.Relay.URL, p.Relay.Mailbox, p.Standing.Token, m.relayFor(p.Standing.Token)
 	m.mu.Unlock()
 	return r.PutBlob(ctx, url, mb, tok, data)
 }

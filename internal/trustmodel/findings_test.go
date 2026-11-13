@@ -181,9 +181,13 @@ func findingC2(s *scen, old bool) {
 
 // Finding D (I1's exclusions vs §6.6 "Limits" and S1): both vaults rotate
 // and lock before collecting; each one's update sits in the other's old
-// mailbox, which ends at the grace. The pair is dead (resends end with
-// mailbox_unknown, no reconnect path) but is neither stale nor excluded
-// from I1 until S1's 30 days.
+// mailbox, which ends at the grace. The model used to keep the pair dead
+// but active until S1's 30 days. With relay-key rotation and without
+// §3.4.2's hold (RK14), mailbox_unknown is terminal as 0.88 says ("mark
+// the connection stale"; 0.88.7: its waiting messages end not delivered),
+// so the pair now ends stale at the first refused deposit: the finding is
+// closed. (With §3.4.2 the deposits are held and the pair ends stale by
+// S1 with relay_moved: §3.4.1 Residuals, "Both sides' old mailboxes end".)
 func TestFindingD_DeadButNotStaleAfterBothMissTheGrace(t *testing.T) {
 	s := newScen(t, 2)
 	P, Q := s.p(0), s.p(1)
@@ -196,14 +200,10 @@ func TestFindingD_DeadButNotStaleAfterBothMissTheGrace(t *testing.T) {
 	s.do(Q, Q.unlock)
 	s.run(8, P, Q)
 	rp, rq := P.st.peer(Q.ID), Q.st.peer(P.ID)
-	if rp.Status != stActive || rq.Status != stActive || rp.Relay == Q.st.Relay || rq.Relay == P.st.Relay {
-		t.Fatalf("finding no longer reproduces: P %d/%d Q %d/%d", rp.Status, rp.Relay, rq.Status, rq.Relay)
+	if rp.Status != stStale || rq.Status != stStale || rp.Ref != "mailbox_unknown (no hold)" || rq.Ref != "mailbox_unknown (no hold)" {
+		t.Fatalf("expected both stale at mailbox_unknown: P %d %q, Q %d %q", rp.Status, rp.Ref, rq.Status, rq.Ref)
 	}
-	if !s.w.limits(P, rp) || !s.w.limits(Q, rq) {
-		t.Errorf("the model's Limits exclusion does not name this pair")
-	}
-	t.Logf("reproduced: %s and %s hold each other's old relay keys (%d, %d), both records active; S1 stales them at day 30",
-		P.Name, Q.Name, rp.Relay, rq.Relay)
+	t.Logf("closed: %s and %s end stale at mailbox_unknown (0.88), not dead and active until S1", P.Name, Q.Name)
 }
 
 // Finding E (§6.3.1 against §3.4.1 "Epochs after an ik link"): a reconnect

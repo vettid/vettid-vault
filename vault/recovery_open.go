@@ -544,7 +544,9 @@ func (m *Manager) recoveryEvent(r *RecoveryRecord, now time.Time) {
 	m.replaceApps("", now)
 	// A transfer's held credential key statement first (the backup copy the
 	// open used holds the new key), then the old phone's notice, before the
-	// keys rotate (§11.14.10).
+	// keys rotate (§11.14.10). rotateIdentity calls both again (each is
+	// taken once, so nothing is sent twice); they stay here so that the
+	// order holds when the rotation cannot be made.
 	m.sendHeldKeyRotations(now)
 	m.sendPendingUnlink(now)
 	// A rotation that cannot be made never fails the recovery: the owed
@@ -722,10 +724,14 @@ func resumeRecovery(ctx context.Context, p RecoveryOpenParams, hdr *Header, hver
 		// stored: the invitation, the recorded signer, the other apps
 		// removed, the held statement and the old phone's notice sent, and
 		// the keys rotated, or the rotation owed (§11.14.6 step 6). RecoveryOpen's
-		// step 1 has checked the record and its phone.
-		if r := hdr.Recovery; r != nil && r.App != nil {
-			m.recoveryEvent(r, now)
+		// step 1 has checked the record and its phone; without them nothing
+		// is completed (fail closed: never a recovery without its event).
+		r := hdr.Recovery
+		if r == nil || r.App == nil {
+			m.zeroize()
+			return nil, out.fail(OpenNoRecovery)
 		}
+		m.recoveryEvent(r, now)
 	} else {
 		if err := m.loadKeys(); err != nil {
 			m.zeroize()

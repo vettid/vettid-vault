@@ -1,8 +1,11 @@
 package vault
 
 import (
+	"context"
+	"crypto/ed25519"
 	"errors"
 	"testing"
+	"time"
 )
 
 // A repeated recovery open makes the same event as a first open
@@ -94,5 +97,49 @@ func TestRecoveryRepeatAfterStep2DoesNotRotateAgain(t *testing.T) {
 	defer m.mu.Unlock()
 	if len(m.st.Rotations) != 1 || m.st.RotationOwed != nil {
 		t.Fatalf("rotations %d, owed %+v", len(m.st.Rotations), m.st.RotationOwed)
+	}
+}
+
+// The repeat sends the old phone's notice once, as the first open does
+// in the state that was not stored, and the vault's ik is a new one.
+func TestRecoveryRepeatAfterStep1SendsTheNoticeOnce(t *testing.T) {
+	var oldIK ed25519.PublicKey
+	f := newOpenFixtureWith(t, func(f *openFixture) {
+		f.m.mu.Lock()
+		oldIK = append(ed25519.PublicKey(nil), f.m.keys.ik.Public().(ed25519.PublicKey)...)
+		f.m.st.PendingUnlink = &PendingUnlink{RelayURL: "https://relay.example.org", Mailbox: "old-phone", Token: "v4.public.T0xE",
+			TransferID: "t1", DEKVersion: f.m.hdr.DEKVersion + 1, At: f.clock, TokenExp: f.clock.Add(29 * 24 * time.Hour),
+			Payload: []byte("sealed notice")}
+		f.m.dirty = true
+		f.m.mu.Unlock()
+		if err := f.m.Lock(context.Background()); err != nil {
+			f.t.Fatal(err)
+		}
+	})
+	sink := &recSink{}
+	f.opts.Features = append(f.opts.Features, sink)
+	f.st.failState = 1
+	if m, out := f.open(testPIN, rPW); m != nil || out.Code != OpenRetry {
+		t.Fatalf("first open: %+v", out)
+	}
+	sink.got = nil
+	m, out := f.open(testPIN, rPW)
+	if m == nil || !out.OK {
+		t.Fatalf("repeat: %+v", out)
+	}
+	defer m.Crash()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	queued := 0
+	for _, e := range m.st.Outbox {
+		if e.Unlink == "t1" {
+			queued++
+		}
+	}
+	if !(queued == 1 || (queued == 0 && m.st.PendingUnlink == nil && sink.has("device.unlinked_sent"))) {
+		t.Fatalf("the old phone's notice queued %d times, pending %v", queued, m.st.PendingUnlink != nil)
+	}
+	if m.keys.ik.Public().(ed25519.PublicKey).Equal(oldIK) {
+		t.Fatal("the vault's ik was not rotated")
 	}
 }

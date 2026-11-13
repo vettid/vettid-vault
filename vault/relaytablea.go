@@ -76,7 +76,15 @@ func (m *Manager) respLinksEvidence(p *Peer, ini *handshake.Initiator, raw []byt
 	if err != nil {
 		return
 	}
-	res, err := c.HandleResp(raw, sender, now)
+	// The handshake pins the relay key on record when it began; the sender
+	// is an earlier key of p's (acceptFrom judged it), so the library is
+	// given the pinned key when both are keys the vault keeps for p, as
+	// unpinnedSender does for an accepted answer.
+	from := sender
+	if pinned := c.ResponderRelayKey(); p.keepsRelayKey(pinned) && p.keepsRelayKey(sender) {
+		from = pinned
+	}
+	res, err := c.HandleResp(raw, from, now)
 	if err != nil {
 		return
 	}

@@ -223,20 +223,27 @@ func (m *Manager) pruneEarlierRelays(now time.Time) {
 // handshake with p not yet recorded (a pending epoch's, an open hs.init's
 // or hs.resp's; one revoked before that is recorded as denied). Only a
 // denied reconnect token stops counting: rule U revokes those at a follow,
-// and their year-long exp would keep the key. A denied standing token (a
-// refresh denies the older ones) counts until its exp, since it can still
-// deposit until the relay has taken the denylist request.
+// and their year-long exp would keep the key, but only once the relay has
+// taken its denylist request (its revoke has left the outbox): until then
+// it can still deposit. A denied standing token (a refresh denies the
+// older ones) counts until its exp.
 func (m *Manager) issuedCanDeposit(p *Peer, pk []byte, now time.Time) bool {
 	sub := relayauth.EncodeKey(ed25519.PublicKey(pk))
+	revoking := map[string]bool{}
+	for _, e := range m.st.Outbox {
+		if e.Op == OpRevoke && e.Kind == "jti" && !e.Done {
+			revoking[e.Value] = true
+		}
+	}
 	denied := map[string]bool{}
 	for _, t := range m.st.Issued {
-		if t.Denied && t.Kind == TokReconnect {
+		if t.Denied && t.Kind == TokReconnect && !revoking[t.JTI] {
 			denied[t.JTI] = true
 		}
 	}
 	live := func(ts []IssuedToken) bool {
 		for _, t := range ts {
-			if t.Sub == sub && now.Before(t.Exp) && !(t.Denied && t.Kind == TokReconnect) && !denied[t.JTI] {
+			if t.Sub == sub && now.Before(t.Exp) && !(t.Denied && t.Kind == TokReconnect && !revoking[t.JTI]) && !denied[t.JTI] {
 				return true
 			}
 		}

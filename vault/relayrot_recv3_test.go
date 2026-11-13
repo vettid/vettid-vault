@@ -277,3 +277,51 @@ func TestRK5RollbackReasonBeforeIKRequirement(t *testing.T) {
 		t.Fatalf("not refused ik_rollback (ancestor_ik %d)", f.activityCount(0, "drop.peer_key", "ancestor_ik"))
 	}
 }
+
+// RK5's guard on the evidence-first path: an update from an earlier key
+// after its cut-off whose identity links are all followed, judged by
+// R29-K9 first, makes the vault suspend (a flag set): the update then
+// stops there, with no refusal audited for it (not the ik requirement's).
+func TestRK5K9SuspensionNoRefusal(t *testing.T) {
+	f, e1 := k9Setup(t, true)
+	f.m(0).opt.RelayKeyRotation = true
+	f.deliver(0, 2, kHSFin)
+	f.deliver(2, 0, kConfirm)
+	if !f.flag(0, e1) {
+		t.Fatal("setup: E1's flag not set")
+	}
+	f.lose(1, 0, kRotate)
+	f.rotate(1)
+	f.lose(1, 0, kRotate)
+	f.lose(1, 0, kHSInit)
+	p := f.p(0)
+	for _, raw := range f.m(1).st.Rotations {
+		r, err := handshake.ParseRotation(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		p.IK, p.KEM = append([]byte(nil), r.NewIK...), r.NewKEM.Bytes()
+		p.Chain = append(p.Chain, r.Marshal())
+	}
+	f.rkFollow()
+	k, k2 := f.m(1).keys.relay, rkKey(0xa7)
+	u := &peerwire.AddressUpdate{Relay: rkAddr(k2), Token: f.rk8Tok(k2, "k9s-st", 25*24*time.Hour), Links: []*handshake.RelayLink{rkLink(t, k, k2)}}
+	f.do(1, func(m *Manager, p *Peer) {
+		u.Rotations = m.ownRotationsSince(1) // ik1 -> ik2: followed, not from the epoch's signer
+		b, err := u.Marshal()
+		if err != nil {
+			t.Fatal(err)
+		}
+		m.sendTo(p, peerwire.TypeRelayAddressUpdate, b, f.clk)
+	})
+	n := len(f.sink[0].got)
+	f.process(0, f.rkTake(kOther, rkAfter))
+	if !f.suspendedRef(0, "epoch") {
+		t.Fatal("setup: K9 did not suspend")
+	}
+	for _, a := range f.sink[0].got[n:] {
+		if a.Kind == "drop.peer_key" {
+			t.Fatalf("a refusal (%s) was audited after the suspension", a.Ref)
+		}
+	}
+}

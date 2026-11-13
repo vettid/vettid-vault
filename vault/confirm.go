@@ -579,6 +579,7 @@ func (m *Manager) destroyedEpochMessage(p *Peer, meta *EpochMeta, in *envelope.I
 // refusePeerKey refuses a message under §3.4.1 (acked, dropped, audited
 // drop.peer_key with the reason).
 func (m *Manager) refusePeerKey(p *Peer, reason string, now time.Time) {
+	m.peerKeyRefusals++
 	m.record(Activity{Kind: "drop.peer_key", ConnectionID: connID(p), DeviceID: devID(p), Ref: reason, Audit: true}, now)
 }
 

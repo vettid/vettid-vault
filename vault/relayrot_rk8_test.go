@@ -1,6 +1,7 @@
 package vault
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"testing"
@@ -8,6 +9,7 @@ import (
 
 	"github.com/vettid/vettid-relay/relayauth"
 
+	"github.com/vettid/vettid-vault/vms/envelope"
 	"github.com/vettid/vettid-vault/vms/handshake"
 	"github.com/vettid/vettid-vault/vms/suite"
 )
@@ -577,5 +579,111 @@ func TestRK8ChecksCap(t *testing.T) {
 	}
 	if _, reason := m.rk8Checks(p, []*handshake.RelayLink{rkLink(t, k0, k1)}, rkPub(k1)); reason != "" {
 		t.Fatalf("reason %q under the cap", reason)
+	}
+}
+
+// Rule C between vaults, at an hs.resp: a relay link that is a second
+// successor of a key already seen suspends the connection (a relay fork),
+// and nothing is followed.
+func TestRK8RespSecondSuccessorSuspends(t *testing.T) {
+	f := rkPair(t)
+	k, k1, k3 := f.m(1).keys.relay, rkKey(rkK1), rkKey(rkK3)
+	f.do(0, func(m *Manager, p *Peer) { m.startReconnect(p, f.clk) })
+	f.p(0).RelaySeen = append(f.p(0).RelaySeen, rkLink(t, k, k1).Marshal()) // K -> K1 seen
+	f.process(0, f.rk8Resp(k3, []*handshake.RelayLink{rkLink(t, k, k3)}, k3, "rk-2000"))
+	if f.p(0).RelayFork == nil || !f.p(0).suspended() || f.relayIs(k3) || f.p(0).Pending != nil {
+		t.Fatal("a second successor in an hs.resp did not suspend, or was followed")
+	}
+}
+
+// Rule C's second list at an hs.resp: a chain refused only for a bad
+// signature keeps its earlier valid links as seen; relay_unlinked.
+func TestRK8RespBadSignatureKeepsEarlierLinks(t *testing.T) {
+	f := rkPair(t)
+	f.do(0, func(m *Manager, p *Peer) { m.startReconnect(p, f.clk) })
+	k, k1, k2 := f.m(1).keys.relay, rkKey(rkK1), rkKey(rkK2)
+	bad := rkLink(t, k1, k2)
+	bad.SigNew = append([]byte(nil), bad.SigNew...)
+	bad.SigNew[0] ^= 1
+	f.process(0, f.rk8Resp(k2, []*handshake.RelayLink{rkLink(t, k, k1), bad}, k2, "rk-2000"))
+	if f.refusedFor("relay_unlinked") != 1 || len(f.p(0).RelaySeen) != 1 || f.p(0).Pending != nil {
+		t.Fatalf("refused %d, seen %d", f.refusedFor("relay_unlinked"), len(f.p(0).RelaySeen))
+	}
+}
+
+// The same from an earlier key after its cut-off (the check before the
+// handshake is used): relay_unlinked, the handshake kept.
+func TestRK8RespEarlierAfterBadChainKeepsHandshake(t *testing.T) {
+	f := rkPair(t)
+	f.do(0, func(m *Manager, p *Peer) { m.startReconnect(p, f.clk) })
+	k, k1, k2 := f.m(1).keys.relay, rkKey(rkK1), rkKey(rkK2)
+	f.rkFollowTo(k1)
+	bad := rkLink(t, k1, k2)
+	bad.SigNew = append([]byte(nil), bad.SigNew...)
+	bad.SigNew[0] ^= 1
+	f.process(0, f.rk8Resp(k2, []*handshake.RelayLink{rkLink(t, k, k1), bad}, k2, "rk-2000"))
+	if f.refusedFor("relay_unlinked") != 1 || len(f.m(0).st.Outgoing) != 1 || f.p(0).Pending != nil {
+		t.Fatalf("not refused relay_unlinked with the handshake kept (refused %d, outgoing %d)", f.refusedFor("relay_unlinked"), len(f.m(0).st.Outgoing))
+	}
+}
+
+// Rule U, "A link's form": a reconnect hs.init whose relay link has a
+// fault in its form (here v = 2), otherwise well formed, is refused
+// relay_unlinked at parse time, nothing answered and no link kept.
+func TestRK8InitLinkFormRefusedAtParse(t *testing.T) {
+	f := rkPair(t)
+	k, k1 := f.m(1).keys.relay, rkKey(rkK1)
+	m1, p1 := f.m(1), f.p(1)
+	eph, err := suite.GeneratePrivateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := &handshake.Init{Purpose: handshake.PurposeReconnect, Ctx: handshake.EpochCtx(epochIDOf(p1.LastEpochID)),
+		From: handshake.Principal{IK: m1.keys.ik.Public().(ed25519.PublicKey), KEM: m1.keys.kem.Public(), Relay: rkAddr(k1)},
+		Eph:  eph.Public(), Token: f.rk8Tok(k1, "ff-st", 25*24*time.Hour), ReconnectToken: f.rk8Tok(k1, "ff-rc", 300*24*time.Hour),
+		Suites: []int{int(suite.Suite2)}, RelayLinks: []*handshake.RelayLink{rkLink(t, k, k1)}}
+	b, err := body.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(b, []byte(`"v":1`)) {
+		t.Fatal("setup: no link version")
+	}
+	b = bytes.Replace(b, []byte(`"v":1`), []byte(`"v":2`), 1)
+	padded, err := envelope.EncodeInner(&envelope.Inner{ID: f.m(1).newID(f.clk), Type: handshake.TypeInit, TS: f.clk, Body: b}, envelope.ModeSealed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	env, _, err := envelope.SealSealed(f.m(0).keys.kem.Public(), m1.keys.kem.Public().Kid(), padded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.process(0, f.rk8Msg(env, "rk-1000"))
+	if f.refusedFor("relay_unlinked") != 1 || len(f.m(0).st.Awaiting) != 0 || len(f.p(0).RelaySeen) != 0 {
+		t.Fatal("a link's form fault was not refused relay_unlinked at parse time")
+	}
+}
+
+// RK8: rule T on the hs.init's tokens runs before the ctx is classified,
+// so a reconnect from the current key refused for its tokens has none of
+// its identity links followed by §6.6 "The links of a refused reconnect"
+// (the vault's own reconnect pending).
+func TestRK8InitTokensBeforeRefusedReconnectLinks(t *testing.T) {
+	f := rkPair(t)
+	f.do(0, func(m *Manager, p *Peer) { m.startReconnect(p, f.clk) })
+	if f.deliver(0, 1, kHSInit) != 1 || f.deliver(1, 0, kHSResp) != 1 || f.p(0).Pending == nil {
+		t.Fatal("setup: side 0's reconnect not pending")
+	}
+	ik := append([]byte(nil), f.p(0).IK...)
+	f.rotate(1)
+	f.lose(1, 0, kRotate)
+	f.lose(1, 0, kHSInit)
+	k, k1 := f.m(1).keys.relay, rkKey(rkK1)
+	_, init := f.rk8InitWith(k1, []*handshake.RelayLink{rkLink(t, k, k1)}, k, "rk-1000", func(c *handshake.InitiatorConfig) {
+		c.Rotations = f.m(1).ownRotationsSince(0) // tokens of K's mailbox, not K1's
+	})
+	f.process(0, init)
+	if !bytes.Equal(f.p(0).IK, ik) || f.refusedFor("token_unusable") != 1 {
+		t.Fatal("identity links followed before rule T refused the hs.init")
 	}
 }

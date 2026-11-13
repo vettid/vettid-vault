@@ -653,12 +653,10 @@ func (m *Manager) relayAwaitsRC(p *Peer, ctx []byte, now time.Time) bool {
 // this release; the spec should confirm it. It reports whether the update
 // was refused.
 func (m *Manager) earlierAfterRotations(p *Peer, sender ed25519.PublicKey, rots []*handshake.Rotation, now time.Time) bool {
-	if len(rots) == 0 || m.relayStateOf(p, sender) != relayEarlierAfter {
+	ok, reason := m.idLinksAllowed(p, sender, rots)
+	if ok {
 		return false
 	}
-	if handshake.KnownPrefix(parseRotations(p.Chain), rots) == len(rots) {
-		return false
-	}
-	m.refusePeerKey(p, "superseded_relay", now)
+	m.refusePeerKey(p, reason, now)
 	return true
 }

@@ -2,6 +2,7 @@ package vault
 
 import (
 	"crypto/ed25519"
+	"strconv"
 	"time"
 
 	"github.com/vettid/vettid-vault/vms/envelope"
@@ -141,11 +142,15 @@ func (m *Manager) relaySecondSuccessor(p *Peer, first, second *handshake.RelayLi
 	if p.RelayConflict == nil {
 		p.RelayConflict = &RelayConflict{At: now.UTC(), Old: append([]byte(nil), first.Old...),
 			Kept: append([]byte(nil), first.New...), Refused: append([]byte(nil), second.New...)}
+		ended := 0
 		for _, e := range m.st.Outbox {
 			if e.PeerID == p.ID && !e.Done && e.Op == OpDeposit {
 				e.Done = true // nothing more is sent to this device
+				ended++
 			}
 		}
+		// One audit entry with the number of queued deposits ended.
+		m.auditRef(now, "deposits_ended_relay_conflict", p.ID, strconv.Itoa(ended))
 		// The spec names no audit kind for this item (NEW text, for
 		// wording approval with the app PRs): it uses
 		// connection.fork_suspected with the device's id and ref relay, as

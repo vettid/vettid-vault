@@ -284,6 +284,18 @@ func TestRuleCRelayOwnDeviceConflict(t *testing.T) {
 	if got := d.depositsTo(p.Relay.Mailbox); got != deposits {
 		t.Fatalf("a deposit queued before the conflict went out (%d -> %d)", deposits, got)
 	}
+	ended := 0
+	for _, a := range d.m.st.Audit {
+		if a.Event == "deposits_ended_relay_conflict" {
+			ended++
+			if a.Ref != "1" {
+				t.Fatalf("ended deposits audited as %q, want 1", a.Ref)
+			}
+		}
+	}
+	if ended != 1 {
+		t.Fatalf("the ended deposits were audited %d times", ended)
+	}
 	c := p.RelayConflict
 	if c == nil || !suite.EqualPublic(c.Kept, rkPub(ka)) || !suite.EqualPublic(c.Refused, rkPub(kb)) || p.suspended() {
 		t.Fatalf("not recorded as the device's conflict with the first successor kept: %+v", c)

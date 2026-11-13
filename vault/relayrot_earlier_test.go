@@ -270,3 +270,81 @@ func TestRelayFollowedLinkLeavesTheSeenLinks(t *testing.T) {
 		t.Fatal("no fork against the followed link")
 	}
 }
+
+// Pruning goes from the oldest end only (§3.4.1 "Relay-key states", rule
+// C): an intermediate key the vault never issued a token to is kept, with
+// its followed link, while an older key can still deposit, so that a
+// copy's other successor of it is still a fork after housekeeping; an entry
+// goes once it and every older one can no longer deposit.
+func TestRelayEarlierKeysPrunedFromTheOldestEnd(t *testing.T) {
+	f := newFixture(t)
+	m := f.m
+	m.opt.RelayKeyRotation = true
+	k0, k1, k2, k3, kx := rkKey(0x41), rkKey(0x42), rkKey(0x43), rkKey(0x44), rkKey(0x4b)
+	p := rkPeer(m, "c1", k0)
+	now := testNow()
+	tok := func(k ed25519.PrivateKey, d time.Duration) IssuedToken {
+		return IssuedToken{JTI: "t" + relayauth.EncodeKey(rkPub(k)), Kind: TokStanding, Sub: relayauth.EncodeKey(rkPub(k)), PeerID: p.ID, Exp: now.Add(d)}
+	}
+	// k0's token lasts 5 days, k1 never had one, k2's lasts 10 days.
+	m.st.Issued = append(m.st.Issued, tok(k0, 5*24*time.Hour), tok(k2, 10*24*time.Hour))
+	m.relayAt, m.msgID = now, "m-1"
+	if err := m.followRelayLinks(p, []*handshake.RelayLink{rkLink(t, k0, k1), rkLink(t, k1, k2), rkLink(t, k2, k3)}, rkAddr(k3)); err != nil {
+		t.Fatal(err)
+	}
+	m.pruneEarlierRelays(now.Add(24 * time.Hour))
+	if len(p.EarlierRelays) != 3 {
+		t.Fatalf("an intermediate key was pruned while an older one can deposit: %d left", len(p.EarlierRelays))
+	}
+	// A copy's chain k0 -> k1 -> kx, deposited with k0: a second successor
+	// of k1, whose followed link is still kept.
+	if _, ev := m.relayLinksEvidence(p, rkPub(k0), rkPub(kx), []*handshake.RelayLink{rkLink(t, k0, k1), rkLink(t, k1, kx)}, now); ev != relayEvFork {
+		t.Fatal("a second successor of an intermediate earlier key is not a fork after housekeeping")
+	}
+	p.RelayFork, p.Fork = nil, nil
+	m.pruneEarlierRelays(now.Add(6 * 24 * time.Hour))
+	if len(p.EarlierRelays) != 1 || !suite.EqualPublic(p.EarlierRelays[0].Relay.PK, rkPub(k2)) {
+		t.Fatalf("not pruned from the oldest end: %d left", len(p.EarlierRelays))
+	}
+	m.pruneEarlierRelays(now.Add(11 * 24 * time.Hour))
+	if p.EarlierRelays != nil {
+		t.Fatal("kept after every token expired")
+	}
+}
+
+// A token minted in a handshake with the peer and not yet recorded as
+// issued (a pending epoch's, an open hs.init's, an open hs.resp's) keeps
+// its key too.
+func TestRelayEarlierKeyKeptForAHandshakesToken(t *testing.T) {
+	for _, where := range []string{"pending", "outgoing", "awaiting"} {
+		t.Run(where, func(t *testing.T) {
+			f := newFixture(t)
+			m := f.m
+			m.opt.RelayKeyRotation = true
+			k0, k1 := rkKey(0x41), rkKey(0x42)
+			p := rkPeer(m, "c1", k0)
+			now := testNow()
+			ts := []IssuedToken{{JTI: "h", Kind: TokStanding, Sub: relayauth.EncodeKey(rkPub(k0)), PeerID: p.ID, Exp: now.Add(48 * time.Hour)}}
+			switch where {
+			case "pending":
+				p.Pending = &PendingEpoch{ID: []byte("e"), Issued: ts}
+			case "outgoing":
+				m.st.Outgoing["o"] = &OutgoingHS{PeerID: p.ID, Issued: ts}
+			case "awaiting":
+				m.st.Awaiting["a"] = &AwaitingHS{PeerID: p.ID, Issued: ts}
+			}
+			m.relayAt, m.msgID = now, "m-1"
+			if err := m.followRelayLinks(p, []*handshake.RelayLink{rkLink(t, k0, k1)}, rkAddr(k1)); err != nil {
+				t.Fatal(err)
+			}
+			m.pruneEarlierRelays(now.Add(24 * time.Hour))
+			if len(p.EarlierRelays) != 1 {
+				t.Fatal("dropped while a handshake's token issued to it can deposit")
+			}
+			m.pruneEarlierRelays(now.Add(49 * time.Hour))
+			if p.EarlierRelays != nil {
+				t.Fatal("kept after the handshake's token expired")
+			}
+		})
+	}
+}

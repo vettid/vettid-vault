@@ -486,6 +486,21 @@ func (m *Manager) dispatch(ctx context.Context, p *Peer, in *envelope.Inner, ep 
 		m.storeIssuedTo(p, in.Body, now)
 		return ackAfterFlush
 	}
+	if m.opt.RelayKeyRotation && in.Type == "identity.rotate" && m.relayStateOf(p, sender) == relayEarlierAfter {
+		// Table A let it through only because every link is already
+		// followed: it is ignored, and only R29-K9 is still judged
+		// (rule C ran at step 3). Nothing else of it counts (features,
+		// S5's resend, the ts window, the rate limit, dedupe).
+		if links, err := rotateLinks(in.Body); err == nil {
+			var epID []byte
+			if ep != nil {
+				id := ep.ID()
+				epID = id[:]
+			}
+			m.k9(p, links, epID, now)
+		}
+		return ackAfterFlush
+	}
 	// §10.8: counted once the message is not refused for its epoch
 	// (destroyed, demoted; review L4).
 	m.noteFeatures(p, in.Features)

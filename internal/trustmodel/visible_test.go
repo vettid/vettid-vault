@@ -215,18 +215,17 @@ const resHonestStaleQuota = "rapid rotations: an honest pair stale by quota_exce
 
 // resMissedGrace: one side of the pair is a vault whose old mailbox ended
 // at its grace (14 days with GRACE14) with the other side's message still
-// in it, while that vault had been locked, at a stretch, for longer than
-// the grace less U (A3's 4 days): it was present for less than one U of
-// the grace. The update or RK8 reconnect in it never reached the vault:
-// the residuals of relay-key rotation (§3.4.1 Residuals, 0.90.0: "Both
-// sides' old mailboxes end"; "a lock longer than the grace"; "Both sides
-// rotated, and X cannot resend its update"). The threshold is not the
-// grace itself: M2 is not checked at all in a run with a lock longer than
-// T = 14 days, which equals the grace. Every run it covers at 10,000 runs
-// is a vault that collected the peer's message minutes after it arrived,
-// crashed before the write, and stayed locked for the rest of the grace
-// (13 days 23 hours 57 minutes).
-const resMissedGrace = "a vault locked for all but less than U of the grace when its old mailbox ended with the peer's message in it (§3.4.1 Residuals, relay-key rotation)"
+// in it, a message the relay had given the vault and the vault had not
+// acked, while the vault had been locked, at a stretch, for longer than
+// the grace less U (A3's 4 days). That is outside A3 (each side present
+// every U): the vault was present for less than one U of the grace. The
+// outcome is §3.4.1's residual "Both sides' old mailboxes end" (and "Both
+// sides rotated, and X cannot resend its update"). Every pair it covers
+// at 10,000 runs is a vault that collected the peer's update minutes
+// after it arrived, crashed before the write, and stayed locked for the
+// rest of the grace. (The threshold is not the grace itself: M2 is not
+// checked at all in a run with a lock longer than T = 14 days, the grace.)
+const resMissedGrace = "a vault given the peer's message, not acking it, and locked for all but less than U of the grace when its old mailbox ended: outside A3 (§3.4.1 Residuals, both sides' old mailboxes end)"
 
 // missedGraceFor: resMissedGrace applies to the pair (a, b).
 func (w *World) missedGraceFor(a, b PID) bool {
@@ -308,9 +307,10 @@ func (w *World) checkHonestStale() {
 				continue
 			}
 			if w.missedGraceFor(a.ID, b.ID) {
-				// a vault of the pair was locked longer than the grace
-				// when its old mailbox ended with the other's message in
-				// it (§3.4.1 Residuals, relay-key rotation)
+				// outside A3: a vault of the pair, given the other's
+				// message and not acking it, was locked for all but less
+				// than U of the grace when its old mailbox ended (§3.4.1
+				// Residuals: both sides' old mailboxes end)
 				w.exempt("M2", resMissedGrace)
 				w.statWait("M2 (missed-grace residual)", a.ID, b.ID, strings.Join(refs, "; "))
 				continue

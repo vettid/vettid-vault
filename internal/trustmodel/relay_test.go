@@ -47,8 +47,9 @@ type RMsg struct {
 	Reconnect  bool // deposited under a reconnect token
 	P          *Msg
 	leaseUntil int64
-	Actor      PID // ground truth: who deposited (never read by the parties)
-	Seq        int // ground truth arrival order
+	Actor      PID  // ground truth: who deposited (never read by the parties)
+	Seq        int  // ground truth arrival order
+	GivenOwner bool // ground truth: the relay gave it to its mailbox's real owner (never read by the parties)
 }
 
 type mailbox struct {
@@ -236,11 +237,12 @@ func (r *Relay) advance() {
 			}
 			if o := r.w.keyOwner(k); o >= 0 && !r.w.party(o).Device {
 				// M2 (resMissedGrace): a vault's old mailbox ended with a
-				// real peer's message in it; record the owner and how long
-				// it had been locked at a stretch
+				// real peer's message in it that the relay had given the
+				// vault and the vault had not acked; record the owner and
+				// how long it had been locked at a stretch
 				g := endedBox{Owner: o, Lock: r.w.lockedFor[o]}
 				for _, m := range b.msgs {
-					if m.Actor != o && !r.w.party(m.Actor).Copy && !slices.Contains(g.From, m.Actor) {
+					if m.Actor != o && !r.w.party(m.Actor).Copy && m.GivenOwner && !slices.Contains(g.From, m.Actor) {
 						g.From = append(g.From, m.Actor)
 					}
 				}

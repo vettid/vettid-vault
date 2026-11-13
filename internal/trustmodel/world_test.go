@@ -113,8 +113,8 @@ type World struct {
 }
 
 // endedBox: a vault's old mailbox ended at its grace with messages from
-// real peers (From) in it, while its owner had been locked for Lock at a
-// stretch.
+// real peers (From) in it that the relay had given the vault and it had
+// not acked, while the vault had been locked for Lock at a stretch.
 type endedBox struct {
 	Owner PID
 	Lock  int64
@@ -1015,6 +1015,9 @@ func (p *Party) collectRound(max int) int {
 		set = append(set, b)
 		for _, m := range ms {
 			p.noteGiven(m) // RK14 step 1
+			if !p.Copy {
+				m.GivenOwner = true // ground truth (M2, resMissedGrace)
+			}
 		}
 		if p.Copy {
 			w.copyTook(p, b, ms, "collected")

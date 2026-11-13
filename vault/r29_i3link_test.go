@@ -102,7 +102,9 @@ func TestR29I3CopyEpochBesideReconnect(t *testing.T) {
 			t.Fatal("P's own epoch E0 or E2 was judged")
 		}
 	}
-	if f.openReconnect(1) != nil {
+	// Strict F1 starts no reconnect naming E beside the epoch this hs.fin
+	// establishes (not even one abandoned in the same write).
+	if f.openReconnect(1) != nil || f.audited(1, "reconnect_f1") || f.lose(1, 0, kHSInit) != 0 {
 		t.Fatal("strict F1 started a reconnect beside the one just established")
 	}
 

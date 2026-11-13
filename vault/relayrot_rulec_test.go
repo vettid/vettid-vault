@@ -16,7 +16,7 @@ import (
 	"github.com/vettid/vettid-vault/vms/suite"
 )
 
-// VAULT-MESSAGING 0.90.3 §3.4.1 rule C for relay links (one successor per
+// VAULT-MESSAGING 0.90.4 §3.4.1 rule C for relay links (one successor per
 // key; links kept as seen; at most 32 per peer; the relay fork; the vault
 // and its own device) and §3.4.2 RK12 (relay links seen while suspended).
 // The updates here carry a token that does not verify, so rule U refuses

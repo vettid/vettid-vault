@@ -406,6 +406,11 @@ type Peer struct {
 	// mailbox was dropped); until one arrives, a reconnect it wants waits
 	// (relayAwaitsRC). Zero otherwise.
 	RelayAwaitRC time.Time `json:"relay_await_rc,omitzero"`
+	// RelayClosures are §3.4.2 RK7's records: per epoch, the latest relay
+	// key of the peer's that a message accepted under it came from, kept
+	// only while the peer has an earlier relay key and pruned to those no
+	// other record makes redundant (relayrk7.go).
+	RelayClosures []RelayClosure `json:"relay_closures,omitempty"`
 }
 
 // RevokedToken is a revoked standing token's jti and exp.
@@ -766,6 +771,11 @@ type PendingReconnect struct {
 	ForkRef string `json:"fork_ref,omitempty"`
 	// TS is the hs.init's inner ts.
 	TS time.Time `json:"ts"`
+	// RelayLinks and Announced (§3.4.2 RK8, only with relay-key rotation):
+	// the hs.init's relay links from the key it was deposited with to the
+	// key it announces, and the announced address; followed at hs.fin.
+	RelayLinks []json.RawMessage `json:"relay_links,omitempty"`
+	Announced  *PeerRelay        `json:"announced,omitempty"`
 }
 
 // OutgoingHS is a handshake the vault initiated, awaiting hs.resp.

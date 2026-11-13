@@ -24,23 +24,33 @@ import (
 //     (ignored; R29-K9 is still judged). A refused hs.resp or hs.fin keeps
 //     its handshake (S2).
 //
-// Not here yet: §3.4.2 RK7 (hs.confirm and an hs.fin to an open answer pass
-// the cut-off) and RK8 (a reconnect carrying relay links); until they are
-// built those are refused (superseded_relay) after the cut-off.
+// Between two vaults the row "Earlier, after its cut-off" has §3.4.2's
+// exceptions: RK7 (an hs.confirm here, an hs.fin to an open answer in
+// handleFin; relayrk7.go) and RK8 (a reconnect hs.init or hs.resp whose
+// relay links connect its sender to the key it announces; relayrk8.go).
 
 // tableARefuses applies Table A to a session-mode message from p deposited
 // with sender (dispatch), after step 3. It reports whether the message was
 // refused (acked, dropped, audited drop.peer_key superseded_relay).
-func (m *Manager) tableARefuses(p *Peer, in *envelope.Inner, sender ed25519.PublicKey, now time.Time) bool {
+func (m *Manager) tableARefuses(p *Peer, in *envelope.Inner, ep *handshake.Epoch, sender ed25519.PublicKey, now time.Time) bool {
 	if m.relayStateOf(p, sender) != relayEarlierAfter {
 		return false
 	}
 	switch in.Type {
+	case handshake.TypeConfirm:
+		if ep != nil {
+			id := ep.ID()
+			if m.rk7ConfirmPasses(p, id[:], sender) {
+				return false // RK7: passed on (beforeAccept confirms the epoch)
+			}
+		}
 	case peerwire.TypeRelayAddressUpdate, tokenIssuedType:
 		return false // relay.token.issued: its tokens only (dispatch, after beforeAccept)
 	case "identity.rotate":
-		if links, err := rotateLinks(in.Body); err == nil && handshake.KnownPrefix(parseRotations(p.Chain), links) == len(links) {
-			return false // every link already followed: ignored by the handler, K9 judged
+		if links, err := rotateLinks(in.Body); err == nil {
+			if ok, _ := m.idLinksAllowed(p, sender, links); ok {
+				return false // every link already followed: ignored by the handler, K9 judged
+			}
 		}
 	}
 	m.refusePeerKey(p, "superseded_relay", now)
@@ -59,41 +69,34 @@ func (m *Manager) tableAHandshake(p *Peer, sender ed25519.PublicKey, now time.Ti
 	return true
 }
 
-// respLinksEvidence is acceptFrom step 3 for an hs.resp that Table A then
-// refuses with its handshake kept: the answer is opened on a copy of the
-// handshake (the handshake itself stays as it is), and its identity links
-// are checked by rule C and kept as seen, as the accepted path checks
-// them. An answer that does not open or verify carries no evidence.
-func (m *Manager) respLinksEvidence(p *Peer, ini *handshake.Initiator, raw []byte, sender ed25519.PublicKey, now time.Time) {
+// peekResp opens an hs.resp on a copy of the handshake ini, which stays as
+// it is, and returns the result with its epoch destroyed, or nil if it
+// does not open or verify. The handshake pins the relay key on record
+// when it began; the sender is an earlier key of p's (acceptFrom judged
+// it), so the library is given the pinned key when both are keys the
+// vault keeps for p, as unpinnedSender does for an accepted answer.
+func (m *Manager) peekResp(p *Peer, ini *handshake.Initiator, raw []byte, sender ed25519.PublicKey, now time.Time) *handshake.Result {
 	if p == nil || ini == nil {
-		return
+		return nil
 	}
 	st, err := ini.Export()
 	if err != nil {
-		return
+		return nil
 	}
 	c, err := handshake.RestoreInitiator(st, m.keys.ik)
 	if err != nil {
-		return
+		return nil
 	}
-	// The handshake pins the relay key on record when it began; the sender
-	// is an earlier key of p's (acceptFrom judged it), so the library is
-	// given the pinned key when both are keys the vault keeps for p, as
-	// unpinnedSender does for an accepted answer.
 	from := sender
 	if pinned := c.ResponderRelayKey(); p.keepsRelayKey(pinned) && p.keepsRelayKey(sender) {
 		from = pinned
 	}
 	res, err := c.HandleResp(raw, from, now)
 	if err != nil {
-		return
+		return nil
 	}
 	res.Epoch.Destroy()
-	for _, r := range res.Resp.Rotations {
-		if m.rotationConflict(p, r, now) {
-			return
-		}
-	}
+	return res
 }
 
 // recordRelayKey is the key a rekey or reconnect hs.init of p's deposited

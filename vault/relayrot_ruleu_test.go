@@ -20,7 +20,7 @@ import (
 	"github.com/vettid/vettid-vault/vms/suite"
 )
 
-// VAULT-MESSAGING 0.90.3 §3.4.1 rule U (a relay.address.update) and rule T
+// VAULT-MESSAGING 0.90.4 §3.4.1 rule U (a relay.address.update) and rule T
 // (its tokens), with §3.4.2 RK5 (the update's identity links and the ik
 // requirement); only with Options.RelayKeyRotation.
 

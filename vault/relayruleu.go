@@ -37,7 +37,10 @@ import (
 //  5. From an earlier key after its cut-off, the update's identity links
 //     are judged as Table A's identity.rotate column judges that row: all
 //     already followed, they change nothing and only R29-K9 is judged;
-//     any other is refused superseded_relay (earlierAfterRotations).
+//     any other is refused superseded_relay (earlierAfterRotations). This
+//     exception is a reading of this release (rule U and RK5 say nothing
+//     of the sender's row for the update's identity links); the spec
+//     should confirm it.
 //  6. RK5: the identity links (Table B, H5, the demotion rules, R29-K9)
 //     and the ik requirement; a duplicate is then answered; otherwise the
 //     follow, in one state write: the links and cut-offs, relay.pk
@@ -227,10 +230,11 @@ func (m *Manager) followedRelayPrefix(p *Peer, links []*handshake.RelayLink) int
 // the same inner id is a duplicate at §8.2 and never reaches here) and,
 // for a connection, at most one an hour (§7.2's bound on refreshes near a
 // token's end), so that a lost answer is replaced at p's next resend.
-// RK5's identity links were applied first (R29-K9 runs on a duplicate
-// too); if Table B refused one, or the ik requirement failed, nothing is
-// answered (conservative: the spec says only that no link is followed and
-// no token taken). The hourly bound is §7.2's for a refresh near a token's
+// RK5 judged its identity links first (rk5: Table B and the ik
+// requirement before any is applied; R29-K9 runs on a duplicate too); if
+// Table B refused one, or the ik requirement failed, nothing is answered
+// (conservative: the spec says only that no link is followed and no token
+// taken). The hourly bound is §7.2's for a refresh near a token's
 // end, on the same clock as relay.token.refresh (a reading of this release; the
 // spec should confirm which of §7.2's limits applies).
 func (m *Manager) ruleUDuplicate(p *Peer, now time.Time) {
@@ -254,13 +258,23 @@ func (m *Manager) answerUpdate(p *Peer, now time.Time) {
 }
 
 // rk5 is §3.4.2 RK5 for an update from s.peer carrying identity links
-// rots: they are applied first, as an identity.rotate's (rule C, Table B,
-// H5, the demotion rules and R29-K9), and the update's relay links are
-// followed, and its tokens kept, only if, after that, the chain from the
-// update's ik (the P-side signer of the epoch it travels under) ends at
-// the vault's current ik for p, or the update's ik is that ik. It reports
-// whether the update may go on. A device rotates no ik (§6.7): its update
-// carrying identity links cannot occur and is refused (unexpected).
+// rots, judged before anything is applied: Table B's decisions on the
+// links (rotsOutcome, without acting on them), then the ik requirement
+// against the ik the links would lead to: the chain from the update's ik
+// (the P-side signer of the epoch it travels under) ends there, or the
+// update's ik is it. Only an update that passes has its links applied, as
+// an identity.rotate's (rule C ran at step 3; Table B, H5, the demotion
+// rules and R29-K9), and then goes on unless the links made the vault
+// suspend or ended the update's epoch (rk5Stops). An update refused here
+// has none of its identity links followed (§3.4.2 RK10: "An update Q
+// refuses has none of its links followed ... whatever the reason for the
+// refusal"). The exception: links all already followed change nothing
+// and are evidence only, so R29-K9 is judged on them first, before the ik
+// requirement (evidence first). Links not yet followed on an update then
+// refused are not judged by K9 (a reading of this release; the spec
+// should confirm). It reports whether the update may go on. A device
+// rotates no ik (§6.7): its update carrying identity links cannot occur
+// and is refused (unexpected).
 func (m *Manager) rk5(s *Session, rots []*handshake.Rotation) bool {
 	p, now := s.peer, s.now
 	if p.Kind != KindConnection {
@@ -275,48 +289,124 @@ func (m *Manager) rk5(s *Session, rots []*handshake.Rotation) bool {
 		id := s.epoch.ID()
 		ep = id[:]
 	}
-	if len(rots) > 0 && !m.applyIDLinks(p, rots, ep, now) {
-		return false // Table B refused a link (audited with its reason), or a conflict
+	post, reason := p.rotsOutcome(rots)
+	switch reason {
+	case "":
+	case "-":
+		return false // the record is suspended (acceptFrom step 1 refused it)
+	case "bad_rotation":
+		m.audit(now, "bad_rotation", p.ID) // as applyIDLinks: no drop.peer_key
+		return false
+	default:
+		m.refusePeerKey(p, reason, now) // Table B refuses a link: none is followed
+		return false
 	}
-	if p.suspended() {
-		return false // the links made it suspend (K9, a flag set)
+	// Links all already followed change nothing and are evidence only:
+	// R29-K9 is judged on them first, before the ik requirement (evidence
+	// first, as for an identity.rotate Table A ignores), whatever the
+	// update's fate.
+	known := len(rots) > 0 && handshake.KnownPrefix(parseRotations(p.Chain), rots) == len(rots)
+	if known {
+		if !m.applyIDLinks(p, rots, ep, now) || m.rk5Stops(p, ep) {
+			return false
+		}
 	}
 	var signer []byte
 	if e := p.epochMeta(ep); e != nil {
 		signer = e.Signer
 	}
-	if updateIKOK(p, signer, rots) {
-		return true
-	}
-	// The ik requirement failed: no relay link is followed and no token
-	// taken. The spec names no reason; Table B's for the update's ik is
-	// used (a reading of this release; the spec should confirm).
-	switch {
-	case p.ancestor(signer):
-		m.refusePeerKey(p, "ancestor_ik", now)
-	case p.rejected(signer):
-		m.refusePeerKey(p, "rejected_ik", now)
-	default:
-		m.refusePeerKey(p, "unknown_ik", now)
-	}
-	return false
-}
-
-// updateIKOK is RK5's ik requirement after the links are applied: the
-// update's ik (signer) is p's current ik, or the update's chain rots
-// starts at it and ends at p's current ik. An unknown signer fails.
-func updateIKOK(p *Peer, signer []byte, rots []*handshake.Rotation) bool {
-	if len(signer) != ed25519.PublicKeySize {
+	if !updateIKOK(post, signer, rots) {
+		// The ik requirement failed: no link is followed and no token
+		// taken. The spec names no reason; Table B's for the update's ik,
+		// as it would stand once the links were applied, is used (a reading
+		// of this release; the spec should confirm).
+		switch {
+		case p.ancestor(signer) || len(signer) > 0 && bytes.Equal(signer, p.IK) && !bytes.Equal(post, p.IK):
+			m.refusePeerKey(p, "ancestor_ik", now)
+		case p.rejected(signer):
+			m.refusePeerKey(p, "rejected_ik", now)
+		default:
+			m.refusePeerKey(p, "unknown_ik", now)
+		}
 		return false
 	}
-	if bytes.Equal(signer, p.IK) {
+	if len(rots) > 0 && !known && !m.applyIDLinks(p, rots, ep, now) {
+		return false // a conflict, or the record suspended
+	}
+	return !m.rk5Stops(p, ep)
+}
+
+// rk5Stops is the guard after an update's identity links are applied: if
+// they made the vault suspend p (R29-K9, a received flag, a conflict), or
+// ended the epoch the update travels under, the vault follows no relay
+// link, keeps no token and sends no answer; the suspension stands. (A
+// seam for a later rule: an update refused only for its identity links
+// could still be answered as a duplicate here; not built.)
+func (m *Manager) rk5Stops(p *Peer, ep []byte) bool {
+	if p.suspended() {
+		return true
+	}
+	e := p.epochMeta(ep)
+	return e != nil && e.Ended
+}
+
+// rotsOutcome is the ik p's identity links rots lead to, worked out as
+// applyIDLinks would apply them but without acting, with Table B's
+// refusal where applyIDLinks would refuse (the same reasons): the leading
+// links already followed are skipped; the rest must start at p's current
+// ik (rejected_ik for a rejected ik, unexpected for an ancestor, unknown_ik
+// otherwise), resolve (bad_rotation: audited, not drop.peer_key) and move
+// to no ancestor or rejected ik (ik_rollback). "-" is a suspended record.
+// No links: p's current ik.
+func (p *Peer) rotsOutcome(rots []*handshake.Rotation) (ik []byte, reason string) {
+	if p.suspended() {
+		return nil, "-"
+	}
+	if len(rots) == 0 {
+		return p.IK, ""
+	}
+	i := handshake.KnownPrefix(parseRotations(p.Chain), rots)
+	if i == len(rots) {
+		return p.IK, ""
+	}
+	app := rots[i:]
+	switch first := app[0].OldIK; {
+	case bytes.Equal(first, p.IK):
+	case p.rejected(first):
+		return nil, "rejected_ik"
+	case p.ancestor(first):
+		return nil, "unexpected"
+	default:
+		return nil, "unknown_ik"
+	}
+	end, _, err := handshake.ResolveChain(p.IK, app)
+	if err != nil {
+		return nil, "bad_rotation"
+	}
+	for _, r := range app {
+		if p.ancestor(r.NewIK) || p.rejected(r.NewIK) {
+			return nil, "ik_rollback"
+		}
+	}
+	return end, ""
+}
+
+// updateIKOK is RK5's ik requirement against ik, the vault's current ik for
+// p once the update's links are applied: the update's ik (signer) is ik,
+// or the update's chain rots starts at it and ends at ik. An unknown
+// signer fails.
+func updateIKOK(ik, signer []byte, rots []*handshake.Rotation) bool {
+	if len(signer) != ed25519.PublicKeySize || len(ik) != ed25519.PublicKeySize {
+		return false
+	}
+	if bytes.Equal(signer, ik) {
 		return true
 	}
 	if len(rots) == 0 {
 		return false
 	}
 	end, _, err := handshake.ResolveChain(signer, rots)
-	return err == nil && bytes.Equal(end, p.IK)
+	return err == nil && bytes.Equal(end, ik)
 }
 
 // readdressQueued moves p's queued deposits that go on the held standing
@@ -389,7 +479,7 @@ func (m *Manager) revokePassedReconnect(p *Peer, passed []ed25519.PublicKey, now
 // with tokens naming the new key, on a held reconnect token for p's
 // current mailbox only; without one it is owed (rk6Tick). The rule's
 // "not restarted" case (the reconnect whose own message made the follow)
-// and its order after an establishment are RK8's, not built yet.
+// and its order after an establishment are RK8's (rk8After).
 func (m *Manager) rk6(p *Peer, passed []ed25519.PublicKey, now time.Time) {
 	if p.Kind != KindConnection {
 		return
@@ -559,15 +649,14 @@ func (m *Manager) relayAwaitsRC(p *Peer, ctx []byte, now time.Time) bool {
 // otherwise the update is refused superseded_relay with none of them
 // applied. A relay link from that key can be replayed by anyone who saw
 // it (it is the same for every recipient), so it must not carry an ik
-// link that an identity.rotate from the same key could not. It reports
-// whether the update was refused.
+// link that an identity.rotate from the same key could not. A reading of
+// this release; the spec should confirm it. It reports whether the update
+// was refused.
 func (m *Manager) earlierAfterRotations(p *Peer, sender ed25519.PublicKey, rots []*handshake.Rotation, now time.Time) bool {
-	if len(rots) == 0 || m.relayStateOf(p, sender) != relayEarlierAfter {
+	ok, reason := m.idLinksAllowed(p, sender, rots)
+	if ok {
 		return false
 	}
-	if handshake.KnownPrefix(parseRotations(p.Chain), rots) == len(rots) {
-		return false
-	}
-	m.refusePeerKey(p, "superseded_relay", now)
+	m.refusePeerKey(p, reason, now)
 	return true
 }

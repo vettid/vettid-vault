@@ -8,7 +8,7 @@ import (
 	"github.com/vettid/vettid-vault/vms/peerwire"
 )
 
-// VAULT-MESSAGING 0.90.3 §3.4.1 Table A, "Earlier, after its cut-off", an
+// VAULT-MESSAGING 0.90.4 §3.4.1 Table A, "Earlier, after its cut-off", an
 // identity.rotate whose every link is already followed: ignored, and
 // R29-K9 is still judged; and only once the epoch's checks passed.
 

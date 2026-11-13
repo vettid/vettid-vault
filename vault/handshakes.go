@@ -61,6 +61,14 @@ func (m *Manager) newID(now time.Time) string {
 func (m *Manager) handleInit(ctx context.Context, raw []byte, sender ed25519.PublicKey, p *Peer, onReconnectToken bool, now time.Time) disposition {
 	pi, err := handshake.OpenInit(raw, m.lookupKEM, now)
 	if err != nil {
+		if m.opt.RelayKeyRotation && p != nil && p.Kind == KindConnection && errors.Is(err, handshake.ErrRelayLink) {
+			// §3.4.1 rule U, "When it is refused" (§3.4.2 RK8): a fault in a
+			// relay link's form, the count, or the last new not the
+			// announced key, in an otherwise well-formed reconnect, at parse
+			// time: no link is checked or kept.
+			m.refusePeerKey(p, "relay_unlinked", now)
+			return ackAfterFlush
+		}
 		m.audit(now, "hs_init_rejected", peerID(p))
 		return ackAfterFlush
 	}
@@ -82,7 +90,16 @@ func (m *Manager) handleInit(ctx context.Context, raw []byte, sender ed25519.Pub
 			return ackAfterFlush
 		}
 	}
-	if !suite.EqualPublic(sender, body.From.Relay.PK) { // §6.3
+	if body.Purpose == handshake.PurposeReconnect && m.rk8Applies(p, body.RelayLinks) {
+		// §3.4.2 RK8: the relay links connect the sender to from.relay.pk
+		// (checked in respondReconnect); the chain's other end, the first
+		// old being the deposit key, is a parse-time check.
+		if rk8EndRefused(sender, body.RelayLinks) {
+			m.refusePeerKey(p, "relay_unlinked", now)
+			pi.Discard()
+			return ackAfterFlush
+		}
+	} else if !suite.EqualPublic(sender, body.From.Relay.PK) { // §6.3
 		m.audit(now, "hs_init_sender_mismatch", peerID(p))
 		return ackAfterFlush
 	}
@@ -323,8 +340,14 @@ func profileName(raw json.RawMessage) string {
 // awaiting record until the hs.fin verified.
 func (m *Manager) respondReconnect(pi *handshake.PendingInit, p *Peer, sender ed25519.PublicKey, now time.Time) {
 	body := pi.Init()
+	rk8 := m.rk8Applies(p, body.RelayLinks)
 	// A suspended connection answers nothing (§3.4, §6.6).
 	if p.suspended() {
+		if rk8 {
+			// acceptFrom step 1 with §3.4.2 RK12: the relay links that pass
+			// rule C are kept as seen.
+			m.relayLinksEvidence(p, sender, body.From.Relay.PK, body.RelayLinks, now)
+		}
 		m.audit(now, "reconnect_refused", p.ID)
 		pi.Discard()
 		return
@@ -351,12 +374,59 @@ func (m *Manager) respondReconnect(pi *handshake.PendingInit, p *Peer, sender ed
 			return
 		}
 	}
-	if rstate == relayEarlierAfter {
-		// §3.4.1 Table A, after step 3: an earlier key after its cut-off
-		// (§3.4.2 RK8's relay links are not built yet).
+	if rk8 {
+		// Step 3 for the relay links (rule C), then rule U's checks of the
+		// chain: a refused chain is relay_unlinked, and the message passes
+		// Table A only with a valid one (§3.4.2 RK8 "When Q accepts it").
+		ok, ev := m.relayLinksEvidence(p, sender, body.From.Relay.PK, body.RelayLinks, now)
+		if ev != relayEvNone {
+			m.audit(now, "reconnect_refused", p.ID) // a relay fork: suspended
+			pi.Discard()
+			return
+		}
+		if !ok {
+			m.refusePeerKey(p, "relay_unlinked", now)
+			pi.Discard()
+			return
+		}
+		// Rule U's checks that do not depend on the ik, here at the hs.init
+		// and again at its hs.fin (none can pass later once it fails).
+		if _, reason := m.rk8Checks(p, body.RelayLinks, body.From.Relay.PK); reason != "" {
+			m.refusePeerKey(p, reason, now)
+			pi.Discard()
+			return
+		}
+	} else if rstate == relayEarlierAfter {
+		// §3.4.1 Table A, after step 3: an earlier key after its cut-off,
+		// without relay links (§3.4.2 RK8: "stays refused").
 		m.refusePeerKey(p, "superseded_relay", now)
 		pi.Discard()
 		return
+	}
+	// The identity-link gate (idLinksAllowed): from an earlier key after
+	// its cut-off, links not all followed are refused before anything else
+	// can apply them (the answer at hs.fin, or §6.6 "The links of a refused
+	// reconnect" below).
+	if ok, reason := m.idLinksAllowed(p, sender, body.Rotations); !ok {
+		m.refusePeerKey(p, reason, now)
+		pi.Discard()
+		return
+	}
+	if rk8 {
+		// §3.4.2 RK8: rule T on the hs.init's tokens, for the announced
+		// key's mailbox, before the ctx is classified (and so before §6.6's
+		// refused-reconnect links).
+		a := relayOf(body.From.Relay)
+		_, err1 := m.heldTokenFrom(body.Token, p, a, TokStanding)
+		_, err2 := m.heldTokenFrom(body.ReconnectToken, p, a, TokReconnect)
+		if err1 != nil || err2 != nil {
+			// Rule U's reason (token_unusable). That a failing
+			// reconnect_token is refused too, as for any reconnect, is a
+			// reading of this release; the spec should confirm.
+			m.refusePeerKey(p, "token_unusable", now)
+			pi.Discard()
+			return
+		}
 	}
 	m.noteFeatures(p, pi.Inner().Features) // 0.86.0, §10.8: steps 1-4 passed
 	var named86 []byte
@@ -413,9 +483,17 @@ func (m *Manager) respondReconnect(pi *handshake.PendingInit, p *Peer, sender ed
 	// not the one on record; otherwise the one on record, as before.
 	// The address must be the one the vault keeps for that earlier key
 	// (its URL as it was on record): an hs.init cannot send the answer
-	// elsewhere. Any other is refused as a bad token.
+	// elsewhere. Any other is refused as a bad token. This is defence in
+	// depth: answerTo is the kept address whatever the hs.init names, and
+	// the tokens' aud must be its URL (heldTokenFrom), so a from.relay
+	// naming another URL could not move the answer even without it.
 	answerTo := p.Relay
-	if rstate == relayEarlierBefore {
+	if rk8 {
+		// §3.4.1 rule T, §3.4.2 RK8: a reconnect message that announces a
+		// key with relay_links brings tokens minted by that key's mailbox,
+		// and the answer goes there.
+		answerTo = relayOf(body.From.Relay)
+	} else if rstate == relayEarlierBefore {
 		answerTo = PeerRelay{}
 		if e := p.earlierRelay(sender); e != nil && suite.EqualPublic(body.From.Relay.PK, sender) &&
 			body.From.Relay.URL == e.Relay.URL && body.From.Relay.Mailbox == e.Relay.Mailbox {
@@ -425,15 +503,27 @@ func (m *Manager) respondReconnect(pi *handshake.PendingInit, p *Peer, sender ed
 	st, err1 := m.heldTokenFrom(body.Token, p, answerTo, TokStanding)
 	rt, err2 := m.heldTokenFrom(body.ReconnectToken, p, answerTo, TokReconnect)
 	if err1 != nil || err2 != nil {
+		if rk8 {
+			m.refusePeerKey(p, "token_unusable", now) // cannot occur: checked above
+			pi.Discard()
+			return
+		}
 		m.audit(now, "reconnect_bad_token", p.ID)
 		pi.Discard()
 		return
 	}
+	record := m.recordRelayKey(p, sender)
+	if rk8 {
+		// Table A's preamble and §6.3's sender check give way to the links
+		// (RK8): the deposit key, one the vault keeps for p, is the key the
+		// hs.init is checked against, and its hs.fin's expected sender.
+		record = sender
+	}
 	cfg := handshake.ResponderConfig{
 		Identity: m.keys.ik, Policy: policyFor(p.Kind), PinnedSuite: p.Suite,
-		CollectSender: sender, RecordRelayKey: m.recordRelayKey(p, sender), KnownInitiatorIK: p.IK,
+		CollectSender: sender, RecordRelayKey: record, KnownInitiatorIK: p.IK,
 		KnownInitiatorChain: parseRotations(p.Chain),
-		ExpectedCtx:         body.Ctx, Now: now,
+		ExpectedCtx:         body.Ctx, Now: now, LinkedSender: rk8,
 		Rotations: m.ownRotationsSince(ownChain), Features: m.featuresFor(p),
 	}
 	var issued []IssuedToken
@@ -471,6 +561,11 @@ func (m *Manager) respondReconnect(pi *handshake.PendingInit, p *Peer, sender ed
 		TS: pi.Inner().TS}
 	if forkEp {
 		pend.ForkRef = "epoch" // §3.4.1 F2: judged at hs.fin (H5's exemption)
+	}
+	if rk8 {
+		pend.RelayLinks = marshalRelayLinks(body.RelayLinks)
+		a := relayOf(body.From.Relay)
+		pend.Announced = &a
 	}
 	// Links already followed (from identity.rotate) are not added again;
 	// the rest are followed at hs.fin, once sig_I verified.
@@ -867,11 +962,42 @@ func (m *Manager) peer(id string) *Peer {
 // become a request that awaits approval (0.10.3).
 func (m *Manager) handleFin(ctx context.Context, id string, raw []byte, sender ed25519.PublicKey, now time.Time) disposition {
 	aw, r := m.st.Awaiting[id], m.awaiting[id]
-	if aw.New == nil && m.tableAHandshake(m.peer(aw.PeerID), sender, now) {
+	// §3.4.2 RK7: an hs.fin to this open answer from an earlier key after
+	// its cut-off passes to Table B when the answer's pinned ik is the
+	// current one and its pass is not closed; sig_I must then verify.
+	rk7 := m.rk7FinPasses(m.peer(aw.PeerID), aw, sender)
+	if aw.New == nil && !rk7 && m.tableAHandshake(m.peer(aw.PeerID), sender, now) {
 		return ackAfterFlush // §3.4.1 Table A: refused, the answer kept (S2)
 	}
-	fr, err := r.HandleFin(raw, m.unpinnedSender(aw.New == nil, aw.PeerID, r.CollectSender(), sender), now)
+	if aw.New == nil && !(aw.Reconnect != nil && aw.Reconnect.Fork) {
+		// The identity-link gate (idLinksAllowed) for the links this hs.fin
+		// would apply (its rekey's, or its reconnect hs.init's), judged by
+		// the hs.fin's sender: refused, the answer kept. (An answer kept as
+		// fork evidence applies none: finishReconnect suspends first.)
+		rots := parseRotations(aw.Links)
+		if aw.Reconnect != nil {
+			rots = parseRotations(aw.Reconnect.Rotations)
+		}
+		if ok, reason := m.idLinksAllowed(m.peer(aw.PeerID), sender, rots); !ok {
+			m.refusePeerKey(m.peer(aw.PeerID), reason, now)
+			return ackAfterFlush
+		}
+	}
+	if rk7 && !m.peer(aw.PeerID).keepsRelayKey(r.CollectSender()) {
+		m.refusePeerKey(m.peer(aw.PeerID), "superseded_relay", now)
+		return ackAfterFlush
+	}
+	from := m.unpinnedSender(aw.New == nil, aw.PeerID, r.CollectSender(), sender)
+	if rk7 {
+		from = r.CollectSender() // both keys the vault keeps for the peer; acceptFrom judged the sender
+	}
+	fr, err := r.HandleFin(raw, from, now)
 	switch {
+	case rk7 && err != nil && !errors.Is(err, handshake.ErrType) && !errors.Is(err, handshake.ErrSASCommit):
+		// sig_I does not verify (or the hs.fin is otherwise bad): RK7's
+		// condition fails, so Table A's row refuses it, the answer kept.
+		m.refusePeerKey(m.peer(aw.PeerID), "superseded_relay", now)
+		return ackAfterFlush
 	case errors.Is(err, handshake.ErrType):
 		// A message in the new epoch that arrived before hs.fin: the epoch
 		// is not established yet, so leave it unacked for redelivery.
@@ -903,8 +1029,10 @@ func (m *Manager) handleFin(ctx context.Context, id string, raw []byte, sender e
 	if !p.suspended() {
 		m.noteFeatures(p, fr.Inner.Features) // 0.86.0, §10.8
 	}
+	fid := fr.Epoch.ID()
 	if aw.Reconnect != nil {
 		m.finishReconnect(p, aw, fr, now)
+		m.rk7Established(p, fid[:], sender)
 		return ackAfterFlush
 	}
 	if aw.Replaced {
@@ -926,6 +1054,7 @@ func (m *Manager) handleFin(ctx context.Context, id string, raw []byte, sender e
 	m.responderEstablish(p, aw, fr, now, func(o actOpts) {
 		m.activate(p, fr.Epoch, aw.Purpose, aw.Issued, "", chainOr(aw.OwnChain, len(m.st.Rotations)), o, now)
 	})
+	m.rk7Established(p, fid[:], sender)
 	return ackAfterFlush
 }
 
@@ -1039,6 +1168,31 @@ func (m *Manager) finishReconnect(p *Peer, aw *AwaitingHS, fr *handshake.FinResu
 		}
 		fresh, kem = all[n:], k
 	}
+	// §3.4.2 RK8: rule U's checks that do not depend on the ik, rule T on
+	// the hs.init's token for the announced key's mailbox, and RK5's ik
+	// requirement, before any link is applied (RK10): on a failure the
+	// reconnect does not complete and nothing is followed.
+	var rk8Rest []*handshake.RelayLink
+	rk8 := m.opt.RelayKeyRotation && len(pend.RelayLinks) > 0 && pend.Announced != nil
+	if rk8 {
+		reason := ""
+		links, ok := parseRelayLinksStored(pend.RelayLinks)
+		if !ok {
+			reason = "relay_unlinked"
+		} else if rk8Rest, reason = m.rk8Checks(p, links, pend.Announced.PK); reason == "" {
+			if _, err := m.heldTokenFrom(pend.Standing.Token, p, *pend.Announced, TokStanding); err != nil {
+				reason = "token_unusable"
+			} else if !rk8IKOK(p, aw.Signer, parseRotations(pend.Rotations)) {
+				reason = ikReason(p, aw.Signer)
+			}
+		}
+		if reason != "" {
+			fr.Epoch.Destroy()
+			denyIssued()
+			m.refusePeerKey(p, reason, now)
+			return
+		}
+	}
 	if pend.Older {
 		m.setWatch(p, pend.Named, pend.TS, now)
 	}
@@ -1072,6 +1226,20 @@ func (m *Manager) finishReconnect(p *Peer, aw *AwaitingHS, fr *handshake.FinResu
 			// (Release 29 final review, item 2) The epoch is not established: its carried record goes with it,
 			// so that no later sweep audits a discard (carried_discarded) of tokens never held for a usable epoch.
 			m.dropCarried(p, fid[:])
+			return
+		}
+	}
+	// §3.4.2 RK8: the relay links after the identity links, in this write;
+	// this hs.fin is the cut-off and counts as before it.
+	var rk8Passed []ed25519.PublicKey
+	rk8Old := p.Relay
+	if rk8 {
+		var ok bool
+		if rk8Passed, rk8Old, ok = m.rk8Follow(p, rk8Rest, addrOf(*pend.Announced), now); !ok {
+			fr.Epoch.Destroy()
+			denyIssued()
+			m.dropCarried(p, fid[:])
+			m.refusePeerKey(p, "unexpected", now) // cannot occur after rk8Checks
 			return
 		}
 	}
@@ -1113,6 +1281,7 @@ func (m *Manager) finishReconnect(p *Peer, aw *AwaitingHS, fr *handshake.FinResu
 		m.activate(p, fr.Epoch, aw.Purpose, aw.Issued, "", chainOr(aw.OwnChain, len(m.st.Rotations)), o, now)
 	})
 	m.restoring = false
+	m.rk8After(p, rk8Passed, rk8Old, now) // RK6 after the establishment
 	if pend.Older {
 		// §6.6 "Told to the member": audited, shown in History as "<name>
 		// reconnected after restoring its data."; no feed item.
@@ -1317,14 +1486,52 @@ func (m *Manager) handleResp(ctx context.Context, id string, raw []byte, sender 
 			return ackAfterFlush
 		}
 	}
+	from := m.unpinnedSender(og.New == nil, og.PeerID, ini.ResponderRelayKey(), sender)
+	prechecked := false // step 3 already ran on the earlier key's answer (below)
 	if og.New == nil && m.relayStateOf(m.peer(og.PeerID), sender) == relayEarlierAfter {
 		// §3.4.1 step 3, then Table A: the answer's identity links are
-		// checked by rule C, then it is refused and the handshake kept (S2).
-		m.respLinksEvidence(m.peer(og.PeerID), ini, raw, sender, now)
-		m.tableAHandshake(m.peer(og.PeerID), sender, now)
-		return ackAfterFlush
+		// checked by rule C, then it is refused and the handshake kept (S2),
+		// unless §3.4.2 RK8 passes it: an answer to the vault's reconnect
+		// whose relay links connect its sender to the key it announces.
+		sp := m.peer(og.PeerID)
+		peek := m.peekResp(sp, ini, raw, sender, now)
+		rk8 := peek != nil && og.Purpose == handshake.PurposeReconnect && m.rk8Applies(sp, peek.Resp.RelayLinks) && peek.Resp.Relay != nil
+		if rk8 && rk8EndRefused(sender, peek.Resp.RelayLinks) {
+			m.refusePeerKey(sp, "relay_unlinked", now) // parse time: no link checked or kept
+			return ackAfterFlush
+		}
+		if peek != nil {
+			for _, r := range peek.Resp.Rotations {
+				if m.rotationConflict(sp, r, now) {
+					return ackAfterFlush
+				}
+			}
+		}
+		if !rk8 {
+			m.tableAHandshake(sp, sender, now)
+			return ackAfterFlush
+		}
+		if reason := m.rk8RespEvidence(sp, peek, sender, now); reason != "" {
+			if reason != "-" {
+				m.refusePeerKey(sp, reason, now)
+			}
+			return ackAfterFlush // refused, the handshake kept (an earlier key's answer)
+		}
+		// The identity-link gate (idLinksAllowed): the only path on which an
+		// hs.resp's sender is an earlier key after its cut-off. Refused,
+		// the handshake kept; no link applied.
+		if ok, reason := m.idLinksAllowed(sp, sender, peek.Resp.Rotations); !ok {
+			m.refusePeerKey(sp, reason, now)
+			return ackAfterFlush
+		}
+		prechecked = true
+		if !sp.keepsRelayKey(ini.ResponderRelayKey()) {
+			m.tableAHandshake(sp, sender, now)
+			return ackAfterFlush
+		}
+		from = ini.ResponderRelayKey() // acceptFrom judged the sender
 	}
-	res, err := ini.HandleResp(raw, m.unpinnedSender(og.New == nil, og.PeerID, ini.ResponderRelayKey(), sender), now)
+	res, err := ini.HandleResp(raw, from, now)
 	if err != nil {
 		if _, xerr := ini.Export(); errors.Is(xerr, handshake.ErrDone) {
 			// Aborted (§6.3): the handshake is gone.
@@ -1374,19 +1581,6 @@ func (m *Manager) handleResp(ctx context.Context, id string, raw []byte, sender 
 		m.audit(now, "hs_resp_dropped", og.PeerID)
 		return ackAfterFlush
 	}
-	// 0.88.2 (R29-T1): the tokens the hs.resp carried are kept with the
-	// pending epoch and adopted only at its confirmation; hs.fin goes on the
-	// carried standing token.
-	var carried *CarriedTokens
-	if res.Resp.Token != "" || res.Resp.ReconnectToken != "" {
-		carried = &CarriedTokens{}
-		if t, err := m.heldToken(res.Resp.Token, p, TokStanding); err == nil && res.Resp.Token != "" {
-			carried.Standing = t
-		}
-		if t, err := m.heldToken(res.Resp.ReconnectToken, p, TokReconnect); err == nil && res.Resp.ReconnectToken != "" {
-			carried.Reconnect = t
-		}
-	}
 	// A reconnect's links, or (S8, 0.85.0) a rekey's: sig_R verified under
 	// the key they lead to. Rule C first, then they are followed with
 	// "Epochs after an ik link" and H5 (Table B "Reached"; review M5).
@@ -1395,6 +1589,47 @@ func (m *Manager) handleResp(ctx context.Context, id string, raw []byte, sender 
 		// revoked here (review RR2-4).
 		for _, t := range og.Issued {
 			m.revokeIssued(t, p.ID, now)
+		}
+	}
+	// §3.4.2 RK8: an answer to the vault's reconnect deposited with a key
+	// earlier than the one it announces. The chain's first old must be the
+	// deposit key (parse time: no link is checked or kept); rule C on its
+	// identity and relay links; then rule U's checks that do not depend on
+	// the ik, rule T on its token for the announced key's mailbox and RK5's
+	// ik requirement, before any link is applied (RK10). A failure refuses
+	// it with nothing followed, and the reconnect does not complete.
+	var rk8Rest []*handshake.RelayLink
+	rk8 := og.Purpose == handshake.PurposeReconnect && m.rk8Applies(p, res.Resp.RelayLinks) && res.Resp.Relay != nil
+	if rk8 {
+		reason := ""
+		if rk8EndRefused(sender, res.Resp.RelayLinks) {
+			reason = "relay_unlinked"
+		} else if !prechecked {
+			for _, r := range res.Resp.Rotations {
+				if m.rotationConflict(p, r, now) && p.Conflict != nil {
+					res.Epoch.Destroy()
+					revokeOwn()
+					return ackAfterFlush
+				}
+			}
+			reason = m.rk8RespEvidence(p, res, sender, now)
+		}
+		if reason == "" {
+			if rk8Rest, reason = m.rk8Checks(p, res.Resp.RelayLinks, res.Resp.Relay.PK); reason == "" {
+				if _, err := m.heldTokenFrom(res.Resp.Token, p, relayOf(*res.Resp.Relay), TokStanding); err != nil {
+					reason = "token_unusable"
+				} else if !rk8IKOK(p, res.ResponderIK, res.Resp.Rotations) {
+					reason = ikReason(p, res.ResponderIK)
+				}
+			}
+		}
+		if reason != "" {
+			if reason != "-" {
+				m.refusePeerKey(p, reason, now)
+			}
+			res.Epoch.Destroy()
+			revokeOwn()
+			return ackAfterFlush
 		}
 	}
 	for _, r := range res.Resp.Rotations {
@@ -1413,6 +1648,32 @@ func (m *Manager) handleResp(ctx context.Context, id string, raw []byte, sender 
 			res.Epoch.Destroy()
 			revokeOwn()
 			return ackAfterFlush
+		}
+	}
+	// §3.4.2 RK8: the relay links after the identity links, in this
+	// write; this hs.resp is the cut-off and counts as before it.
+	var rk8Passed []ed25519.PublicKey
+	rk8Old := p.Relay
+	if rk8 {
+		var ok bool
+		if rk8Passed, rk8Old, ok = m.rk8Follow(p, rk8Rest, *res.Resp.Relay, now); !ok {
+			m.refusePeerKey(p, "unexpected", now) // cannot occur after rk8Checks
+			res.Epoch.Destroy()
+			revokeOwn()
+			return ackAfterFlush
+		}
+	}
+	// 0.88.2 (R29-T1): the tokens the hs.resp carried are kept with the
+	// pending epoch and adopted only at its confirmation; hs.fin goes on the
+	// carried standing token.
+	var carried *CarriedTokens
+	if res.Resp.Token != "" || res.Resp.ReconnectToken != "" {
+		carried = &CarriedTokens{}
+		if t, err := m.heldToken(res.Resp.Token, p, TokStanding); err == nil && res.Resp.Token != "" {
+			carried.Standing = t
+		}
+		if t, err := m.heldToken(res.Resp.ReconnectToken, p, TokReconnect); err == nil && res.Resp.ReconnectToken != "" {
+			carried.Reconnect = t
 		}
 	}
 	// hs.fin goes first: what activation sends in the new epoch (the
@@ -1480,6 +1741,7 @@ func (m *Manager) handleResp(ctx context.Context, id string, raw []byte, sender 
 	if p.Pending != nil {
 		p.Pending.Carried = carried
 	}
+	m.rk8After(p, rk8Passed, rk8Old, now) // RK6 after the establishment
 	return ackAfterFlush
 }
 

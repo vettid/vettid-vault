@@ -145,6 +145,11 @@ func (m *Manager) hStatus(_ context.Context, s *Session, _ *envelope.Inner) (jso
 	case KindDesktop:
 		b.Raw("recovery", m.recoveryStatus(false))
 	}
+	// §3.4 "What the member sees", §10.2: to the app only, while the
+	// pending relay key is in the refused state.
+	if s.peer.Kind == KindApp && m.relayRefusedState() {
+		b.String("relay", "refused")
+	}
 	return b.Bytes(), nil
 }
 
@@ -675,6 +680,10 @@ func (m *Manager) RotateIdentity(ctx context.Context) error {
 	if err := m.persist(ctx, false); err != nil {
 		return err
 	}
+	m.relayKeyStep(ctx, false) // §3.4: the relay's rotate, then the second write
+	if m.locked {
+		return ErrLocked
+	}
 	m.drainOutbox(ctx)
 	return m.flushIfDirty(ctx)
 }
@@ -693,6 +702,12 @@ func (m *Manager) retryOwedRotation(now time.Time) {
 	o := m.st.RotationOwed
 	if o == nil || (o.Recovery == "" && o.Transfer == "") || m.st.Deleting != nil {
 		return // (a vault being deleted rotates nothing, §12.5)
+	}
+	if pr := m.st.Relay.Pending; m.relayRotation() && pr != nil && marksMade(o, pr) {
+		// The rotation was made and its relay key is pending: the retry
+		// the mark asks for is that key's completion (relayKeyStep), not
+		// another rotation of ik, kem or the wake key (§3.4 "Owed marks").
+		return
 	}
 	for _, sortedK := range sortedKeys(m.st.Invites) {
 		inv, sortedOK := m.st.Invites[sortedK]
@@ -724,11 +739,20 @@ func (m *Manager) retryOwedRotation(now time.Time) {
 // calls this), then a transfer's notice to the old phone still held (as
 // recovery step 6 does, §11.14.10).
 //
-// The relay key is not rotated here: the full set of §3.4 also has the
-// vault's relay key (new mailbox, new tokens, relay.address.update, the
-// old key kept for deposits), which this release does not build yet, for
-// a recovery, a transfer or credential.rotate alike.
-func (m *Manager) rotateIdentity(now time.Time) error {
+// Without Options.RelayKeyRotation the relay key is not rotated here
+// (§3.4.1 A5), for a recovery, a transfer or credential.rotate alike. With
+// it, the relay key rotates in the same flush by §3.4 "The order of a
+// relay-key rotation": this write stores the new key as pending
+// (startRelayRotation), the relay's rotate follows the write
+// (relayKeyStep), and the second write makes it current, audits
+// identity.rotated and clears the owed marks (makePendingCurrent). Nothing
+// is audited here then, and no mark clears.
+func (m *Manager) rotateIdentity(now time.Time) error { return m.rotateKeys(now, false) }
+
+// rotateKeys is rotateIdentity; byCredential: the member's
+// credential.rotate, the only rotation that replaces a relay key in the
+// refused state (§3.4 "The way out of the refused state").
+func (m *Manager) rotateKeys(now time.Time, byCredential bool) error {
 	m.sendHeldKeyRotations(now)
 	m.sendPendingUnlink(now)
 	draw := suite.RandomBytes
@@ -742,6 +766,12 @@ func (m *Manager) rotateIdentity(now time.Time) error {
 	kemSeed, err := draw(32)
 	if err != nil {
 		return err
+	}
+	var relaySeed []byte
+	if m.relayRotation() && m.relaySeedNeeded(byCredential) {
+		if relaySeed, err = draw(32); err != nil {
+			return err
+		}
 	}
 	newIK := ed25519.NewKeyFromSeed(ikSeed)
 	newKEM, err := suite.NewPrivateKey(kemSeed)
@@ -791,6 +821,11 @@ func (m *Manager) rotateIdentity(now time.Time) error {
 	}
 	m.rotateWakeKey(now)
 	m.dirty = true
+	if m.relayRotation() {
+		m.startRelayRotation(relaySeed, byCredential, now)
+		m.profileCoreChanged(now)
+		return nil
+	}
 	// One rotation clears every owed mark (§11.14.10); its audit entry
 	// says which: the transfer_id when it cleared a transfer's, ref
 	// "recovery" when it cleared a recovery's only, none when nothing was

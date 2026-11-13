@@ -205,7 +205,7 @@ func (m *Manager) sendLocking(ctx context.Context) map[string]bool {
 		body := json.RawMessage(lb.String("unlock_id", m.unlockID).Bytes())
 		in := &envelope.Inner{ID: m.newID(now), Type: "vault.locking", TS: now, Exp: now.Add(time.Minute), Body: body}
 		if raw, err := m.sealFor(p, kr.Current(), in); err == nil {
-			if _, err := m.relay.Deposit(ctx, p.Relay.URL, p.Relay.Mailbox, p.Standing.Token, raw); err == nil {
+			if _, err := m.relayFor(p.Standing.Token).Deposit(ctx, p.Relay.URL, p.Relay.Mailbox, p.Standing.Token, raw); err == nil {
 				ok[p.ID] = true
 			}
 		}
@@ -747,7 +747,7 @@ func (m *Manager) drainOutbox(ctx context.Context) {
 			continue // lost: the requester retransmits, which re-executes
 		}
 		if p := m.peer(e.PeerID); p != nil && p.Standing.Token != "" {
-			_, _ = m.relay.Deposit(ctx, e.RelayURL, e.Mailbox, p.Standing.Token, e.Payload)
+			_, _ = m.relayFor(p.Standing.Token).Deposit(ctx, e.RelayURL, e.Mailbox, p.Standing.Token, e.Payload)
 		}
 		suite.Wipe(e.Payload)
 	}
@@ -815,7 +815,9 @@ func (m *Manager) deposit(ctx context.Context, e *OutboxEntry, now time.Time) er
 		e.Done = true
 		return nil
 	}
-	_, err := m.relay.Deposit(withOneAttempt(ctx), e.RelayURL, e.Mailbox, tok, e.Payload)
+	// Signed with the key the token was issued to: an old relay key while
+	// the recipient holds none for the current one (§3.4 (a)).
+	_, err := m.relayFor(tok).Deposit(withOneAttempt(ctx), e.RelayURL, e.Mailbox, tok, e.Payload)
 	if mayHaveStored(err) {
 		e.Tried = true // 0.88.7 §8.3: it may have reached the relay
 	}

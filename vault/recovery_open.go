@@ -570,6 +570,9 @@ func (m *Manager) finishOpen(ctx context.Context, p RecoveryOpenParams, mv *Mani
 		m.zeroize()
 		return nil, out.fail(OpenRetry)
 	}
+	if m.relayRotation() {
+		m.keepRelayLimits() // the recovery's pending key (§3.4)
+	}
 	if mv != nil && mv.Serial > m.hdr.ManifestSerial {
 		m.hdr.ManifestSerial = mv.Serial
 	}

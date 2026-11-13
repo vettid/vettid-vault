@@ -768,7 +768,15 @@ func (m *Manager) resume(ctx context.Context, p AltUnlockParams, out *AltUnlockO
 	}
 	var err error
 	m.relay = p.Relay(m.st.Relay.URL, m.keys.relay)
-	if m.limits, err = m.relay.Register(ctx); err != nil {
+	if pr := m.st.Relay.Pending; m.relayRotation() && pr != nil {
+		// §3.4 "Retrying with the same key": while a relay key is pending
+		// the unlock registers no key (after the grace that would make the
+		// old mailbox again); Start calls the rotate instead, with the
+		// limits last registered.
+		if pr.Limits != nil {
+			m.limits = *pr.Limits
+		}
+	} else if m.limits, err = m.relay.Register(ctx); err != nil {
 		return fail(CodeRetry, err)
 	}
 	if !p.pinOnly {

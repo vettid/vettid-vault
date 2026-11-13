@@ -74,8 +74,25 @@ func (m *Manager) Start(ctx context.Context) error {
 	if err := m.persist(ctx, false); err != nil {
 		return err
 	}
+	// §3.4 (0.84.0): complete a relay key left pending (the rotate, or the
+	// registration, then the second write); one attempt, and the unlock
+	// goes on whatever its answer.
+	m.relayKeyAtUnlock(ctx)
+	if m.locked {
+		return ErrLocked
+	}
 	m.attStart(ctx)  // finishes what a lock or crash interrupted, from the index (§10.5.1)
 	m.reportAppKey() // a backup bit first recorded by this release (0.16.0)
+	m.drainOutbox(ctx)
+	if err := m.flushIfDirty(ctx); err != nil || !m.relayRotation() {
+		return err
+	}
+	// §3.4: a relay key the drain's writes stored as pending (a transfer's
+	// rotation after the old phone's notice): its rotate follows them.
+	m.relayKeyStep(ctx, false)
+	if m.locked {
+		return ErrLocked
+	}
 	m.drainOutbox(ctx)
 	return m.flushIfDirty(ctx)
 }
@@ -111,6 +128,14 @@ func (m *Manager) Run(ctx context.Context) error {
 			refused++
 		default:
 			refused = 0
+		}
+		if RelayCode(err) == CodeMailboxUnknown {
+			// §3.4: while a relay key is pending (and not refused),
+			// mailbox_unknown on the current mailbox starts the rotate,
+			// then the registration of the pending key.
+			if err := m.relayMailboxUnknown(ctx); errors.Is(err, ErrLocked) || errors.Is(err, ErrSplitBrain) {
+				return err
+			}
 		}
 		if !sleep(ctx, retryWait(refused)) {
 			return ctx.Err()
@@ -272,6 +297,13 @@ func (m *Manager) ProcessBatch(ctx context.Context, c Collector, msgs []Message)
 	if m.deletePending {
 		m.deletePending = false
 		return m.finishDelete(ctx) // §12.5; the vault is locked afterwards
+	}
+	// §3.4: a relay key this batch stored as pending (credential.rotate, a
+	// recovered phone's pairing), or a sooner retry come due: the relay's
+	// rotate, then the second write.
+	m.relayKeyStep(ctx, false)
+	if m.locked {
+		return ErrLocked
 	}
 	m.drainOutbox(ctx)
 	if err := m.flushIfDirty(ctx); err != nil {

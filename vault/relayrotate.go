@@ -1,0 +1,848 @@
+package vault
+
+import (
+	"context"
+	"crypto/ed25519"
+	"encoding/base64"
+	"errors"
+	"math/rand/v2"
+	"sort"
+	"strings"
+	"time"
+
+	"github.com/vettid/vettid-relay/relayauth"
+	"github.com/vettid/vettid-relay/relayclient"
+
+	"github.com/vettid/vettid-vault/vms/handshake"
+	"github.com/vettid/vettid-vault/vms/suite"
+)
+
+// The vault's own relay-key rotation (VAULT-MESSAGING §3.4 "The order of a
+// relay-key rotation", owner decision a of 2026-11-05: store first, then
+// rotate, and retry with the same key). Only with Options.RelayKeyRotation;
+// without it the three paths that rotate the vault's keys rotate ik, kem
+// and the wake key only (§3.4.1 A5).
+//
+//  1. The rotation's state write stores the new relay key as pending, with
+//     new tokens for every recipient, held (startRelayRotation, in the flush
+//     of the path that rotates). The current key stays current.
+//  2. After that write the vault calls the relay's rotate, signed by the
+//     current key, with the pending key; past the grace (mailbox_unknown)
+//     it registers the pending key instead (relayKeyAttempt). Just before
+//     the first attempt away from the current key, a write of its own
+//     stores that key's anchor (§3.4.2 RK14 step 1).
+//  3. On success a second write makes the pending key current
+//     (makePendingCurrent): the old key is kept for deposits, the held
+//     tokens are re-minted near their end (every one for a mailbox the
+//     relay created afresh), the recipients are taken again, and each
+//     recipient's key for the vault and S1's clock are recorded.
+//
+// A run that ends between two steps leaves the stored state at the earlier
+// one, and the next unlock goes on from there with the same key: the
+// relay answers a repeated rotate with the same mailbox (RELAY-PROTOCOL
+// §6.7, "Repeating a rotation").
+
+// relayKeyRun is the memory-only runtime of the rotation (one per unlock:
+// each unlock is a new Manager).
+type relayKeyRun struct {
+	// stored is the mailbox of the pending key as the last successful
+	// state write stored it ("" for none): step 2 is made only for a key
+	// already stored (store first).
+	stored string
+	// left is the mailbox of a key found pending when the state was
+	// loaded (left by an earlier run): an unlock that does not complete
+	// it audits identity.rotation_failed.
+	left string
+	// failAudited: identity.rotation_failed was audited in this unlock
+	// (at most once per unlock, §3.4 "What is audited").
+	failAudited bool
+	// triedRefused: the refused state's one attempt of this unlock.
+	triedRefused bool
+	// fails counts the attempts in a row with no definite answer; next is
+	// when the next sooner retry may be made (full jitter).
+	fails int
+	next  time.Time
+	// pending and old are the Relays of the pending key and the old keys
+	// (keys.oldRelay, by index), built when first used.
+	pending Relay
+	old     []Relay
+}
+
+// loaded notes a key pending in the state just read.
+func (r *relayKeyRun) loaded(k *keyset) {
+	if k.pendingRelay != nil {
+		r.stored, r.left = mailboxOf(k.pendingRelay), mailboxOf(k.pendingRelay)
+	}
+}
+
+// loadRelayRotation derives the pending and old relay keys from the state.
+func (k *keyset) loadRelayRotation(rs *RelayState) error {
+	if pr := rs.Pending; pr != nil {
+		if len(pr.Seed) != ed25519.SeedSize {
+			return ErrState
+		}
+		k.pendingRelay = ed25519.NewKeyFromSeed(pr.Seed)
+	}
+	for _, o := range rs.Old {
+		if len(o.Seed) != ed25519.SeedSize {
+			return ErrState
+		}
+		k.oldRelay = append(k.oldRelay, ed25519.NewKeyFromSeed(o.Seed))
+	}
+	return nil
+}
+
+// Backoff of the sooner retries while unlocked (§3.4 "Retrying with the
+// same key"): the wait before the n-th retry in a row is random from 0 to
+// min(1 h, 1 min × 2^(n−1)).
+const (
+	relayRetryBase = time.Minute
+	relayRetryMax  = time.Hour
+)
+
+func relayRetryWait(n int) time.Duration {
+	d := relayRetryMax
+	if n < 7 {
+		d = min(relayRetryMax, relayRetryBase<<max(n-1, 0))
+	}
+	return time.Duration(rand.Int64N(int64(d) + 1))
+}
+
+// relayRotation reports whether the vault rotates its own relay key.
+func (m *Manager) relayRotation() bool { return m.opt.RelayKeyRotation }
+
+// relayGateOpen is §3.4.1 "The gate", checked only when a new relay key
+// would be generated. Not built here: the gate and its owed mark are a
+// later change, and until then the switch alone opens it.
+func (m *Manager) relayGateOpen() bool { return true }
+
+// pendingMailbox is the pending key's mailbox, "" for none.
+func (m *Manager) pendingMailbox() string {
+	if m.keys == nil || m.keys.pendingRelay == nil {
+		return ""
+	}
+	return mailboxOf(m.keys.pendingRelay)
+}
+
+func pubOf(k ed25519.PrivateKey) ed25519.PublicKey { return k.Public().(ed25519.PublicKey) }
+
+// relayBase is the vault's relay URL as a token's aud.
+func (m *Manager) relayBase() string {
+	if m.relay != nil {
+		return m.relay.BaseURL()
+	}
+	return strings.TrimRight(m.st.Relay.URL, "/")
+}
+
+// withKey is a Relay for another of the vault's own relay keys; nil when
+// the Relay cannot rotate.
+func (m *Manager) withKey(k ed25519.PrivateKey) Relay {
+	if rot, ok := m.relay.(RelayRotator); ok {
+		return rot.WithKey(k)
+	}
+	return nil
+}
+
+// pendingRelayClient is the Relay for the pending key.
+func (m *Manager) pendingRelayClient() Relay {
+	if m.rk.pending == nil && m.keys.pendingRelay != nil {
+		m.rk.pending = m.withKey(m.keys.pendingRelay)
+	}
+	return m.rk.pending
+}
+
+// oldRelayClient is the Relay for the old key i.
+func (m *Manager) oldRelayClient(i int) Relay {
+	for len(m.rk.old) < len(m.keys.oldRelay) {
+		m.rk.old = append(m.rk.old, nil)
+	}
+	if m.rk.old[i] == nil {
+		m.rk.old[i] = m.withKey(m.keys.oldRelay[i])
+	}
+	return m.rk.old[i]
+}
+
+// tokenSub reads a deposit token's sub without verifying it: a token the
+// vault holds, read only to choose the key that signs a deposit on it
+// (the relay checks the token).
+func tokenSub(tok string) (string, bool) {
+	const prefix = "v4.public."
+	if !strings.HasPrefix(tok, prefix) {
+		return "", false
+	}
+	body := strings.TrimPrefix(tok, prefix)
+	if i := strings.IndexByte(body, '.'); i >= 0 {
+		body = body[:i]
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(body)
+	if err != nil || len(raw) <= ed25519.SignatureSize {
+		return "", false
+	}
+	c, err := relayauth.ParseClaims(raw[:len(raw)-ed25519.SignatureSize])
+	if err != nil {
+		return "", false
+	}
+	return c.Sub, true
+}
+
+// relayFor is the Relay whose key a deposit on tok is signed with: a token
+// another principal issued to one of the vault's old relay keys is
+// deposited with that key (§3.4 "Resending the new address" (a): the old
+// key is kept for deposits); anything else with the current key. Without
+// old keys it is the current Relay, as before.
+func (m *Manager) relayFor(tok string) Relay {
+	if m.keys == nil || len(m.keys.oldRelay) == 0 {
+		return m.relay
+	}
+	sub, ok := tokenSub(tok)
+	if !ok {
+		return m.relay
+	}
+	for i, k := range m.keys.oldRelay {
+		if relayauth.EncodeKey(pubOf(k)) == sub {
+			if r := m.oldRelayClient(i); r != nil {
+				return r
+			}
+		}
+	}
+	return m.relay
+}
+
+// relayRecipients are the recipients of a relay-key rotation (§3.4 step
+// 2): every active device and connection, in id order.
+func (m *Manager) relayRecipients() []*Peer {
+	var out []*Peer
+	for _, p := range m.allPeers() {
+		if p.State == PeerActive {
+			out = append(out, p)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out
+}
+
+// --- the owed marks (§3.4 "Owed marks", §11.14.10) ---
+
+// marksOf are the recovery and transfer marks of o (not the relay-key
+// mark), a copy.
+func marksOf(o *RotationOwed) *RotationOwed {
+	if o == nil {
+		return &RotationOwed{}
+	}
+	return &RotationOwed{Recovery: o.Recovery, Transfer: o.Transfer, DEKVersion: o.DEKVersion, At: o.At}
+}
+
+// unionMarks is the marks of a and b (b's transfer wins: the later one).
+func unionMarks(a, b *RotationOwed) *RotationOwed {
+	out := marksOf(a)
+	if b == nil {
+		return out
+	}
+	if b.Recovery != "" {
+		out.Recovery = b.Recovery
+	}
+	if b.Transfer != "" {
+		out.Transfer, out.DEKVersion, out.At = b.Transfer, b.DEKVersion, b.At
+	}
+	return out
+}
+
+// markRef is the identity.rotated ref of a rotation that clears marks
+// (§11.14.10, 0.69.2), less those an earlier audit named (§3.4 "What is
+// audited"): the transfer_id, else "recovery", else none.
+func markRef(marks, named *RotationOwed) string {
+	if marks == nil {
+		return ""
+	}
+	if marks.Transfer != "" && (named == nil || named.Transfer != marks.Transfer) {
+		return marks.Transfer
+	}
+	if marks.Recovery != "" && (named == nil || named.Recovery != marks.Recovery) {
+		return "recovery"
+	}
+	return ""
+}
+
+// pendingRef is the ref of the pending key's identity.rotated, and of its
+// identity.rotation_failed.
+func (m *Manager) pendingRef() string {
+	if pr := m.st.Relay.Pending; pr != nil {
+		return markRef(pr.Marks, pr.Named)
+	}
+	return ""
+}
+
+// marksMade reports whether the rotation every owed mark asks for has been
+// made: its relay key is pending, or it was made while that key was
+// pending. The retry the mark asks for at each unlock is then the
+// completion of the pending key, not a new rotation of ik, kem or the wake
+// key (§3.4 "Owed marks", §11.14.10 "The owed mark").
+func marksMade(o *RotationOwed, pr *PendingRelay) bool {
+	made := func(v string, get func(*RotationOwed) string) bool {
+		return v == "" || pr.Marks != nil && get(pr.Marks) == v || pr.Next != nil && get(pr.Next) == v
+	}
+	return made(o.Recovery, func(r *RotationOwed) string { return r.Recovery }) &&
+		made(o.Transfer, func(r *RotationOwed) string { return r.Transfer })
+}
+
+// clearMarks clears the owed marks named in marks, each only if it is
+// still the same one, and the owed object when nothing is left.
+func (m *Manager) clearMarks(marks *RotationOwed) {
+	o := m.st.RotationOwed
+	if o == nil || marks == nil {
+		return
+	}
+	if marks.Recovery != "" && o.Recovery == marks.Recovery {
+		o.Recovery = ""
+	}
+	if marks.Transfer != "" && o.Transfer == marks.Transfer {
+		o.Transfer, o.DEKVersion, o.At = "", 0, time.Time{}
+	}
+	if o.Recovery == "" && o.Transfer == "" && o.RelayKey.IsZero() {
+		m.st.RotationOwed = nil
+	}
+	m.dirty = true
+}
+
+// --- step 1: the pending key ---
+
+// relaySeedNeeded reports whether a rotation made now generates a relay
+// key: none is pending, or the member's credential.rotate finds one in
+// the refused state (§3.4 "The way out of the refused state").
+func (m *Manager) relaySeedNeeded(byCredential bool) bool {
+	pr := m.st.Relay.Pending
+	return m.relayGateOpen() && (pr == nil || byCredential && pr.Refused != "")
+}
+
+// startRelayRotation is the relay part of a rotation, in memory; the
+// rotation's flush stores it (§3.4 step 1). seed is nil when
+// relaySeedNeeded was false. Nothing is audited and no mark clears here:
+// the second write does both.
+func (m *Manager) startRelayRotation(seed []byte, byCredential bool, now time.Time) {
+	pr := m.st.Relay.Pending
+	switch {
+	case seed == nil && pr == nil:
+		// The gate is closed (a later change records the relay-key mark).
+	case pr == nil:
+		m.newPendingRelay(seed, marksOf(m.st.RotationOwed), nil, now)
+	case byCredential && pr.Refused != "":
+		// The way out of the refused state: the refused key, its tokens and
+		// the refused mark are discarded; the new key meets any relay-key
+		// rotation owed, which clears in this flush; the other marks clear
+		// at its second write. The current key's anchor stays with it.
+		all := unionMarks(unionMarks(pr.Marks, pr.Next), m.st.RotationOwed)
+		named := pr.Named
+		m.dropPendingRelay()
+		if o := m.st.RotationOwed; o != nil {
+			o.RelayKey = time.Time{}
+			m.clearMarks(&RotationOwed{})
+		}
+		m.newPendingRelay(seed, all, named, now)
+	default:
+		// A rotation made while a relay key is pending keeps that key, its
+		// tokens and its held updates, and owes a relay-key rotation, which
+		// the pending key's second write meets (a mark already set keeps
+		// its time).
+		suite.Wipe(seed)
+		pr.Next = unionMarks(pr.Next, m.st.RotationOwed)
+		if m.st.RotationOwed == nil {
+			m.st.RotationOwed = &RotationOwed{}
+		}
+		if m.st.RotationOwed.RelayKey.IsZero() {
+			m.st.RotationOwed.RelayKey = now.UTC()
+		}
+		m.dirty = true
+	}
+}
+
+// newPendingRelay stores seed as the pending relay key with new tokens for
+// every recipient, held (§3.4 steps 1 and 2).
+func (m *Manager) newPendingRelay(seed []byte, marks, named *RotationOwed, now time.Time) {
+	pr := &PendingRelay{Seed: seed, Held: map[string]*HeldTokens{}, Marks: marks, Named: named}
+	if m.limits != (Limits{}) {
+		lim := m.limits
+		pr.Limits = &lim
+	}
+	m.st.Relay.Pending = pr
+	m.keys.pendingRelay = ed25519.NewKeyFromSeed(seed)
+	m.rk.pending, m.rk.fails, m.rk.next = nil, 0, time.Time{}
+	for _, p := range m.relayRecipients() {
+		m.mintHeld(pr, m.keys.pendingRelay, p, false, now)
+	}
+	m.dirty = true
+}
+
+// dropPendingRelay discards the pending key (the way out of the refused
+// state).
+func (m *Manager) dropPendingRelay() {
+	if pr := m.st.Relay.Pending; pr != nil {
+		suite.Wipe(pr.Seed)
+	}
+	suite.Wipe(m.keys.pendingRelay)
+	m.st.Relay.Pending, m.keys.pendingRelay, m.rk.pending = nil, nil, nil
+	m.dirty = true
+}
+
+// mintHeld mints p's standing token (and reconnect token, for a
+// connection) on key, pr's, and holds them in pr. fresh: iat now,
+// never backdated (a mailbox the relay created afresh, RELAY-PROTOCOL
+// §6.10).
+func (m *Manager) mintHeld(pr *PendingRelay, key ed25519.PrivateKey, p *Peer, fresh bool, now time.Time) {
+	h := &HeldTokens{}
+	if old := pr.Held[p.ID]; old != nil {
+		h = old
+	}
+	if pr.Held == nil {
+		pr.Held = map[string]*HeldTokens{} // read back without recipients (omitempty)
+	}
+	pr.Held[p.ID] = h
+	if tok, it, err := m.mintOnKey(key, fresh, p, TokStanding, now); err == nil {
+		h.Standing, h.Issued = tok, replaceIssued(h.Issued, it)
+	}
+	if p.Kind == KindConnection {
+		if tok, it, err := m.mintOnKey(key, fresh, p, TokReconnect, now); err == nil {
+			h.Reconnect, h.Issued = tok, replaceIssued(h.Issued, it)
+		}
+	}
+}
+
+// mintOnKey mints a standing or reconnect token for p on key, with the
+// lifetime and quota of its kind (§7.1, §6.6), as mintStanding and
+// mintReconnect do on the current key.
+func (m *Manager) mintOnKey(key ed25519.PrivateKey, fresh bool, p *Peer, kind string, now time.Time) (string, IssuedToken, error) {
+	ttl := m.standingTTL(p.Kind)
+	var quota *relayauth.Quota
+	if kind == TokReconnect {
+		ttl = handshake.ReconnectTokenLifetime(time.Duration(m.limits.MaxTokenLifetimeSeconds) * time.Second)
+		quota = &relayauth.Quota{Msgs: i64(handshake.ReconnectTokenQuotaMsgs), Bytes: i64(handshake.ReconnectTokenQuotaBytes)}
+	} else if p.Kind == KindConnection {
+		quota = &relayauth.Quota{Msgs: i64(PeerQuotaMsgs), Bytes: i64(PeerQuotaBytes)}
+	}
+	iat := now.UTC().Truncate(time.Second)
+	if !fresh {
+		iat = iat.Add(-tokenBackdate) // as relayclient (RELAY-PROTOCOL §5.2)
+	}
+	jti := m.newID(now)
+	sub := relayauth.EncodeKey(p.Relay.PK)
+	tok, err := relayauth.MintToken(key, relayauth.Claims{Iss: relayauth.MailboxID(pubOf(key)), Sub: sub, Aud: m.relayBase(),
+		Iat: iat, Exp: iat.Add(ttl), Jti: jti, Scope: relayauth.ScopeDeposit, Quota: quota,
+		OwnerDevice: kind == TokStanding && p.Kind == KindApp})
+	if err != nil {
+		return "", IssuedToken{}, err
+	}
+	return tok, IssuedToken{JTI: jti, Kind: kind, Sub: sub, PeerID: p.ID, Exp: iat.Add(ttl)}, nil
+}
+
+// replaceIssued puts it in place of the entry of the same kind.
+func replaceIssued(list []IssuedToken, it IssuedToken) []IssuedToken {
+	out := list[:0]
+	for _, t := range list {
+		if t.Kind != it.Kind {
+			out = append(out, t)
+		}
+	}
+	return append(out, it)
+}
+
+func issuedOf(list []IssuedToken, kind string) (IssuedToken, bool) {
+	for _, t := range list {
+		if t.Kind == kind {
+			return t, true
+		}
+	}
+	return IssuedToken{}, false
+}
+
+// keepRelayLimits stores the limits of a registration just answered with a
+// pending key, which an unlock that registers no key uses.
+func (m *Manager) keepRelayLimits() {
+	if pr := m.st.Relay.Pending; pr != nil && m.limits != (Limits{}) {
+		lim := m.limits
+		pr.Limits = &lim
+		m.dirty = true
+	}
+}
+
+// --- step 2: the rotate, or the registration ---
+
+type relayOutcome int
+
+const (
+	relayDone     relayOutcome = iota // the relay has the new mailbox
+	relayNoAnswer                     // no definite answer: retried
+	relayRefused                      // a definite refusal: the refused state
+)
+
+// definiteRefusal reports whether err is a definite refusal (§3.4): any
+// 4xx other than 429 rate_limited, timestamp_stale and replay_detected
+// (which a freshly signed request can pass). The rotate's mailbox_unknown
+// is handled before (it leads to the registration).
+func definiteRefusal(err error) bool {
+	st, ok := statusOf(err)
+	if !ok || st < 400 || st >= 500 {
+		return false
+	}
+	switch RelayCode(err) {
+	case "rate_limited", CodeTimestampStale, CodeReplayDetected:
+		return false
+	}
+	return true
+}
+
+// relaysOwnRefusal reports the relay's own 400 bad_request or 401
+// signature_invalid, with the error body of RELAY-PROTOCOL §7.1: the
+// relay did not carry out that request (§3.4.2 RK14 step 1 "When it is
+// cleared"). A 4xx without that body (a proxy, a firewall) is not one.
+func relaysOwnRefusal(err error) bool {
+	var e *relayclient.Error
+	if !errors.As(err, &e) {
+		return false
+	}
+	return e.Status == 400 && e.Code == "bad_request" || e.Status == 401 && e.Code == "signature_invalid"
+}
+
+// retryAfterOf is a 429 rate_limited answer's retry_after.
+func retryAfterOf(err error) time.Duration {
+	var e *relayclient.Error
+	if errors.As(err, &e) && e.Status == 429 && e.RetryAfter > 0 {
+		return time.Duration(e.RetryAfter) * time.Second
+	}
+	return 0
+}
+
+// relayKeyCall makes one attempt: the rotate signed by the current key
+// with the pending key; on mailbox_unknown (past the grace) the
+// registration of the stored pending key. created: the registration was
+// answered 201 (a fresh mailbox). byRotate: a refusal was the rotate's.
+func (m *Manager) relayKeyCall(ctx context.Context) (out relayOutcome, created, byRotate bool, err error) {
+	rot, ok := m.relay.(RelayRotator)
+	pending, ok2 := m.pendingRelayClient().(RelayRotator)
+	if !ok || !ok2 {
+		return relayNoAnswer, false, false, errors.New("vault: the relay cannot rotate")
+	}
+	if _, err = rot.Rotate(ctx, m.keys.pendingRelay); err == nil {
+		// The new mailbox's limits: registering a key the relay already
+		// has creates nothing (RELAY-PROTOCOL §6.1); a failure keeps the
+		// limits the vault has.
+		if lim, _, rerr := pending.RegisterCreated(ctx); rerr == nil {
+			m.limits = lim
+		}
+		return relayDone, false, false, nil
+	}
+	if RelayCode(err) != CodeMailboxUnknown {
+		if ctx.Err() == nil && definiteRefusal(err) {
+			return relayRefused, false, true, err
+		}
+		return relayNoAnswer, false, false, err
+	}
+	lim, created, err := pending.RegisterCreated(ctx)
+	if err == nil {
+		m.limits = lim
+		return relayDone, created, false, nil
+	}
+	if ctx.Err() == nil && definiteRefusal(err) {
+		return relayRefused, false, false, err
+	}
+	return relayNoAnswer, false, false, err
+}
+
+// relayKeyStep completes a pending relay key after a state write: at the
+// unlock (one attempt; the unlock goes on whatever its answer), after the
+// flush that stored a new key, and as the sooner retries come due while
+// unlocked. A next key, stored by the second write, is attempted at once.
+func (m *Manager) relayKeyStep(ctx context.Context, atUnlock bool) {
+	for range 2 {
+		if !m.relayKeyAttempt(ctx, atUnlock) {
+			return
+		}
+	}
+}
+
+// recoveredPhoneUnpaired reports whether a completed recovery's phone has
+// not paired yet. A reading of this release (the spec should confirm): the
+// recovery's pending key is completed only after the phone's first
+// handshake, which checks the vault's relay key and mailbox as the open's
+// vault_bundle gave them, as retryOwedRotation waits for the ik.
+func (m *Manager) recoveredPhoneUnpaired() bool {
+	for _, k := range sortedKeys(m.st.Invites) {
+		if inv := m.st.Invites[k]; inv != nil && inv.CreatedBy == inviteByRecovery {
+			return true
+		}
+	}
+	return false
+}
+
+// relayKeyAttempt makes one attempt if one is due; true when the key was
+// made current and the second write stored (another key may be pending).
+func (m *Manager) relayKeyAttempt(ctx context.Context, atUnlock bool) bool {
+	if !m.relayRotation() || m.locked || m.st == nil {
+		return false
+	}
+	pr := m.st.Relay.Pending
+	if pr == nil || m.st.Deleting != nil || m.rk.stored == "" || m.rk.stored != m.pendingMailbox() || m.recoveredPhoneUnpaired() {
+		return false
+	}
+	now := m.now()
+	switch {
+	case pr.Refused != "":
+		// One attempt at each unlock, no sooner retries.
+		if !atUnlock || m.rk.triedRefused {
+			return false
+		}
+	case now.Before(pr.RetryAfter):
+		return false // a running retry_after is honored at an unlock too
+	case !atUnlock && now.Before(m.rk.next):
+		return false
+	}
+	// §3.4.2 RK14 step 1: the anchor, in a write of its own just before
+	// the first attempt away from the current key. Nothing is sent until
+	// it is stored.
+	anchored := false
+	if m.st.Relay.Anchor.IsZero() {
+		m.st.Relay.Anchor = now.UTC()
+		m.dirty = true
+		if err := m.persist(ctx, false); err != nil {
+			if m.st != nil {
+				m.st.Relay.Anchor = time.Time{}
+			}
+			return false
+		}
+		anchored = true
+	}
+	if pr.Refused != "" {
+		m.rk.triedRefused = true
+	}
+	out, created, byRotate, err := m.relayKeyCall(ctx)
+	switch out {
+	case relayDone:
+		if !m.makePendingCurrent(created, now) {
+			m.rk.next = now.Add(relayRetryWait(1))
+			return false
+		}
+		m.rk.fails = 0
+		return m.persist(ctx, false) == nil // memory is ahead on failure: the next write that succeeds stores it
+	case relayRefused:
+		// It fails secure: the refused state, in a write of its own.
+		pr.Refused, pr.RetryAfter = RelayCode(err), time.Time{}
+		if pr.Refused == "" {
+			pr.Refused = "refused"
+		}
+		if anchored && byRotate && relaysOwnRefusal(err) {
+			m.st.Relay.Anchor = time.Time{} // the relay did not carry it out
+		}
+		m.dirty = true
+		m.rk.failAudited = false // a definite refusal is audited at once
+		m.relayKeyFailed(now)
+		_ = m.persist(ctx, false)
+		return false
+	default:
+		if ctx.Err() != nil {
+			return false // interrupted (a lock): not counted
+		}
+		if pr.Refused != "" {
+			return false
+		}
+		m.rk.fails++
+		wait := relayRetryWait(m.rk.fails)
+		if ra := retryAfterOf(err); ra > 0 {
+			pr.RetryAfter = now.Add(ra).UTC()
+			m.dirty = true
+			wait = max(wait, ra)
+			_ = m.persist(ctx, false) // stored with the key, so a lock and an unlock do not reset it
+		}
+		m.rk.next = now.Add(wait)
+		return false
+	}
+}
+
+// relayKeyFailed audits identity.rotation_failed for the pending key, with
+// its feed item, at most once per unlock (§3.4 "What is audited").
+func (m *Manager) relayKeyFailed(now time.Time) {
+	if m.rk.failAudited {
+		return
+	}
+	m.rk.failAudited = true
+	m.record(Activity{Kind: "identity.rotation_failed", Ref: m.pendingRef(), Audit: true, Feed: true, Priority: "high"}, now)
+}
+
+// relayKeyAtUnlock completes a key left pending by an earlier run (the
+// unlock's attempt), and audits identity.rotation_failed when this
+// unlock's own attempt does not complete it: it fails, gets no answer, or
+// is not made because a retry_after still runs.
+func (m *Manager) relayKeyAtUnlock(ctx context.Context) {
+	if !m.relayRotation() {
+		return
+	}
+	m.relayKeyStep(ctx, true)
+	if m.st == nil || m.rk.left == "" || m.st.Relay.Pending == nil || m.pendingMailbox() != m.rk.left || m.recoveredPhoneUnpaired() {
+		return
+	}
+	m.relayKeyFailed(m.now())
+}
+
+// relayMailboxUnknown is the collect loop's mailbox_unknown on the current
+// mailbox: while a key is pending and not refused it starts the same path,
+// the rotate and then the registration (§3.4 "Retrying with the same
+// key").
+func (m *Manager) relayMailboxUnknown(ctx context.Context) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.locked {
+		return ErrLocked
+	}
+	if pr := m.st.Relay.Pending; !m.relayRotation() || pr == nil || pr.Refused != "" {
+		return nil
+	}
+	m.relayKeyStep(ctx, false)
+	if m.locked {
+		return ErrLocked
+	}
+	m.drainOutbox(ctx)
+	return m.flushIfDirty(ctx)
+}
+
+// --- step 3: the second write ---
+
+// makePendingCurrent is the second write, in memory (§3.4 step 3); the
+// caller stores it. false: nothing changed (no randomness for a next key).
+// created: the mailbox was created afresh (a 201 past the grace).
+func (m *Manager) makePendingCurrent(created bool, now time.Time) bool {
+	pr := m.st.Relay.Pending
+	o := m.st.RotationOwed
+	var nextSeed []byte
+	if o != nil && !o.RelayKey.IsZero() && m.relayGateOpen() {
+		draw := suite.RandomBytes
+		if m.opt.KeyRand != nil {
+			draw = m.opt.KeyRand
+		}
+		s, err := draw(32)
+		if err != nil {
+			return false
+		}
+		nextSeed = s
+	}
+	// The old key is kept, with its anchor (§3.4 (a); §3.4.2 RK14 step
+	// 1: the key made current has none until a rotation away from it is
+	// attempted).
+	oldKey, oldSub := m.keys.relay, relayauth.EncodeKey(pubOf(m.keys.relay))
+	m.st.Relay.Old = append(m.st.Relay.Old, OldRelayKey{Seed: m.st.Relay.Seed, Mailbox: m.st.Relay.Mailbox, MadeOld: now.UTC(), Anchor: m.st.Relay.Anchor})
+	m.keys.oldRelay = append(m.keys.oldRelay, oldKey)
+	for len(m.rk.old) < len(m.keys.oldRelay)-1 {
+		m.rk.old = append(m.rk.old, nil)
+	}
+	m.rk.old = append(m.rk.old, m.relay)
+	newRelay := m.pendingRelayClient()
+	m.st.Relay.Seed, m.st.Relay.Mailbox, m.st.Relay.Anchor = pr.Seed, mailboxOf(m.keys.pendingRelay), time.Time{}
+	m.keys.relay, m.keys.pendingRelay = m.keys.pendingRelay, nil
+	m.relay, m.rk.pending = newRelay, nil
+	if m.limits == (Limits{}) && pr.Limits != nil {
+		m.limits = *pr.Limits
+	}
+	m.st.Relay.Pending = nil // its retry_after and refused mark go with it
+	m.resetCollector()
+
+	// The recipients again: a device or peer added since gets new tokens,
+	// those of one removed since are dropped; held tokens re-minted near
+	// their end (§7.2 "On unlock"), or minted for a key of the recipient's
+	// that changed since (§3.4.1 S3), and every one for a fresh mailbox.
+	if m.st.Relay.Recipients == nil {
+		m.st.Relay.Recipients = map[string]*RelayRecipient{}
+	}
+	keep := map[string]bool{}
+	for _, p := range m.relayRecipients() {
+		keep[p.ID] = true
+		h := pr.Held[p.ID]
+		sub := relayauth.EncodeKey(p.Relay.PK)
+		if h == nil || created {
+			m.mintHeld(pr, m.keys.relay, p, created, now)
+			h = pr.Held[p.ID]
+		} else {
+			if t, ok := issuedOf(h.Issued, TokStanding); !ok || t.Sub != sub ||
+				t.Exp.Sub(now) < StandingRemintBelow && m.standingTTL(p.Kind) > StandingRemintBelow {
+				if tok, it, err := m.mintOnKey(m.keys.relay, false, p, TokStanding, now); err == nil {
+					h.Standing, h.Issued = tok, replaceIssued(h.Issued, it)
+				}
+			}
+			if p.Kind == KindConnection {
+				if t, ok := issuedOf(h.Issued, TokReconnect); !ok || t.Sub != sub || handshake.ReconnectRemintDue(t.Exp, now) {
+					if tok, it, err := m.mintOnKey(m.keys.relay, false, p, TokReconnect, now); err == nil {
+						h.Reconnect, h.Issued = tok, replaceIssued(h.Issued, it)
+					}
+				}
+			}
+		}
+		m.st.Issued = append(m.st.Issued, h.Issued...)
+		// §3.4.1 S1, §3.4.2 RK13: the recipient's key for the vault (the
+		// old key) and the start of S1's clock. A recipient still in S1
+		// from an earlier rotation keeps its key for the vault and its
+		// clock: a reading of this release (the spec should confirm).
+		rec := m.st.Relay.Recipients[p.ID]
+		if rec == nil {
+			rec = &RelayRecipient{KeyFor: oldSub, S1Since: now.UTC()}
+			m.st.Relay.Recipients[p.ID] = rec
+		}
+		rec.Standing, rec.Reconnect, rec.UpdateDue = h.Standing, h.Reconnect, true
+	}
+	for id := range m.st.Relay.Recipients {
+		if !keep[id] {
+			delete(m.st.Relay.Recipients, id)
+		}
+	}
+
+	// What is audited, and the owed marks (§3.4, §11.14.10).
+	m.record(Activity{Kind: "identity.rotated", Ref: markRef(pr.Marks, pr.Named), Audit: true}, now)
+	if nextSeed != nil {
+		// A relay-key rotation is owed: the next key is stored in this
+		// write, which meets (and clears) that mark; the other marks clear
+		// at the next key's own second write.
+		o.RelayKey = time.Time{}
+		m.newPendingRelay(nextSeed, unionMarks(pr.Marks, pr.Next), unionMarks(pr.Named, pr.Marks), now)
+	} else {
+		m.clearMarks(pr.Marks)
+	}
+	m.dirty = true
+	return true
+}
+
+// resetCollector drops the collect session: the next one collects with
+// the key now current.
+func (m *Manager) resetCollector() {
+	if m.collector != nil {
+		_ = m.collector.Close()
+		m.collector = nil
+	}
+}
+
+// relayRefusedState reports the refused state, for vault.status (§10.2,
+// §3.4 "What the member sees").
+func (m *Manager) relayRefusedState() bool {
+	pr := m.st.Relay.Pending
+	return m.relayRotation() && pr != nil && pr.Refused != ""
+}
+
+// RelayKeyStatus is what a test or a host tool may read of the vault's own
+// relay-key rotation: no key and no token.
+type RelayKeyStatus struct {
+	Mailbox        string // the current mailbox
+	PendingMailbox string // the pending key's mailbox, "" for none
+	Refused        string // the pending key's refusal code (the refused state)
+	OldMailboxes   []string
+	Anchor         time.Time
+}
+
+// RelayKeyStatus returns the relay-key rotation's state (§3.4).
+func (m *Manager) RelayKeyStatus() RelayKeyStatus {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.st == nil {
+		return RelayKeyStatus{}
+	}
+	s := RelayKeyStatus{Mailbox: m.st.Relay.Mailbox, PendingMailbox: m.pendingMailbox(), Anchor: m.st.Relay.Anchor}
+	if pr := m.st.Relay.Pending; pr != nil {
+		s.Refused = pr.Refused
+	}
+	for _, o := range m.st.Relay.Old {
+		s.OldMailboxes = append(s.OldMailboxes, o.Mailbox)
+	}
+	return s
+}

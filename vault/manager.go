@@ -307,6 +307,9 @@ type Manager struct {
 	relay     Relay
 	limits    Limits
 	collector Collector
+	// rk is the runtime of the vault's own relay-key rotation (§3.4;
+	// relayrotate.go).
+	rk relayKeyRun
 
 	sessions map[string]*handshake.Keyring
 	awaiting map[string]*handshake.Responder
@@ -495,6 +498,10 @@ type keyset struct {
 	ik      ed25519.PrivateKey
 	kem     *suite.PrivateKey
 	retired []*suite.PrivateKey
+	// pendingRelay is RelayState.Pending's key, oldRelay the old relay
+	// keys of RelayState.Old, in order (§3.4).
+	pendingRelay ed25519.PrivateKey
+	oldRelay     []ed25519.PrivateKey
 }
 
 func (k *keyset) destroy() {
@@ -502,6 +509,10 @@ func (k *keyset) destroy() {
 		return
 	}
 	suite.Wipe(k.relay)
+	suite.Wipe(k.pendingRelay)
+	for _, o := range k.oldRelay {
+		suite.Wipe(o)
+	}
 	suite.Wipe(k.ik)
 	if k.kem != nil {
 		k.kem.Destroy()
@@ -883,7 +894,11 @@ func (m *Manager) loadKeys() error {
 		}
 		k.retired = append(k.retired, rk)
 	}
+	if err := k.loadRelayRotation(&m.st.Relay); err != nil {
+		return err
+	}
 	m.keys = k
+	m.rk.loaded(k)
 	return nil
 }
 
@@ -1094,6 +1109,8 @@ func (m *Manager) persistState(ctx context.Context, create bool) error {
 	m.unstored = nil
 	m.stateWritten = true
 	m.st.loadedClean = false // a write since the load: the store no longer says clean
+	// §3.4: step 2 follows the write that stored the pending key.
+	m.rk.stored = m.pendingMailbox()
 	// The header is behind until its write below succeeds.
 	m.headerBehind = true
 	if err := m.promote(); err != nil { // step 3, written below
@@ -1347,6 +1364,12 @@ func (m *Manager) zeroize() {
 			m.st.PendingUnlink.wipe() // the kept send key (§11.14.10); stored under the DEK
 		}
 		suite.Wipe(m.st.Relay.Seed)
+		if pr := m.st.Relay.Pending; pr != nil {
+			suite.Wipe(pr.Seed)
+		}
+		for _, o := range m.st.Relay.Old {
+			suite.Wipe(o.Seed)
+		}
 		suite.Wipe(m.st.IdentitySeed)
 		suite.Wipe(m.st.KEMSeed)
 		suite.Wipe(m.st.WakeSeed)

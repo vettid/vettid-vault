@@ -325,3 +325,28 @@ func TestRefusedReconnectTokenKeepsANewerOne(t *testing.T) {
 		t.Fatal("the refusal of an older reconnect token dropped the newer one")
 	}
 }
+
+// On the vault's own relay, a held token is also capped at the relay's
+// advertised max_token_lifetime_seconds (the relay refuses one over it);
+// a token for another relay is judged by §7.1's caps only.
+func TestHeldTokenOwnRelayLimit(t *testing.T) {
+	for _, own := range []bool{true, false} {
+		f := newR29Fx(t)
+		f.do(0, func(m *Manager, p *Peer) {
+			if p.Relay.URL != m.st.Relay.URL {
+				t.Fatal("setup: the pair is not on one relay")
+			}
+			m.limits.MaxTokenLifetimeSeconds = 200 * 86400
+			p.Reconnect = HeldToken{} // so that only the cap decides
+			if !own {
+				m.st.Relay.URL = "https://other-relay.example.org"
+			}
+		})
+		iat := f.clk.Add(4 * time.Minute)
+		tok := f.tokenFrom(1, iat, iat.Add(300*24*time.Hour), "rc-over-limit")
+		f.sendIssued(1, TokReconnect, tok)
+		if (f.p(0).Reconnect.Token == tok) == own || f.audited(0, "bad_issued_token") != own {
+			t.Fatalf("own relay %v: a 300-day reconnect token under a 200-day relay limit adopted %v", own, !own)
+		}
+	}
+}

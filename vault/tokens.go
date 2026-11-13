@@ -83,7 +83,8 @@ func (m *Manager) mint(p *Peer, kind string, ttl time.Duration, quota *relayauth
 // (peerwire.VerifyHeldToken); and, as the relay refuses a deposit under it
 // otherwise (RELAY-PROTOCOL §5.3), a lifetime exp - iat within §7.1's cap
 // for its kind (a reconnect token 365 days, any other token the vault
-// holds 30 days), an exp later than its iat, and an iat not later than now
+// holds 30 days; on the vault's own relay, at most that relay's
+// max_token_lifetime_seconds), an exp later than its iat, and an iat not later than now
 // plus the clock skew a message's ts may have (envelope.MaxClockSkewFuture). Without the cap, a
 // token with a far exp (an old copy holding the peer's relay key can mint
 // one) would win every "later exp" comparison and pin the held token to
@@ -96,6 +97,12 @@ func (m *Manager) heldToken(tok string, p *Peer, kind string) (HeldToken, error)
 	life := StandingMax
 	if kind == TokReconnect {
 		life = handshake.ReconnectTokenMaxLifetime
+	}
+	if lim := time.Duration(m.limits.MaxTokenLifetimeSeconds) * time.Second; lim > 0 && lim < life && p.Relay.URL == m.st.Relay.URL {
+		// The peer's relay is this vault's own: its advertised
+		// max_token_lifetime_seconds is known, and the relay refuses a
+		// token over it (token_invalid).
+		life = lim
 	}
 	if c.Exp.Sub(c.Iat) > life || !c.Exp.After(c.Iat) || c.Iat.After(m.now().Add(envelope.MaxClockSkewFuture)) {
 		return HeldToken{}, errHeldLifetime

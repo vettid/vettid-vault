@@ -339,6 +339,12 @@ type Manager struct {
 	// moveDecided: this unlock confirms or abandons a release move, which
 	// only its ok answer completes (the old header deleted, moved).
 	moveDecided bool
+	// storedHeaderSeq is the header_seq of the header last known stored
+	// (read at the load, or put by writeHeaderWith). m.hdr.HeaderSeq runs
+	// ahead of it after a put that failed: such a put may still have
+	// stored, so the seq is not used again, and an answer reports this
+	// one, a floor the phone may safely keep (§11.4, §13.2).
+	storedHeaderSeq uint64
 
 	sessions map[string]*handshake.Keyring
 	awaiting map[string]*handshake.Responder
@@ -682,7 +688,7 @@ func Create(ctx context.Context, p CreateParams) (*Manager, error) {
 		return nil, err
 	}
 	m := newManager(p.Options, st, hdr, dek)
-	m.storedView = nil
+	m.storedView, m.storedHeaderSeq = nil, 0 // its header is not stored yet
 	if len(hdr.AppKey) > 0 {
 		m.acked, m.pinned, m.enrolling = nil, ackedKey{}, true // the first header: the host confirms it
 	}
@@ -790,6 +796,9 @@ func newManager(o Options, st *State, hdr *Header, dek []byte) *Manager {
 		awaiting: map[string]*handshake.Responder{}, outgoing: map[string]*handshake.Initiator{},
 		ephemeralSeen: map[string]time.Time{}, rates: map[string]*rateWindow{}, requests: map[string]string{}, requestTypes: map[string]string{},
 		unlockID: newUnlockID(),
+	}
+	if hdr != nil {
+		m.storedHeaderSeq = hdr.HeaderSeq
 	}
 	if o.Now != nil {
 		m.openedAt = o.Now()
@@ -1211,6 +1220,7 @@ func (m *Manager) writeHeaderWith(ctx context.Context, features bool) error {
 		return err
 	}
 	m.headerVer = v
+	m.storedHeaderSeq = m.hdr.HeaderSeq
 	m.storedView = viewOf(m.hdr)
 	if len(m.hdr.AppKey) > 0 {
 		m.pin(m.hdr.AppKey, m.hdr.AppKeySeq) // the stored header names it now

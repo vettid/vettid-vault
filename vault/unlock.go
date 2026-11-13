@@ -756,7 +756,7 @@ func (m *Manager) resume(ctx context.Context, p AltUnlockParams, out *AltUnlockO
 		if err := m.writeHeader(ctx); err != nil && errors.Is(err, ErrSplitBrain) {
 			return nil, out.fail(CodeRetry, err)
 		}
-		out.HeaderSeq = m.hdr.HeaderSeq
+		out.HeaderSeq = m.storedHeaderSeq // not the seq of a write that failed
 		return fail(CodeNoBackup, ErrRecoveryNoBackup)
 	}
 	if err := m.loadKeys(); err != nil {
@@ -797,9 +797,10 @@ func (m *Manager) resume(ctx context.Context, p AltUnlockParams, out *AltUnlockO
 				return nil, out.fail(code, err) // zeroized (a split brain)
 			}
 			// The floors the phone keeps from answers (§11.4, §13.2): what the
-			// attempt wrote, as any answer after a write carries it.
+			// attempt stored, the header only as far as its put is known to
+			// have stored it.
 			out.RetryAfter = wait
-			out.StateSeq, out.HeaderSeq = m.st.StateSeq, m.hdr.HeaderSeq
+			out.StateSeq, out.HeaderSeq = m.st.StateSeq, m.storedHeaderSeq
 			return fail(code, err)
 		}
 	}

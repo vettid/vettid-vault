@@ -23,9 +23,12 @@ import (
 
 // phoneUnlockOut is the recovered phone's own unlock (a lost ok before its
 // first handshake carries the vault's bundle again, resumeLostOK).
-func (f *openFixture) phoneUnlockOut() (*Manager, *AltUnlockOutcome) {
+func (f *openFixture) phoneUnlockOut() (*Manager, *AltUnlockOutcome) { return f.phoneUnlockFloor(0) }
+
+// phoneUnlockFloor is phoneUnlockOut with the phone's header_seq floor.
+func (f *openFixture) phoneUnlockFloor(minHeaderSeq uint64) (*Manager, *AltUnlockOutcome) {
 	own := ReleaseEntry{PCR0: testRelease.PCR0, Number: testRelease.Number, Status: "active"}
-	return UnlockAlt(context.Background(), AltUnlockParams{Options: f.opts, VaultID: f.vid, UserGUID: "u1",
+	return UnlockAlt(context.Background(), AltUnlockParams{Options: f.opts, VaultID: f.vid, UserGUID: "u1", MinHeaderSeq: minHeaderSeq,
 		DeviceIK: f.phone.Public().(ed25519.PublicKey), PIN: testPIN, UnlockSecret: f.phoneUS,
 		VerifyDevice: func(k *UnlockKey) (json.RawMessage, error) { return k.Attestation, nil },
 		Manifest: func(seen uint64) (*ManifestView, error) {
@@ -474,4 +477,35 @@ func TestRelayRotSecondRecoveryInheritsTheKeyWithoutTheWait(t *testing.T) {
 	if rot, _ := rw.log(); len(rot) <= len(rot0) {
 		t.Fatalf("the inherited key waited: rotates %v", rot)
 	}
+}
+
+// The attempt before the bundle stores the state and then its header put
+// fails: the retry reports the header_seq last stored, not the one the
+// failed put used, so the phone's floor never passes the stored header
+// and its next unlock is not refused as a rollback.
+func TestRelayRotPhoneUnlockRetryReportsTheStoredHeaderSeq(t *testing.T) {
+	io := newInheritedOpen(t, func(rw *rotWorld, k, _ string) {
+		delete(rw.live, k)
+		rw.register = []error{relayErr(503, "")}
+	})
+	if err := io.m.Lock(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	stored := io.f.storedHeader().HeaderSeq
+	io.f.st.mu.Lock()
+	io.f.st.failHeader = 1 // the attempt's header put (its state put succeeds)
+	io.f.st.mu.Unlock()
+	m, uo := io.f.phoneUnlockOut()
+	if m != nil || uo.Code != CodeRetry || uo.RetryAfter != freshMailboxWait {
+		t.Fatalf("unlock 1: %+v", uo)
+	}
+	if h := io.f.storedHeader(); uo.HeaderSeq != stored || h.HeaderSeq != stored {
+		t.Fatalf("retry reports header_seq %d; stored %d (before %d)", uo.HeaderSeq, h.HeaderSeq, stored)
+	}
+	io.f.clock = io.f.clock.Add(freshMailboxWait)
+	m, uo = io.f.phoneUnlockFloor(uo.HeaderSeq)
+	if m == nil || !uo.OK {
+		t.Fatalf("the next unlock with the phone's floor: %+v", uo)
+	}
+	m.Crash()
 }

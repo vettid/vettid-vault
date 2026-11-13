@@ -103,9 +103,15 @@ func TestRelayRotInheritedCompletedAtTheOpen(t *testing.T) {
 	if err := io.m.ProcessBatch(context.Background(), &fakeCollector{}, nil); err != nil {
 		t.Fatal(err)
 	}
-	rs, _ = io.state()
+	rs, owed := io.state()
 	if len(rs.Old) < 1 || rs.Old[0].Mailbox != io.k || !rs.Old[0].Anchor.Equal(opened) {
 		t.Fatalf("not completed after the wait: %+v", rs)
+	}
+	// The recovery's rotation owed a relay-key rotation: the completion
+	// stores the owed next key, which meets the mark, and the same step
+	// completes it at once (relayKeyStep): both keys are now old ones.
+	if len(rs.Old) < 2 || rs.Old[1].Mailbox != io.p || rs.Pending != nil || owed != nil && !owed.RelayKey.IsZero() {
+		t.Fatalf("the owed next key: relay %+v, owed %+v", rs, owed)
 	}
 }
 

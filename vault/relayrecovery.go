@@ -12,14 +12,14 @@ import (
 // key", 0.85.4; owner decisions of 2026-11-05, O5b and "rule 2"; §3.4.2
 // RK14 step 1 "At a recovery's open"). Only with Options.RelayKeyRotation.
 //
-// A recovery's open completes a relay key left pending by an earlier run in
-// one attempt, before the phone gets the vault's address and before its
+// A recovery's open makes one attempt at a relay key left pending by an
+// earlier run, before the phone gets the vault's address and before its
 // step-2 write, and writes nothing before that write:
-//   - the rotate (or registration) succeeds: the step-2 write is that key's
-//     second write, and the recovery's own rotation then stores its new key
-//     as pending; a registration past the grace (a mailbox that may have
-//     been created afresh) leaves the key pending instead, with the time
-//     of the answer, until freshMailboxWait has run;
+//   - the rotate (or registration) succeeds: the key stays pending, with
+//     the time of a 201 (Created) or marked Unconfirmed (an answer that its
+//     mailbox exists: a lost run of the open may have had it made afresh),
+//     and is completed by the next attempt once freshMailboxWait has run;
+//     the recovery's rotation owes a relay-key rotation, as with no answer;
 //   - no definite answer: the key stays pending, and the recovery's
 //     rotation owes a relay-key rotation, as any rotation made while a key
 //     is pending. Its attempts never wait for the recovered phone (it is

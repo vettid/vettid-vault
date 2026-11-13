@@ -46,10 +46,11 @@ import (
 //
 // An open cannot tell whether a lost run of it (a failed step-1 or step-2
 // write, a crash after the attempt) learnt anything of the relay: a key
-// still pending after the attempt with no stored answer time is marked
-// Unconfirmed and waits freshMailboxWait from the mark. Residual: a fresh key registered at an open whose
-// step-2 write then fails leaves an empty mailbox at the relay, since
-// nothing is written before step 2.
+// still pending after the attempt, and not refused, is marked Unconfirmed
+// and waits freshMailboxWait from the mark; an open never completes it.
+// Residual: a fresh key registered at an open whose step-2 write then
+// fails leaves an empty mailbox at the relay, since nothing is written
+// before step 2.
 
 // inheritedKeyAtOpen is that attempt; the step-2 write stores what it
 // changed. Called in the open, with the lock held, before the recovery's
@@ -79,19 +80,23 @@ func (m *Manager) inheritedKeyAtOpen(ctx context.Context, p RecoveryOpenParams, 
 	// Any recovery open: a lost run of it (its step-1 or step-2 write
 	// failed, or it crashed after the attempt) may have had this key's
 	// mailbox made afresh, that answer's time lost with it, and nothing
-	// stored tells this open from a first one. Whatever this attempt's
-	// outcome, a key still pending after it with no stored answer time is
-	// marked Unconfirmed now (a lost answer came before), stored by the
-	// step-2 write: it is not completed before freshMailboxWait has run
-	// from the mark, so no later attempt (a sooner retry, the recovered
-	// phone's unlock) completes it inside the tombstone's window. The mark
-	// is not Created: a real 201 after it still starts the wait. It costs a
-	// recovery that inherits a pending key one wait at most. Not a key left
-	// in the refused state: relayKeyAttempt tries that one at the next
-	// unlock before any wait; a 201 then starts the wait, and an answer
-	// that the mailbox exists completes it with its tokens minted again.
+	// stored tells this open from a first one, nor a 201 of that run from
+	// an older stored Created. Whatever this attempt's outcome, a key still
+	// pending after it, not refused and not just answered 201 by this
+	// attempt, is marked Unconfirmed now (a lost answer came before),
+	// stored by the step-2 write: it is not completed before
+	// freshMailboxWait has run from the mark, so no later attempt (a sooner
+	// retry, the recovered phone's unlock) completes it inside the
+	// tombstone's window. The mark is not Created: a real 201 after it
+	// still starts the wait. It costs a recovery that inherits a pending
+	// key a wait (and a second when a later registration makes the mailbox
+	// afresh). Not a key left in the refused state: relayKeyAttempt tries
+	// that one at the next unlock before any wait; a 201 then starts the
+	// wait, and an answer that the mailbox exists completes it with its
+	// tokens minted again.
+	answered201 := false
 	defer func() {
-		if cur := m.st.Relay.Pending; cur == pr && pr.Created.IsZero() && pr.Refused == "" {
+		if cur := m.st.Relay.Pending; cur == pr && pr.Refused == "" && !answered201 {
 			at := m.now()
 			pr.Unconfirmed = at.UTC()
 			m.rk.next = at.Add(freshMailboxWait)
@@ -116,18 +121,17 @@ func (m *Manager) inheritedKeyAtOpen(ctx context.Context, p RecoveryOpenParams, 
 		pr.Created, pr.Refused, pr.RetryAfter = at.UTC(), "", time.Time{}
 		pr.Unconfirmed = time.Time{} // a real answer's wait replaces a mark
 		m.rk.next = at.Add(freshMailboxWait)
-		return
-	case out == relayDone && pr.Created.IsZero():
-		// The relay answers that the key's mailbox exists: it may have been
-		// made afresh by a lost run of this open, so it is not completed now;
-		// the mark is stored above. A mailbox made long before only waits
-		// once, needlessly.
-		pr.Refused, pr.RetryAfter = "", time.Time{}
+		answered201 = true
 		return
 	case out == relayDone:
-		if m.makePendingCurrent(mayBeFresh(pr, created), now) {
-			return
-		}
+		// The relay answers that the key's mailbox exists: it may have been
+		// made afresh by a lost run of this open (whatever Created holds,
+		// that run's 201 may be newer), so an open never completes it; the
+		// mark is stored above, and the next attempt after its wait
+		// completes it. A mailbox made long before only waits once,
+		// needlessly.
+		pr.Refused, pr.RetryAfter = "", time.Time{}
+		return
 	case out == relayRefused && byRotate:
 		m.relayKeyFailedAt(now)
 		named := pr.Named

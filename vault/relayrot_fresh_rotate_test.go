@@ -98,3 +98,23 @@ func TestRelayRotFreshWaitNotAuditedAtUnlock(t *testing.T) {
 		t.Fatalf("at the unlock within the wait: audits %d (before %d), attempts %v %v", n, n0, rot[len(rot0):], reg[len(reg0):])
 	}
 }
+
+// The wait covers RELAY-PROTOCOL §6.10's 90 seconds after the deletion
+// even when the vault's clock is behind the relay's by all of §4.1's 90
+// seconds: a token minted at the answer + freshMailboxWait by the vault's
+// clock has iat at least the deletion + 90 s by the relay's.
+func TestRelayRotFreshMailboxWaitCoversTheSkew(t *testing.T) {
+	if freshMailboxWait != 181*time.Second {
+		t.Fatalf("freshMailboxWait %v", freshMailboxWait)
+	}
+	deletion := time.Date(2026, 11, 13, 12, 0, 0, 0, time.UTC) // relay's clock
+	for _, skew := range []time.Duration{0, 30 * time.Second, collectedToWindow} {
+		for _, lag := range []time.Duration{0, 500 * time.Millisecond, 10 * time.Second} {
+			answerVault := deletion.Add(lag).Add(-skew) // the vault's clock runs behind by skew
+			iatRelay := answerVault.Add(freshMailboxWait).Truncate(time.Second).Add(skew)
+			if iatRelay.Before(deletion.Add(freshMailboxTombstone)) {
+				t.Fatalf("skew %v, lag %v: iat %v before the tombstone's bound", skew, lag, iatRelay)
+			}
+		}
+	}
+}

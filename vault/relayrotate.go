@@ -727,17 +727,20 @@ func (m *Manager) relayKeyCall(ctx context.Context) (out relayOutcome, created, 
 // tokens (the second write, every held token minted again with iat at
 // that time). RELAY-PROTOCOL §6.10: a mailbox made again at an id that
 // had a tombstone refuses every token with iat before the deletion plus
-// 90 seconds; the deletion came before the answer, so the answer plus 90
-// seconds is never earlier. The extra second covers iat's truncation to
-// whole seconds. Minting at once with a later iat would not do: the relay
-// checks iat <= now strictly (RELAY-PROTOCOL §5.3 step 5).
-//
-// It assumes the vault's clock is not behind the relay's by more than the
-// margin it leaves: the second, plus however long the answer came after
-// the deletion. RELAY-PROTOCOL §4.1's freshness window bounds the skew of
-// a signed request only to 90 seconds, so a vault clock behind the
-// relay's within that window could still mint too early.
-const freshMailboxWait = 91 * time.Second
+// 90 seconds, by the relay's clock; the deletion came before the answer.
+// The wait is that 90 seconds, plus the 90 seconds of skew RELAY-PROTOCOL
+// §4.1's freshness window allows between the vault's clock and the
+// relay's (a vault clock behind the relay's by up to that much still
+// mints after the tombstone's bound), plus a second for iat's truncation
+// to whole seconds. Minting at once with a later iat would not do: the
+// relay checks iat <= now strictly (RELAY-PROTOCOL §5.3 step 5). A
+// reading of this release (decision of 2026-11-13; the spec should
+// confirm).
+const freshMailboxWait = freshMailboxTombstone + collectedToWindow + time.Second
+
+// freshMailboxTombstone is RELAY-PROTOCOL §6.10's 90 seconds after a
+// deletion before which a mailbox made again refuses a token's iat.
+const freshMailboxTombstone = 90 * time.Second
 
 // freshWaitRuns reports whether pr waits for its mailbox made afresh.
 func (m *Manager) freshWaitRuns(pr *PendingRelay) bool {

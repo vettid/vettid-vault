@@ -298,3 +298,176 @@ func TestRuleUHandshakeForeignSenderRefused(t *testing.T) {
 		t.Fatal("an hs.resp from a foreign key completed the handshake, or ended it")
 	}
 }
+
+// rkMintK1 mints a reconnect token of K1's mailbox for side 0.
+func (f *r29Fx) rkMintK1(jti string) string {
+	f.t.Helper()
+	k1 := rkKey(rkK1)
+	tok, err := relayauth.MintToken(k1, relayauth.Claims{Iss: relayauth.MailboxID(rkPub(k1)), Sub: relayauth.EncodeKey(f.pk(0)),
+		Aud: "https://relay.example.org", Iat: f.clk.Add(-time.Minute), Exp: f.clk.Add(300 * 24 * time.Hour), Jti: jti})
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	return tok
+}
+
+// RK6: an owed restart ends when another epoch is established after the
+// follow ("dropped once P's reconnect is established"): a reconnect token
+// arriving later starts nothing, and the working connection is not made
+// stale 60 days on.
+func TestRK6OwedRestartEndsAtAnEstablishment(t *testing.T) {
+	f := rkPair(t)
+	f.rekey(1)
+	f.deliver(1, 0, kHSInit) // side 0 answers side 1's rekey (pinned to K)
+	f.do(0, func(m *Manager, p *Peer) { m.startReconnect(p, f.clk) })
+	f.deliver(0, 1, kHSResp)
+	f.lose(0, 1, kHSInit)
+	fin := f.takeKind(1, 0, kHSFin)
+	if len(fin) != 1 {
+		t.Fatal("setup: no hs.fin")
+	}
+	f.rkSend(false, false)
+	f.deliver(1, 0, kOther)
+	if !f.followedK1() || f.p(0).RelayRestart == nil {
+		t.Fatal("setup: no owed restart")
+	}
+	before := append([]byte(nil), f.cur(0)...)
+	msg := fin[0]
+	msg.MsgID = "take-zz-fin"
+	msg.Sender = relayauth.EncodeKey(rkPub(rkKey(rkK1))) // S2: deposited again with the new key
+	f.process(0, msg)
+	if bytes.Equal(f.cur(0), before) || f.p(0).RelayRestart != nil {
+		t.Fatal("the epoch was not established, or the owed restart outlived it")
+	}
+	f.do(1, func(m *Manager, p *Peer) {
+		m.sendTo(p, tokenIssuedType, peerwire.TokenIssuedBody(TokReconnect, f.rkMintK1("p-rc3")), f.clk)
+	})
+	f.deliver(1, 0, kOther)
+	if len(f.m(0).st.Outgoing) != 0 {
+		t.Fatal("a reconnect was started from the epoch before the established one")
+	}
+	f.advance(RelayRestartWait + time.Minute)
+	f.tick(0)
+	if f.p(0).State != PeerActive {
+		t.Fatal("a working connection was made stale")
+	}
+}
+
+// RK6: an owed restart whose epoch is no longer the current one (and the
+// current one is not demoted) is dropped when a token arrives, not
+// started.
+func TestRK6OwedRestartDroppedForANewerEpoch(t *testing.T) {
+	d, _, p, _ := rkConnU(t)
+	p.Reconnect = HeldToken{Token: rkTok(t, rkKey(0x75), rkOwn(d), time.Now().Add(100*24*time.Hour), "rc"), Exp: time.Now().Add(100 * 24 * time.Hour)}
+	d.m.mu.Lock()
+	defer d.m.mu.Unlock()
+	if !d.m.heldReconnectForCurrent(p, time.Now()) {
+		t.Fatal("setup: no reconnect token for the current mailbox")
+	}
+	p.RelayRestart = &RelayRestart{Named: []byte("an-older-epoch-id-000000000000"), Since: time.Now()}
+	d.m.rk6Tick(p, time.Now())
+	if p.RelayRestart != nil || len(d.m.st.Outgoing) != 0 {
+		t.Fatal("a restart naming an epoch no longer current was started or kept")
+	}
+}
+
+// RK6's give-up after 60 days is "The reconnect bound"'s "no reconnect
+// token", which is not judged while carried tokens wait (§6.3.1).
+func TestRK6GiveUpNotWhileCarriedTokensWait(t *testing.T) {
+	d, _, p, _ := rkConnU(t)
+	now := time.Now()
+	p.Epochs[len(p.Epochs)-1].Mine = false
+	p.Confirmed = nil
+	p.Carried = []CarriedTokens{{Epoch: append([]byte(nil), p.LastEpochID...), Standing: HeldToken{Token: "v4.public.VEVTVA", Exp: now.Add(20 * 24 * time.Hour)}, Since: now}}
+	p.RelayRestart = &RelayRestart{Named: append([]byte(nil), p.LastEpochID...), Since: now.Add(-RelayRestartWait - time.Hour)}
+	d.m.mu.Lock()
+	defer d.m.mu.Unlock()
+	if !d.m.carriedWait(p, now) {
+		t.Fatal("setup: carried tokens do not wait")
+	}
+	d.m.rk6Tick(p, now)
+	if p.State == PeerStale {
+		t.Fatal("made stale while carried tokens wait")
+	}
+}
+
+// Rule U revokes the reconnect tokens of handshakes not yet activated that
+// name the passed key: an answer's (its epoch then established keeps it
+// revoked, recorded once) and a pending epoch's.
+func TestRuleURevokesInFlightReconnectTokens(t *testing.T) {
+	t.Run("an answer's, kept revoked at its activation", func(t *testing.T) {
+		f := rkPair(t)
+		f.do(1, func(m *Manager, p *Peer) { m.startReconnect(p, f.clk) })
+		f.deliver(1, 0, kHSInit)
+		var jti string
+		for _, aw := range f.m(0).st.Awaiting {
+			for _, it := range aw.Issued {
+				if it.Kind == TokReconnect {
+					jti = it.JTI
+				}
+			}
+		}
+		if jti == "" {
+			t.Fatal("setup: no answer with a reconnect token")
+		}
+		f.rkSend(true, false)
+		f.deliver(1, 0, kOther)
+		if !f.followedK1() || !rkDenied(f.m(0), jti) {
+			t.Fatal("the answer's reconnect token naming the passed key was not revoked")
+		}
+		f.deliver(0, 1, kHSResp)
+		fin := f.takeKind(1, 0, kHSFin)
+		if len(fin) != 1 {
+			t.Fatal("setup: no hs.fin")
+		}
+		msg := fin[0]
+		msg.MsgID = "take-zz-fin"
+		msg.Sender = relayauth.EncodeKey(rkPub(rkKey(rkK1)))
+		f.process(0, msg)
+		if len(f.m(0).st.Awaiting) != 0 {
+			t.Fatal("setup: the reconnect was not established")
+		}
+		n := 0
+		for _, it := range f.m(0).st.Issued {
+			if it.JTI == jti {
+				n++
+				if !it.Denied {
+					t.Fatal("the revoked token was recorded again as live at the activation")
+				}
+			}
+		}
+		if n != 1 {
+			t.Fatalf("the token is recorded %d times", n)
+		}
+	})
+	t.Run("a pending epoch's", func(t *testing.T) {
+		f := rkPair(t)
+		f.do(0, func(m *Manager, p *Peer) { m.startReconnect(p, f.clk) })
+		f.deliver(0, 1, kHSInit)
+		f.deliver(1, 0, kHSResp)
+		pe := f.p(0).Pending
+		if pe == nil {
+			t.Fatal("setup: no pending epoch")
+		}
+		var jti string
+		for _, it := range pe.Issued {
+			if it.Kind == TokReconnect {
+				jti = it.JTI
+			}
+		}
+		f.rkSend(true, false)
+		f.deliver(1, 0, kOther)
+		if !f.followedK1() || jti == "" || !rkDenied(f.m(0), jti) {
+			t.Fatal("the pending epoch's reconnect token naming the passed key was not revoked")
+		}
+	})
+}
+
+func rkDenied(m *Manager, jti string) bool {
+	for _, it := range m.st.Issued {
+		if it.JTI == jti && it.Denied {
+			return true
+		}
+	}
+	return false
+}

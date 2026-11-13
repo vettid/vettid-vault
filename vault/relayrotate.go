@@ -327,11 +327,19 @@ func (m *Manager) ownRelays() []Relay {
 
 // revoke sends a revocation to the mailboxes that issued what it names
 // (§3.4.1 S7): a token by its jti to the one that issued it, a sender's
-// key to the current mailbox and every old one kept. An old mailbox
-// already gone (mailbox_unknown) took its tokens with it.
+// key to the current mailbox and every old one kept. An old key revokes
+// only during its grace (§3.4 (a)): not once RK14 step 1 has ended its
+// mailbox's collects or its stop is due (13 days after its anchor, before
+// the relay's grace ends). An old mailbox already gone (mailbox_unknown)
+// took its tokens with it.
 func (m *Manager) revoke(ctx context.Context, kind, value string) error {
 	if !m.relayRotation() || len(m.st.Relay.Old) == 0 {
 		return m.relay.Revoke(ctx, kind, value)
+	}
+	now := m.now()
+	inGrace := func(i int) bool {
+		o := &m.st.Relay.Old[i]
+		return o.Collect.Stopped.IsZero() && !oldStopDue(o, now)
 	}
 	rels := []Relay{m.relay}
 	switch kind {
@@ -340,7 +348,7 @@ func (m *Manager) revoke(ctx context.Context, kind, value string) error {
 			if t.JTI == value && t.Iss != "" && t.Iss != m.st.Relay.Mailbox {
 				rels = nil
 				for i := range m.st.Relay.Old {
-					if m.st.Relay.Old[i].Mailbox == t.Iss {
+					if m.st.Relay.Old[i].Mailbox == t.Iss && inGrace(i) {
 						rels = append(rels, m.oldRelayClient(i))
 					}
 				}
@@ -348,7 +356,9 @@ func (m *Manager) revoke(ctx context.Context, kind, value string) error {
 		}
 	case "sub":
 		for i := range m.st.Relay.Old {
-			rels = append(rels, m.oldRelayClient(i))
+			if inGrace(i) {
+				rels = append(rels, m.oldRelayClient(i))
+			}
 		}
 	}
 	var err error

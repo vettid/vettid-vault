@@ -14,7 +14,7 @@ import (
 	"github.com/vettid/vettid-vault/vms/suite"
 )
 
-// VAULT-MESSAGING 0.90.3 §3.4.1 Table A, the rows "Earlier, before its
+// VAULT-MESSAGING 0.90.4 §3.4.1 Table A, the rows "Earlier, before its
 // cut-off" and "Earlier, after its cut-off", in a real pair: side 0 (Q)
 // follows side 1 (P) from P's relay key K, the one P still deposits with,
 // to a key K' (as rule U or RK8 will, through followRelayLinks), with the

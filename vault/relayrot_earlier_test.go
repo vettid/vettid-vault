@@ -14,7 +14,7 @@ import (
 	"github.com/vettid/vettid-vault/vms/suite"
 )
 
-// Relay-key rotation, receiving side (VAULT-MESSAGING 0.90.3 §3.4.1
+// Relay-key rotation, receiving side (VAULT-MESSAGING 0.90.4 §3.4.1
 // "Terms"): a peer's earlier relay keys, kept with their followed relay
 // link and cut-off until no token the vault issued to them can still
 // deposit; only with Options.RelayKeyRotation.

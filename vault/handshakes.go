@@ -413,7 +413,10 @@ func (m *Manager) respondReconnect(pi *handshake.PendingInit, p *Peer, sender ed
 	// not the one on record; otherwise the one on record, as before.
 	// The address must be the one the vault keeps for that earlier key
 	// (its URL as it was on record): an hs.init cannot send the answer
-	// elsewhere. Any other is refused as a bad token.
+	// elsewhere. Any other is refused as a bad token. This is defence in
+	// depth: answerTo is the kept address whatever the hs.init names, and
+	// the tokens' aud must be its URL (heldTokenFrom), so a from.relay
+	// naming another URL could not move the answer even without it.
 	answerTo := p.Relay
 	if rstate == relayEarlierBefore {
 		answerTo = PeerRelay{}

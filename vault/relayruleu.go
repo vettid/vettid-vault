@@ -37,7 +37,10 @@ import (
 //  5. From an earlier key after its cut-off, the update's identity links
 //     are judged as Table A's identity.rotate column judges that row: all
 //     already followed, they change nothing and only R29-K9 is judged;
-//     any other is refused superseded_relay (earlierAfterRotations).
+//     any other is refused superseded_relay (earlierAfterRotations). This
+//     exception is a reading of this release (rule U and RK5 say nothing
+//     of the sender's row for the update's identity links); the spec
+//     should confirm it.
 //  6. RK5: the identity links (Table B, H5, the demotion rules, R29-K9)
 //     and the ik requirement; a duplicate is then answered; otherwise the
 //     follow, in one state write: the links and cut-offs, relay.pk
@@ -604,8 +607,9 @@ func (m *Manager) relayAwaitsRC(p *Peer, ctx []byte, now time.Time) bool {
 // otherwise the update is refused superseded_relay with none of them
 // applied. A relay link from that key can be replayed by anyone who saw
 // it (it is the same for every recipient), so it must not carry an ik
-// link that an identity.rotate from the same key could not. It reports
-// whether the update was refused.
+// link that an identity.rotate from the same key could not. A reading of
+// this release; the spec should confirm it. It reports whether the update
+// was refused.
 func (m *Manager) earlierAfterRotations(p *Peer, sender ed25519.PublicKey, rots []*handshake.Rotation, now time.Time) bool {
 	if len(rots) == 0 || m.relayStateOf(p, sender) != relayEarlierAfter {
 		return false

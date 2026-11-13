@@ -63,3 +63,34 @@ func TestRK10UpdateIKRequirementFailsNoIdentityLinkFollowed(t *testing.T) {
 		t.Fatal("the update was followed, or not refused ancestor_ik")
 	}
 }
+
+// Rule U with Table A's identity.rotate row: an update from an earlier
+// relay key after its cut-off whose identity links are only partly
+// followed (an already-followed link, then ik -> a new ik) is refused
+// superseded_relay, and the ik is unchanged: a relay link is the same for
+// every recipient, so such an update may come from an old copy.
+func TestRuleUEarlierAfterCutoffPartlyFollowedRotationsRefused(t *testing.T) {
+	f := rkPair(t)
+	f.rotate(1)
+	f.lose(1, 0, kHSInit)
+	f.deliver(1, 0, kRotate)
+	ik1 := append([]byte(nil), f.m(1).keys.ik.Public().(ed25519.PublicKey)...)
+	f.rkSend(true, true)
+	f.deliver(1, 0, kOther)
+	if !f.followedK1() || !bytes.Equal(f.p(0).IK, ik1) {
+		t.Fatal("setup: the update was not followed")
+	}
+	f.rotate(1)
+	f.lose(1, 0, kRotate)
+	f.lose(1, 0, kHSInit)
+	n := f.activityCount(0, "drop.peer_key", "superseded_relay")
+	// From K (earlier, after its cut-off): [ik0 -> ik1 (followed), ik1 -> ik2].
+	f.rkSendRots(func(m *Manager, _ *Peer) []*handshake.Rotation { return m.ownRotationsSince(0) })
+	f.deliver(1, 0, kOther)
+	if !bytes.Equal(f.p(0).IK, ik1) {
+		t.Fatal("an update from an earlier key after its cut-off moved the ik")
+	}
+	if f.activityCount(0, "drop.peer_key", "superseded_relay") != n+1 {
+		t.Fatal("the update was not refused superseded_relay")
+	}
+}

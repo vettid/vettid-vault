@@ -436,8 +436,15 @@ func TestRelayLinksNotAnArray(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Both bodies parse as they are, so a refusal below is the member's.
+	if _, err := ParseInit(ib); err != nil {
+		t.Fatalf("hs.init as made: %v", err)
+	}
+	if _, err := ParseResp(rb, PurposeReconnect); err != nil {
+		t.Fatalf("hs.resp as made: %v", err)
+	}
 	link := json.RawMessage(r.RelayLinks[0].Marshal())
-	for name, v := range map[string]any{"a string": "x", "an object": link, "a number": 1} {
+	for name, v := range map[string]any{"a string": "x", "an object": link, "a number": 1, "null": json.RawMessage("null")} {
 		if _, err := ParseInit(replaceMember(t, ib, "relay_links", v)); !errors.Is(err, ErrBody) || errors.Is(err, ErrRelayLink) {
 			t.Errorf("hs.init relay_links as %s: %v, want ErrBody without ErrRelayLink", name, err)
 		}

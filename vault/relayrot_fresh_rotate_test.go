@@ -81,8 +81,9 @@ func TestRelayRotFreshWaitNotAuditedAtUnlock(t *testing.T) {
 	if err := fx.credRotate(); err != nil {
 		t.Fatal(err)
 	}
+	cur := fx.mailbox() // read before the relay's lock: the vault takes its own first
 	fx.w.mu.Lock()
-	delete(fx.w.live, fx.mailbox()) // past the grace
+	delete(fx.w.live, cur) // past the grace
 	fx.w.mu.Unlock()
 	fx.setClk(fx.clk.Add(2 * time.Minute))
 	fx.batch()

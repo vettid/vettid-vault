@@ -248,8 +248,9 @@ func TestRelayRotAfterTheGraceRegisters(t *testing.T) {
 		}
 		pmb := fx.pendingMailbox()
 		held := fx.pending().Held["c1"].Standing
+		cur := fx.mailbox() // read before the relay's lock: the vault takes its own first
 		fx.w.mu.Lock()
-		delete(fx.w.live, fx.mailbox()) // the grace ended
+		delete(fx.w.live, cur) // the grace ended
 		if !fresh {
 			fx.w.live[pmb] = true // an earlier rotate made it
 		}
@@ -291,8 +292,9 @@ func TestRelayRotAfterTheGraceRegisters(t *testing.T) {
 // state; the anchor stays (it was not the rotate that was refused).
 func TestRelayRotRegistrationRefused(t *testing.T) {
 	fx := newRotFx(t)
+	cur := fx.mailbox() // read before the relay's lock: the vault takes its own first
 	fx.w.mu.Lock()
-	delete(fx.w.live, fx.mailbox())
+	delete(fx.w.live, cur)
 	fx.w.register = []error{relayErr(400, "bad_request")}
 	fx.w.mu.Unlock()
 	if err := fx.credRotate(); err != nil {
@@ -312,8 +314,9 @@ func TestRelayRotMailboxUnknownStartsTheRotate(t *testing.T) {
 		t.Fatal(err)
 	}
 	pmb := fx.pendingMailbox()
+	cur := fx.mailbox() // read before the relay's lock: the vault takes its own first
 	fx.w.mu.Lock()
-	delete(fx.w.live, fx.mailbox())
+	delete(fx.w.live, cur)
 	fx.w.mu.Unlock()
 	fx.setClk(fx.clk.Add(2 * time.Minute))
 	if err := fx.m.relayMailboxUnknown(context.Background()); err != nil {

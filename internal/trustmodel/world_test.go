@@ -1013,6 +1013,9 @@ func (p *Party) collectRound(max int) int {
 			continue
 		}
 		set = append(set, b)
+		for _, m := range ms {
+			p.noteGiven(m) // RK14 step 1
+		}
 		if p.Copy {
 			w.copyTook(p, b, ms, "collected")
 		}
@@ -1063,6 +1066,7 @@ func (p *Party) collectRound(max int) int {
 		p.write()
 		for _, m := range acks {
 			w.R.ack(m.Box, m.ID)
+			p.noteAcked(m) // RK14 step 1
 		}
 		p.flush()
 		p.startWanted()

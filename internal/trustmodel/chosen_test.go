@@ -88,11 +88,14 @@ import (
 //     (one anchor per peer, relay_held's since) until a follow re-addresses
 //     it (fresh ts, new seq), or since + 60 days, when every held entry
 //     ends not delivered and the connection becomes stale; a handshake
-//     message is not held; after the limit, mailbox_unknown ends an entry
-//     at once until the episode resets at a follow.
-//   - TELL: RK14's telling: Q keeps its 201'd entries 60 days and pins them
-//     at a follow; P sends relay.mailbox.closed{mailbox, last_msg_id} when
-//     its collects of an old mailbox end, a durable message under its epoch
+//     message (hs.confirm included) is not held but ends as a refusal of
+//     its carried token does; after the limit, mailbox_unknown ends an
+//     entry at once until the episode resets at a follow. Off: 0.88's
+//     terminal mailbox_unknown (the entry ends, the peer becomes stale).
+//   - TELL: RK14's telling: Q keeps its 201'd entries (the member's
+//     messages and relay.mailbox.closed) 60 days and pins them at a follow;
+//     P sends relay.mailbox.closed{mailbox, last_msg_id}, last_msg_id from
+//     its own acks, when its collects of an old mailbox end, a durable message under its epoch
 //     (it waits for S2, and is held while P has no epoch); Q re-deposits
 //     the pinned entries above last_msg_id (fresh ts) and counts
 //     message.delivery_unconfirmed 60 days after the follow without one; P
@@ -674,13 +677,13 @@ func gapBucket(d int64) string {
 
 const keepFor = 60 * day // RK14 step 3: Q's window and pin; step 2: P's dedupe after the telling
 
-// tell: mailbox k ended at the relay with msgs in it. Its owner's collects
-// of k have ended (at the grace's end, or earlier with mailbox_unknown, or
-// when the key was deleted), and P records last_msg_id: every message
-// still in k when it ended P never acked, and the relay's msg_ids are in
-// arrival order, so it is the smallest such id less one (the relay's last
-// id if none). Model shortcut: P's record is made here, in its stored
-// state, and P sends the telling at its next tick (an unlocked P's write).
+// tell: mailbox k ended at the relay. Its owner's collects of k have
+// ended (at the grace's end, or earlier with mailbox_unknown, or when the
+// key was deleted), and P records last_msg_id from its own acks: the
+// largest msg_id up to which it acked every message the relay gave it
+// from k (collectRec). Model shortcut: the record is made here, in its
+// stored state, and P sends the telling at its next tick (an unlocked P's
+// write).
 func (w *World) tell(k Key, msgs []*RMsg) {
 	if !w.ch("TELL") {
 		return
@@ -690,14 +693,52 @@ func (w *World) tell(k Key, msgs []*RMsg) {
 		return
 	}
 	owner := w.party(o)
-	last := w.R.next
-	for _, m := range msgs {
-		last = min(last, m.ID-1)
-	}
-	t := tellRec{Box: k, Last: last}
+	t := tellRec{Box: k, Last: owner.st.Coll[k].lastMsgID()}
 	owner.st.ToTell = append(owner.st.ToTell, t)
 	owner.stored.ToTell = append(owner.stored.ToTell, t)
 	w.stat("TELL: collects of an old mailbox ended")
+}
+
+// collectRec: per mailbox, what the relay gave P and P acked (RK14 step 1).
+type collectRec struct {
+	MaxAcked int   // the largest msg_id P acked
+	Unacked  []int // msg_ids given and not (yet) acked
+}
+
+// lastMsgID: the largest msg_id up to which P acked every message given.
+// The relay gives a mailbox's messages oldest first, so that is just below
+// the lowest given and unacked one, or the largest acked. A record lost
+// at a crash before its write errs low, which costs nothing (P dedupes).
+func (c collectRec) lastMsgID() int {
+	if len(c.Unacked) == 0 {
+		return c.MaxAcked
+	}
+	return slices.Min(c.Unacked) - 1
+}
+
+// noteGiven / noteAcked: P's collect record (TELL only).
+func (p *Party) noteGiven(m *RMsg) {
+	if !p.w.ch("TELL") {
+		return
+	}
+	if p.st.Coll == nil {
+		p.st.Coll = map[Key]collectRec{}
+	}
+	c := p.st.Coll[m.Box]
+	if !slices.Contains(c.Unacked, m.ID) {
+		c.Unacked = append(c.Unacked, m.ID)
+	}
+	p.st.Coll[m.Box] = c
+}
+
+func (p *Party) noteAcked(m *RMsg) {
+	if !p.w.ch("TELL") {
+		return
+	}
+	c := p.st.Coll[m.Box]
+	c.Unacked = slices.DeleteFunc(c.Unacked, func(id int) bool { return id == m.ID })
+	c.MaxAcked = max(c.MaxAcked, m.ID)
+	p.st.Coll[m.Box] = c
 }
 
 // sendTellings: RK14 step 2, P sends each connection to a vault
@@ -744,15 +785,17 @@ func (q *Party) noteSeenBox(m *RMsg) {
 }
 
 // keep201: RK14 step 3, Q keeps an entry the relay accepted into a peer
-// vault's mailbox, with its msg_id, for 60 days (durable messages that are
-// deposited again as they are: not an update, which is never re-deposited
-// as the same bytes, and not a handshake message).
+// vault's mailbox, with its msg_id, for 60 days.
 func (p *Party) keep201(e *Entry, r *PeerRec, box Key, id int) {
 	if !p.w.ch("TELL") || p.Device || r.Device {
 		return
 	}
 	switch e.M.Kind {
-	case KSession, KIdRot, KClosed:
+	case KSession, KClosed:
+		// the member's messages and the telling are kept, as VAULT-MESSAGING
+		// 0.90.2 (draft) lists them; identity.rotate and relay.token.issued
+		// are not (they recover on their own: S8's resends, rule U's
+		// duplicate path, the refresh)
 	default:
 		return
 	}

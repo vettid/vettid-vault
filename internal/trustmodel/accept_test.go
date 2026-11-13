@@ -171,12 +171,16 @@ func (q *Party) acceptFrom(r *PeerRec, m *RMsg, pos Pos, set []Key) dec {
 				q.w.logf("%s: relay fork recorded while suspended (%v)", q.Name, l)
 			}
 		}
-		if q.w.ch("RSEENSUSP") && len(M.RLinks) > 0 && r.relayState(m.Sender, pos) != rkForeign {
-			// RK12: relay links carried while suspended that pass rule C
+		if q.w.ch("RSEENSUSP") && len(M.RLinks) > 0 {
+			// RK12: at step 1 (whatever the sender: step 2 comes later),
+			// valid relay links carried while suspended that pass rule C
 			// are kept as seen (as step 3 keeps them, within rule C's cap
 			// of 32 seen links per peer), so a later different successor
 			// of the same key is a relay fork after the resolve
 			for _, l := range M.RLinks {
+				if _, made := q.w.rlinkBy[l]; !made {
+					continue // its signatures do not verify
+				}
 				if _, bad := r.relayConflict([]RLink{l}); bad {
 					q.w.stat("RSEENSUSP: relay link fails rule C while suspended (not kept)")
 					continue

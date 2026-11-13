@@ -285,10 +285,11 @@ type State struct {
 	First map[int]int64 // msg_id -> first seen, for defer bounds
 
 	// RK14's telling (TELL)
-	Kept      []Kept        // Q: entries the relay accepted into a peer vault's mailbox (60 days; pinned at a follow)
-	ToTell    []tellRec     // P: old mailboxes whose collects ended, not yet told
-	SeenBox   map[int]Key   // P: inner id -> the mailbox it came from (dedupe kept per mailbox)
-	DedupeEnd map[Key]int64 // P: a told mailbox's inner ids are kept for dedupe until then
+	Kept      []Kept             // Q: entries the relay accepted into a peer vault's mailbox (60 days; pinned at a follow)
+	ToTell    []tellRec          // P: old mailboxes whose collects ended, not yet told
+	Coll      map[Key]collectRec // P: per mailbox, what the relay gave and P acked (last_msg_id)
+	SeenBox   map[int]Key        // P: inner id -> the mailbox it came from (dedupe kept per mailbox)
+	DedupeEnd map[Key]int64      // P: a told mailbox's inner ids are kept for dedupe until then
 }
 
 // Kept: RK14 step 3, an outbox entry the relay accepted (201) into a peer
@@ -399,6 +400,11 @@ func (s *State) clone() State {
 	c.ToTell = slices.Clone(s.ToTell)
 	c.SeenBox = maps.Clone(s.SeenBox)
 	c.DedupeEnd = maps.Clone(s.DedupeEnd)
+	c.Coll = make(map[Key]collectRec, len(s.Coll))
+	for k, v := range s.Coll {
+		v.Unacked = slices.Clone(v.Unacked)
+		c.Coll[k] = v
+	}
 	return c
 }
 

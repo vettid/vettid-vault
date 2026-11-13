@@ -178,7 +178,10 @@ func (q *Party) abandonPending(r *PeerRec, why string, restart bool) {
 // steps14: acceptFrom would not refuse the message at steps 1-4 (a pure check).
 func (q *Party) steps14(r *PeerRec, m *RMsg, pos Pos) bool {
 	M := m.P
-	if r.Status != stActive || (M.Kind == KInit && m.Sender != M.FromRelay) {
+	// Table A's hs.init preamble, as acceptFrom applies it (RK8: a reconnect
+	// announcing a newer key by its links may come from its sender)
+	l24 := q.links24(r, m)
+	if r.Status != stActive || (M.Kind == KInit && m.Sender != M.FromRelay && !(l24 && M.FromRelay == M.RelayPK)) {
 		return false
 	}
 	rs := r.relayState(m.Sender, pos)
@@ -188,6 +191,10 @@ func (q *Party) steps14(r *PeerRec, m *RMsg, pos Pos) bool {
 	if rs == rkAfter {
 		switch M.Kind {
 		case KUpdate, KTokIssued:
+		case KInit, KResp:
+			if !(l24 && M.Reconnect) {
+				return false // RK8: a reconnect's links let it pass the cut-off
+			}
 		case KIdRot:
 			if !q.allFollowed(r, M.Rot) {
 				return false

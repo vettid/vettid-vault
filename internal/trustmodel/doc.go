@@ -39,13 +39,29 @@
 //     S1PAUSE, and the cap on RK6, RK9, RK10 and RK11. RK14: GRACE14, HOLD
 //     and TELL. RK15 is not a rule: the randomized runs check it.
 //
-// Model limits of §3.4.2: §8.4's ts window is applied only to RK13's
-// pause (its past bound; acceptance does not judge ts, and the model's
-// clocks are skewed by up to a day); a stale connection ends its held
-// deposits at once (stale is final in the model); P's record of
-// last_msg_id is taken when the old mailbox ends at the relay (the
-// relay's msg_ids are in arrival order, so it is what P's acks give), and
-// the telling is queued at P's next tick.
+// Model limits of §3.4.2:
+//   - §8.4's ts window is applied only to RK13's pause (its past bound;
+//     acceptance does not judge ts, and the model's clocks are skewed by
+//     up to a day).
+//   - Stale is final in the model: a stale or suspended connection ends
+//     its outbox entries and held deposits at once, so the telling goes
+//     to active connections only.
+//   - A handshake message refused mailbox_unknown ends as a refusal of its
+//     carried token does (the answer dropped, or the pending epoch
+//     abandoned and a reconnect), but the tokens that handshake carried
+//     are not discarded (the model does not tie kept tokens to their
+//     handshake).
+//   - P records last_msg_id from its own collects and acks; the record is
+//     taken when the old mailbox ends at the relay, and the telling is
+//     queued at P's next tick.
+//   - Q's keep follows VAULT-MESSAGING 0.90.2's draft list as far as the
+//     model has the kinds: the member's messages (the probe) and
+//     relay.mailbox.closed; identity.rotate and relay.token.issued are
+//     not kept.
+//
+// With a switch off, the rule's earlier behaviour applies; HOLD off is
+// 0.88's: mailbox_unknown between vaults ends the entry and makes the
+// peer stale.
 //
 // Configurations (TestRandom, TestR29Coverage; genRun):
 //   - the oracle config (default): release 29 builds no relay-key

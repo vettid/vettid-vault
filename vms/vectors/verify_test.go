@@ -523,6 +523,7 @@ func checkVectors(t *testing.T, dir string) {
 		{"rekey.json", checkRekeyVectors},
 		{"handshake_desktop.json", checkDesktopVectors},
 		{"relay.json", checkRelayVectors},
+		{"relay_rotate.json", checkRelayRotateVectors},
 	} {
 		if _, err := os.Stat(filepath.Join(dir, v.file)); err == nil {
 			t.Run(strings.TrimSuffix(v.file, ".json"), func(t *testing.T) { v.check(t, dir) })

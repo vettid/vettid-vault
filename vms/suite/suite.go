@@ -74,8 +74,10 @@ const (
 	LabelCallKey   = "vettid/vms/2/call-key"
 	LabelRotate    = "vettid/vms/2/rotate" // identity.rotate statements (§3.4)
 	LabelBlob      = "vettid/vms/2/blob"   // claim-check blobs (§5.5)
-	labelPrefix    = "vettid/vms/2/"
-	labelPrefixV3  = "vettid/vms/3/"
+	// LabelRelayRotate signs relay links (0.85.0 §3.4.1 rule U).
+	LabelRelayRotate = "vettid/vms/2/relay-rotate"
+	labelPrefix      = "vettid/vms/2/"
+	labelPrefixV3    = "vettid/vms/3/"
 )
 
 var _ = labelPrefixV3 // documented for suite 3; not used by suite 2

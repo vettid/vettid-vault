@@ -158,6 +158,15 @@ func (m *Manager) rk7FinPasses(p *Peer, aw *AwaitingHS, sender ed25519.PublicKey
 	if m.relayStateOf(p, sender) != relayEarlierAfter {
 		return false
 	}
+	if aw.Reconnect != nil && aw.Reconnect.Fork {
+		// An answer kept as fork evidence (H5's "Exempt"; §6.6 "Fork
+		// detection") passes whatever its pinned ik and its closure, so
+		// that its hs.fin, if sig_I verifies under the pinned key, is
+		// judged as fork evidence and suspends (finishReconnect); it never
+		// establishes an epoch. Evidence first: a reading of this release;
+		// the spec should confirm it.
+		return true
+	}
 	if len(aw.Signer) != ed25519.PublicKeySize || !bytes.Equal(aw.Signer, p.IK) {
 		return false
 	}

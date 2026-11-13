@@ -281,3 +281,56 @@ func TestRK7RecordsPrunedWithEarlierKeys(t *testing.T) {
 		t.Fatal("the records outlived the earlier keys")
 	}
 }
+
+// rk7ReconnectFin runs side 1's reconnect up to its hs.fin, taken with
+// msg_id rkAfter, makes side 0 follow, and returns the hs.fin and side 0's
+// answer awaiting it.
+func (f *r29Fx) rk7ReconnectFin() (Message, *AwaitingHS) {
+	f.t.Helper()
+	f.do(1, func(m *Manager, p *Peer) { m.startReconnect(p, f.clk) })
+	if f.deliver(1, 0, kHSInit) != 1 || f.deliver(0, 1, kHSResp) != 1 {
+		f.t.Fatal("setup: no reconnect")
+	}
+	fin := f.rkTake(kHSFin, rkAfter)
+	f.rkFollow()
+	if len(f.m(0).st.Awaiting) != 1 {
+		f.t.Fatal("setup: no answer")
+	}
+	for _, aw := range f.m(0).st.Awaiting {
+		return fin, aw
+	}
+	return fin, nil
+}
+
+// RK7 with H5's "Exempt": an answer kept as fork evidence passes whatever
+// its pinned ik, so its hs.fin from an earlier key after its cut-off is
+// judged as fork evidence: the connection suspends, and no epoch is
+// established.
+func TestRK7ForkEvidenceAnswerSuspendsAfterCutoff(t *testing.T) {
+	f := newR29Fx(t)
+	f.longTokens()
+	fin, aw := f.rk7ReconnectFin()
+	aw.Reconnect.Fork = true
+	aw.Signer = bytes.Repeat([]byte{9}, 32) // pinned to an ik no longer current
+	cur := append([]byte(nil), f.cur(0)...)
+	f.process(0, fin)
+	if f.p(0).Fork == nil || f.superseded() != 0 {
+		t.Fatal("the fork-evidence hs.fin did not suspend, or was refused")
+	}
+	if !bytes.Equal(f.cur(0), cur) {
+		t.Fatal("an epoch was established from fork evidence")
+	}
+}
+
+// A non-exempt answer whose pinned ik is not current is still refused
+// superseded_relay after the cut-off, the answer kept.
+func TestRK7NonExemptAnswerNotCurrentIKRefused(t *testing.T) {
+	f := newR29Fx(t)
+	f.longTokens()
+	fin, aw := f.rk7ReconnectFin()
+	aw.Signer = bytes.Repeat([]byte{9}, 32)
+	f.process(0, fin)
+	if f.superseded() != 1 || len(f.m(0).st.Awaiting) != 1 || f.p(0).suspended() {
+		t.Fatal("not refused superseded_relay with the answer kept")
+	}
+}

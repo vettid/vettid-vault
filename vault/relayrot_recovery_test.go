@@ -1,6 +1,7 @@
 package vault
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"testing"
@@ -28,6 +29,12 @@ func newInheritedOpen(t *testing.T, script func(rw *rotWorld, k, p string)) *inh
 // newInheritedOpenAnchored is newInheritedOpen with the current key's
 // anchor stored as anchor (zero: none).
 func newInheritedOpenAnchored(t *testing.T, anchor time.Time, script func(rw *rotWorld, k, p string)) *inheritedOpen {
+	return newInheritedOpenWith(t, func(m *Manager) { m.st.Relay.Anchor = anchor }, script)
+}
+
+// newInheritedOpenWith is newInheritedOpen with set applied to the stored
+// state before the open.
+func newInheritedOpenWith(t *testing.T, set func(m *Manager), script func(rw *rotWorld, k, p string)) *inheritedOpen {
 	io := &inheritedOpen{rw: newRotWorld()}
 	io.f = newOpenFixtureWith(t, func(f *openFixture) {
 		f.m.mu.Lock()
@@ -44,7 +51,7 @@ func newInheritedOpenAnchored(t *testing.T, anchor time.Time, script func(rw *ro
 			t.Fatal("no relay-key rotation owed")
 		}
 		io.k, io.p = f.m.st.Relay.Mailbox, f.m.pendingMailbox()
-		f.m.st.Relay.Anchor = anchor
+		set(f.m)
 		if err := f.m.persist(context.Background(), false); err != nil {
 			t.Fatal(err)
 		}
@@ -201,7 +208,7 @@ func TestRelayRotInheritedFreshKeyRefusedAtTheOpen(t *testing.T) {
 func TestRelayRotInheritedRegisteredAtTheOpenWaits(t *testing.T) {
 	io := newInheritedOpen(t, func(rw *rotWorld, k, _ string) { delete(rw.live, k) })
 	rs := ownRelayState(io.m)
-	if io.m.pendingMailbox() != io.p || rs.Pending.Created.IsZero() || !io.registered(io.p) {
+	if io.m.pendingMailbox() != io.p || rs.Pending.Created.IsZero() || !rs.Pending.Unconfirmed.IsZero() || !io.registered(io.p) {
 		t.Fatalf("after the open: pending %s, relay %+v", io.m.pendingMailbox(), rs)
 	}
 	answered := rs.Pending.Created
@@ -452,5 +459,62 @@ func TestRelayRotInheritedCompletedAtARepeatAfterStep1(t *testing.T) {
 	}
 	if rs := ownRelayState(io.m); len(rs.Old) < 1 || rs.Old[0].Mailbox != io.k {
 		t.Fatalf("not completed after the wait: %+v", rs)
+	}
+}
+
+// After the open's wait the inherited key and the owed next key are both
+// completed before the recovered phone paired: the open's vault_bundle
+// names a relay key two rotations old, and the phone's first handshake
+// with it is answered under the current key, which it does not take. The
+// phone's own unlock before its first handshake (resumeLostOK) carries the
+// current address, as the apps do when their handshake is not answered.
+func TestRelayRotInheritedPhoneUnlockAfterTheWaitNamesTheCurrentKey(t *testing.T) {
+	io := newInheritedOpen(t, nil)
+	if !bytes.Contains(io.out.VaultBundle, []byte(io.k)) {
+		t.Fatal("the open's bundle does not name the current mailbox")
+	}
+	rs, _ := io.state()
+	io.f.clock = rs.Pending.Unconfirmed.Add(freshMailboxWait)
+	if err := io.m.ProcessBatch(context.Background(), &fakeCollector{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	rs, _ = io.state()
+	cur := rs.Mailbox
+	if cur == io.k || cur == io.p || rs.Pending != nil {
+		t.Fatalf("both keys not completed: %+v", rs)
+	}
+	if err := io.m.Lock(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	m, uo := io.f.phoneUnlockOut()
+	if m == nil || !uo.OK {
+		t.Fatalf("the phone's unlock: %+v", uo)
+	}
+	defer m.Crash()
+	if !bytes.Contains(uo.VaultBundle, []byte(cur)) || bytes.Contains(uo.VaultBundle, []byte(io.k)) {
+		t.Fatalf("the phone's bundle does not name the current mailbox %s: %s", cur, uo.VaultBundle)
+	}
+	pairRecoveredPhone(t, m, io.f.phone)
+}
+
+// An open while a stored mark's wait still runs makes no attempt (nothing
+// sent, nothing audited): the wait holds at the open as at any attempt.
+func TestRelayRotInheritedOpenInsideTheMarksWaitMakesNoAttempt(t *testing.T) {
+	var marked time.Time
+	io := newInheritedOpenWith(t, func(m *Manager) {
+		// The open comes after the recovery's quiet period: a mark late
+		// enough that the open's time falls inside its wait.
+		marked = m.now().Add(365 * 24 * time.Hour).UTC()
+		m.st.Relay.Pending.Unconfirmed = marked
+	}, nil)
+	if !io.f.clock.Before(marked.Add(freshMailboxWait)) {
+		t.Fatalf("the open at %v is past the mark's wait (%v)", io.f.clock, marked)
+	}
+	if rot, regs := io.rw.log(); len(rot) != 0 || len(regs) != 0 {
+		t.Fatalf("an attempt inside the mark's wait: rotates %v, registers %v", rot, regs)
+	}
+	rs := ownRelayState(io.m)
+	if io.m.pendingMailbox() != io.p || rs.Pending.Unconfirmed.Before(marked) {
+		t.Fatalf("after the open: pending %s, relay %+v", io.m.pendingMailbox(), rs)
 	}
 }

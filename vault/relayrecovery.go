@@ -91,9 +91,14 @@ func (m *Manager) inheritedKeyAtOpen(ctx context.Context, p RecoveryOpenParams, 
 	// still starts the wait. It costs a recovery that inherits a pending
 	// key a wait (and a second when a later registration makes the mailbox
 	// afresh). Not a key left in the refused state: relayKeyAttempt tries
-	// that one at the next unlock before any wait; a 201 then starts the
-	// wait, and an answer that the mailbox exists completes it with its
-	// tokens minted again.
+	// that one at the next unlock; a 201 then starts the wait, and an
+	// answer that the mailbox exists completes it, its held tokens minted
+	// again only if a wait was stored with it (Created or Unconfirmed,
+	// mayBeFresh). A refused key with neither, or with an old Created, is
+	// completed without minting again: a lost run of the open that made its
+	// mailbox afresh before it was refused is not ruled out there, a
+	// residual (availability only: the tokens the relay refuses are minted
+	// again at the next rotation).
 	answered201 := false
 	defer func() {
 		if cur := m.st.Relay.Pending; cur == pr && pr.Refused == "" && !answered201 {

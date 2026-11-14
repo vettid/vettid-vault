@@ -90,8 +90,10 @@ func (m *Manager) inheritedKeyAtOpen(ctx context.Context, p RecoveryOpenParams, 
 	// tombstone's window. The mark is not Created: a real 201 after it
 	// still starts the wait. It costs a recovery that inherits a pending
 	// key a wait (and a second when a later registration makes the mailbox
-	// afresh). Not a key left in the refused state: relayKeyAttempt tries
-	// that one at the next unlock; a 201 then starts the wait, and an
+	// afresh). Not a key left in the refused state: the open does not mark
+	// it (an attempt an earlier run stored stays, below), and its next
+	// unlock's attempt waits only if a wait is stored (that kept attempt
+	// marks one, relayKeyAttempt); a 201 then starts the wait, and an
 	// answer that the mailbox exists completes it, its held tokens minted
 	// again only if a wait was stored with it (Created or Unconfirmed,
 	// mayBeFresh). A refused key with neither, or with an old Created, is

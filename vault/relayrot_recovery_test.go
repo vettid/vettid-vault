@@ -518,3 +518,41 @@ func TestRelayRotInheritedOpenInsideTheMarksWaitMakesNoAttempt(t *testing.T) {
 		t.Fatalf("after the open: pending %s, relay %+v", io.m.pendingMailbox(), rs)
 	}
 }
+
+// An attempt stored by an earlier run (relayKeyAttempt) when a recovery's
+// open inherits the key: the open clears it once its own mark or a 201's
+// wait covers any answer of it, and keeps it for a key it leaves refused,
+// whose next unlock then waits before its one attempt.
+func TestRelayRotInheritedOpenClearsACoveredAttempt(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		script func(rw *rotWorld, k, p string)
+		kept   bool
+	}{
+		{"exists", nil, false},
+		{"no answer", func(rw *rotWorld, _, _ string) { rw.rotate = []error{relayErr(503, "")} }, false},
+		{"201", func(rw *rotWorld, k, _ string) { delete(rw.live, k) }, false},
+		{"refused", func(rw *rotWorld, k, _ string) {
+			delete(rw.live, k)
+			rw.register = []error{relayErr(400, "bad_request"), relayErr(400, "bad_request")}
+		}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var stored time.Time
+			io := newInheritedOpenWith(t, func(m *Manager) {
+				stored = m.now().UTC()
+				m.st.Relay.Pending.Attempt = stored
+			}, tc.script)
+			rs, _ := io.state()
+			if rs.Pending == nil {
+				t.Fatalf("no pending key: %+v", rs)
+			}
+			if got := !rs.Pending.Attempt.IsZero(); got != tc.kept {
+				t.Fatalf("attempt kept %v, want %v: %+v", got, tc.kept, rs.Pending)
+			}
+			if !tc.kept && rs.Pending.Created.IsZero() && rs.Pending.Unconfirmed.IsZero() {
+				t.Fatalf("cleared with no wait covering it: %+v", rs.Pending)
+			}
+		})
+	}
+}

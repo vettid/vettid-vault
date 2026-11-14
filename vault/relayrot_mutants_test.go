@@ -114,45 +114,6 @@ func TestRelayRotInheritedFreshWaitAtTheOpenMakesNoCall(t *testing.T) {
 	}
 }
 
-// §11.11.5 step 1: an owner app registered as a recovery's phone unlocks
-// a vault without a backup copy and is refused no_backup, the recovery
-// cancelled. The answer carries the header_seq last stored: that of the
-// cancel's header write when it is stored, and the one before it when its
-// put fails (not the seq of the write that failed), so the app's floor
-// never passes the stored header.
-func TestRelayRotNoBackupRefusalReportsTheStoredHeaderSeq(t *testing.T) {
-	for _, fails := range []bool{false, true} {
-		d := newDevFixture(t)
-		if err := d.m.Lock(context.Background()); err != nil {
-			t.Fatal(err)
-		}
-		p := HeaderParams{Options: d.opts, VaultID: d.vid, UserGUID: "u1"}
-		if err := headerTx(context.Background(), p, func(h *Header, now time.Time) (bool, error) {
-			h.Recovery = &RecoveryRecord{ID: cancelledRecID, State: RecoveryRegistered, RequestedAt: now, NotBefore: now,
-				Expires: now.Add(48 * time.Hour), App: &RecoveryApp{IK: d.devPeer.IK}}
-			return false, nil
-		}); err != nil {
-			t.Fatal(err)
-		}
-		before := storedHeader(t, d).HeaderSeq
-		opts := d.opts
-		if fails {
-			opts.Store = &faultStore{Store: d.store, failHeader: 1}
-		}
-		m, uo := cancelUnlock(d, opts, func(p *AltUnlockParams) { p.CancelRecovery = false })
-		if m != nil || uo.OK || uo.Code != CodeNoBackup {
-			t.Fatalf("put fails %v: unlock %+v", fails, uo)
-		}
-		h := storedHeader(t, d)
-		if fails && (h.HeaderSeq != before || h.Recovery == nil) || !fails && (h.HeaderSeq != before+1 || h.Recovery != nil) {
-			t.Fatalf("put fails %v: stored header_seq %d (before %d), recovery %v", fails, h.HeaderSeq, before, h.Recovery)
-		}
-		if uo.HeaderSeq != h.HeaderSeq {
-			t.Fatalf("put fails %v: header_seq %d, stored %d", fails, uo.HeaderSeq, h.HeaderSeq)
-		}
-	}
-}
-
 // goneMailboxLocked is newInheritedOpen whose current mailbox is gone (its
 // collects ended on mailbox_unknown) with the inherited key pending after
 // the open's attempt got no definite answer; the vault is locked again

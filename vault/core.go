@@ -111,10 +111,10 @@ func (m *Manager) hStatus(_ context.Context, s *Session, _ *envelope.Inner) (jso
 		// 0.16.0 (§10.2, §11.11.5): nothing about the vault before the
 		// credential password.
 		return strictjson.NewBuilder().String("vault_id", m.st.VaultID).Uint("state_seq", m.st.StateSeq).
-			Uint("header_seq", m.hdr.HeaderSeq).Bytes(), nil
+			Uint("header_seq", m.storedHeaderSeq).Bytes(), nil
 	}
 	b := strictjson.NewBuilder().String("vault_id", m.st.VaultID).Uint("state_seq", m.st.StateSeq).
-		Uint("header_seq", m.hdr.HeaderSeq).Bool("provisional", m.hdr.Provisional).
+		Uint("header_seq", m.storedHeaderSeq).Bool("provisional", m.hdr.Provisional).
 		Uint("devices", uint64(len(m.st.Devices))).Uint("connections", uint64(len(m.st.Connections))).
 		Raw("owner_check", m.ownerCheckStatus(s.peer, s.now))
 	if s.peer.Kind == KindApp || s.peer.Kind == KindDesktop {

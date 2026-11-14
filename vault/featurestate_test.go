@@ -193,7 +193,7 @@ func TestRequiredFeatureThatDoesNotLoadRefusesTheUnlock(t *testing.T) {
 	base := f.opts.Features
 	f.opts.Features = append(append([]Feature(nil), base...), &requiredCounter{})
 	wc := &writeCounter{Store: f.opts.Store}
-	store := f.opts.Store
+	orig := f.opts.Store
 	f.opts.Store = wc
 	gauge := Unlocked()
 	m, out := f.unlock(testPIN, testSecret)
@@ -203,8 +203,10 @@ func TestRequiredFeatureThatDoesNotLoadRefusesTheUnlock(t *testing.T) {
 	if Unlocked() != gauge {
 		t.Fatalf("unlocked gauge %d, was %d: the manager was not zeroized", Unlocked(), gauge)
 	}
-	if wc.count() != 0 {
-		t.Fatalf("%d writes on refusal", wc.count())
+	// §11.8: the attempt's count and its reset to 0, both to the header;
+	// nothing else is written on the refusal.
+	if !wc.onlyCountAndReset(store.HeaderKey(f.vid, testRelease.PCR0)) {
+		t.Fatalf("%d writes on refusal: %v", wc.count(), wc.keys)
 	}
 	for _, ev := range out.Events {
 		if ev.Event == "unlocked" {
@@ -213,7 +215,7 @@ func TestRequiredFeatureThatDoesNotLoadRefusesTheUnlock(t *testing.T) {
 	}
 
 	// A feature that is not Required is not run, and the unlock goes on.
-	f.opts.Store = store
+	f.opts.Store = orig
 	f.opts.Features = append(append([]Feature(nil), base...), &failingCounter{})
 	m, out = f.unlock(testPIN, testSecret)
 	if m == nil || !out.OK {
@@ -514,8 +516,7 @@ func TestUnreadablePartCancelsNoRecovery(t *testing.T) {
 		_ = m.flushThenDrain(context.Background())
 		m.mu.Unlock()
 	})
-	ctx := context.Background()
-	hdrBefore, _, _ := d.store.Get(ctx, store.HeaderKey(d.vid, testRelease.PCR0))
+	hBefore := storedHeader(t, d)
 	m, out := cancelUnlock(d, withRequired(d), nil)
 	if m != nil || out.OK || out.Code != CodeStateUnreadable {
 		t.Fatalf("unlock: %+v", out)
@@ -523,8 +524,10 @@ func TestUnreadablePartCancelsNoRecovery(t *testing.T) {
 	if out.RecoveryCancelled || out.CancelledRecoveryID != "" || out.CancelledMarker() != "" || len(out.Events) != 0 {
 		t.Fatalf("a cancellation was reported: %+v", out)
 	}
-	if hdrAfter, _, _ := d.store.Get(ctx, store.HeaderKey(d.vid, testRelease.PCR0)); string(hdrAfter) != string(hdrBefore) {
-		t.Fatal("the stored header changed")
+	// §11.8: the attempt's count was stored and reset (header_seq + 2);
+	// nothing else in the header changed.
+	if h := storedHeader(t, d); h.Backoff != hBefore.Backoff || h.HeaderSeq != hBefore.HeaderSeq+2 {
+		t.Fatalf("the stored header changed: backoff %+v seq %d, before %+v seq %d", h.Backoff, h.HeaderSeq, hBefore.Backoff, hBefore.HeaderSeq)
 	}
 	if r := storedRecovery(t, d); r == nil || r.ID != cancelledRecID {
 		t.Fatalf("the recovery went: %+v", r)
@@ -1085,5 +1088,35 @@ func TestAReadableUnconfirmedReleaseConfirmsDespiteAnUpdate(t *testing.T) {
 	}
 	if _, _, err := d.store.Get(ctx, store.HeaderKey(d.vid, target)); err == nil {
 		t.Fatalf("sealed for %s", target)
+	}
+}
+
+// §11.8 (0.90.8): a right PIN resets the count to 0 whatever the outcome.
+// Two wrong PINs are counted; a right PIN whose unlock is refused
+// (state_unreadable) leaves the stored count at 0, the delay cleared.
+func TestARightPINRefusedResetsTheCount(t *testing.T) {
+	f := newRFixture(t)
+	f.m.mu.Lock()
+	f.m.st.Features["counter"] = json.RawMessage("7")
+	f.m.dirty = true
+	f.m.mu.Unlock()
+	f.flush()
+	if err := f.m.Lock(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	f.opts.Features = append(append([]Feature(nil), f.opts.Features...), &requiredCounter{})
+	for i := 1; i <= 2; i++ {
+		if _, out := f.unlock("000000", testSecret); out.Code != CodeBadPIN {
+			t.Fatalf("wrong PIN %d: %+v", i, out)
+		}
+	}
+	if h := f.storedHeader(); h.Backoff.Failures != 2 {
+		t.Fatalf("setup: %d counted", h.Backoff.Failures)
+	}
+	if m, out := f.unlock(testPIN, testSecret); m != nil || out.Code != CodeStateUnreadable {
+		t.Fatalf("%+v", out)
+	}
+	if h := f.storedHeader(); h.Backoff != (Backoff{}) {
+		t.Fatalf("not reset: %+v", h.Backoff)
 	}
 }

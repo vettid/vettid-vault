@@ -27,6 +27,24 @@ func (o *opened) wipe() {
 	suite.Wipe(o.uk)
 }
 
+// openDEKPrecheck is what openDEK decides before the PIN is tried: the
+// phone's secret matches neither secret_check nor secret_check_next
+// (device_secret), or the header and the state do not belong together
+// (state_rollback). "" when the PIN is to be tried.
+func openDEKPrecheck(h *Header, secret []byte, vaultID string, stateVer uint64) string {
+	cur, _ := recovery.SecretCheck(h.Pepper, vaultID, secret)
+	curMatch := cur != nil && suite.Equal(cur, h.SecretCheck)
+	nx := h.Next
+	nxMatch := nx != nil && cur != nil && suite.Equal(cur, nx.SecretCheck)
+	if !curMatch && !nxMatch {
+		return CodeDeviceSecret
+	}
+	if nx != nil && stateVer != h.DEKVersion && stateVer != nx.DEKVersion || nx == nil && stateVer != h.DEKVersion {
+		return CodeRollback
+	}
+	return ""
+}
+
 // openDEK applies §11.14.1 and §11.14.2 at an unlock: the secret must
 // match secret_check or, while a `next` part exists, secret_check_next
 // (device_secret otherwise, decided before the PIN); then the wrap whose
@@ -35,13 +53,13 @@ func (o *opened) wipe() {
 // stored are device_secret; the new phone of a transfer or recovery whose
 // state write is not stored is transfer_incomplete.
 func openDEK(h *Header, pin string, secret []byte, vaultID string, stateVer uint64) opened {
+	if code := openDEKPrecheck(h, secret, vaultID, stateVer); code != "" {
+		return opened{code: code} // as UnlockAlt decided it before counting the attempt
+	}
 	cur, _ := recovery.SecretCheck(h.Pepper, vaultID, secret)
 	curMatch := cur != nil && suite.Equal(cur, h.SecretCheck)
 	nx := h.Next
 	nxMatch := nx != nil && cur != nil && suite.Equal(cur, nx.SecretCheck)
-	if !curMatch && !nxMatch {
-		return opened{code: CodeDeviceSecret}
-	}
 	tryCur := func() ([]byte, []byte, bool) {
 		uk, err := deriveUnlockKey(pin, secret, h.KDF, h.Pepper, vaultID)
 		if err != nil {
@@ -65,9 +83,6 @@ func openDEK(h *Header, pin string, secret []byte, vaultID string, stateVer uint
 			return nil, nil, nil, false
 		}
 		return d0, d1, uk, true
-	}
-	if nx != nil && stateVer != h.DEKVersion && stateVer != nx.DEKVersion || nx == nil && stateVer != h.DEKVersion {
-		return opened{code: CodeRollback} // header and state do not belong together
 	}
 	opensSomething := false
 	if nxMatch && stateVer == nx.DEKVersion {

@@ -240,6 +240,37 @@ func findUnlockKey(h *Header, ik ed25519.PublicKey) *UnlockKey {
 	return found
 }
 
+// resetCount resets the PIN count to 0 (§11.8: a right PIN resets it,
+// whatever the outcome) after a right PIN whose unlock did not end ok. The
+// header is read again: only if it is still the one the count stored (its
+// version, its count) is it written back, with header_seq + 1, conditional
+// on that version; a header written since (a reset, a move) is left as it
+// is. A write that fails leaves the count raised: one failure more than the
+// member made, the safe side. Its header_seq may equal that of a manager
+// header write that failed (not stored): the write is conditional on the
+// counted header's version, so a header that write did store is never
+// overwritten.
+func resetCount(ctx context.Context, p AltUnlockParams, hkey string, countedVer store.Version, counted Backoff,
+	out *AltUnlockOutcome) {
+	blob, ver, err := p.Store.Get(ctx, hkey)
+	if err != nil || ver != countedVer {
+		return
+	}
+	h, err := unsealHeader(ctx, p.Sealer, blob, p.VaultID, p.Release.PCR0)
+	if err != nil || h.Backoff.Failures != counted.Failures || !h.Backoff.NotBefore.Equal(counted.NotBefore) {
+		return
+	}
+	h.Backoff = Backoff{}
+	h.HeaderSeq++
+	b, err := sealHeader(ctx, p.Sealer, h)
+	if err != nil {
+		return
+	}
+	if _, err := p.Store.Put(ctx, hkey, b, ver); err == nil && h.HeaderSeq > out.HeaderSeq {
+		out.HeaderSeq = h.HeaderSeq // stored: the phone's floor may follow it
+	}
+}
+
 // UnlockAlt runs an unlock in the order of §11.4 and §11.10.4: header,
 // identity, unlock key and signature, device assertion, backoff, header
 // rollback, manifest, DEK and state, state rollback, then the release
@@ -356,21 +387,61 @@ func UnlockAlt(ctx context.Context, p AltUnlockParams) (*Manager, *AltUnlockOutc
 	if !ok {
 		return nil, out.fail(CodeMissing, ErrState) // a 0x01 state is refused (§11.14.14)
 	}
+	// What is decided before the PIN (the phone's secret, the header and
+	// the state belonging together) is answered before the attempt counts.
+	if code := openDEKPrecheck(hdr, p.UnlockSecret, p.VaultID, stateVer); code != "" {
+		return nil, out.fail(code, nil)
+	}
+	// §11.8 (VAULT-MESSAGING 0.90.8; owner decision a, 2026-11-13): the
+	// attempt is counted before the PIN is tested. The header with the
+	// failure count raised by one is stored, conditional on the header
+	// read, and only then is the PIN tried: a write that fails tests
+	// nothing (retry, not a PIN failure), so a host that fails header
+	// writes learns nothing of a PIN it is not counted for. A right PIN
+	// resets the count in the unlock's own header write.
+	hdr.Backoff.Failures++
+	hdr.Backoff.NotBefore = now.Add(backoffFor(hdr.Backoff.Failures))
+	hdr.HeaderSeq++
+	b, err := sealHeader(ctx, p.Sealer, hdr)
+	if err != nil {
+		return nil, out.fail(CodeRetry, err)
+	}
+	if hver, err = p.Store.Put(ctx, hkey, b, hver); err != nil {
+		return nil, out.fail(CodeRetry, err) // the answer keeps the seq read (§11.4, §13.2)
+	}
+	out.HeaderSeq = hdr.HeaderSeq // stored: it raises the phone's floor
 	op := openDEK(hdr, p.PIN, p.UnlockSecret, p.VaultID, stateVer)
+	if op.code == "" {
+		// A right PIN resets the count to 0 whatever ends this unlock: an
+		// ok in its own header write; anything else (a state that does not
+		// read, a release decision, a write that fails) in a header-only
+		// write, unless a later header write already reset it.
+		counted, countedVer := hdr.Backoff, hver
+		defer func() {
+			if !out.OK {
+				resetCount(ctx, p, hkey, countedVer, counted, out)
+			}
+		}()
+	}
 	switch op.code {
 	case "":
 	case CodeBadPIN:
-		hdr.Backoff.Failures++
-		hdr.Backoff.NotBefore = now.Add(backoffFor(hdr.Backoff.Failures))
-		hdr.HeaderSeq++
-		out.HeaderSeq = hdr.HeaderSeq
 		out.RetryAfter = backoffFor(hdr.Backoff.Failures)
-		if b, err := sealHeader(ctx, p.Sealer, hdr); err == nil {
-			_, _ = p.Store.Put(ctx, hkey, b, hver)
-		}
 		return nil, out.fail(CodeBadPIN, ErrBadPIN)
 	default:
-		return nil, out.fail(op.code, nil) // decided before the PIN counts
+		// Decided with a right PIN (a pair superseded by a stored
+		// replacement, a transfer not completed): the count is reset to 0,
+		// in a write of its own. If that write fails the raised count
+		// stays: one counted failure more than the member made, the safe
+		// side.
+		hdr.Backoff = Backoff{}
+		hdr.HeaderSeq++
+		if b, err := sealHeader(ctx, p.Sealer, hdr); err == nil {
+			if _, err := p.Store.Put(ctx, hkey, b, hver); err == nil {
+				out.HeaderSeq = hdr.HeaderSeq
+			}
+		}
+		return nil, out.fail(op.code, nil)
 	}
 	dek := op.dek
 	pt, blobSeq, err := decryptState(dek, p.VaultID, sblob)
@@ -405,8 +476,9 @@ func UnlockAlt(ctx context.Context, p AltUnlockParams) (*Manager, *AltUnlockOutc
 	}
 	if !stateSupported(&st) {
 		// R29-U1 (§6.3.1 "No upgrade: release 29 starts clean"): after
-		// §12.5's deleting check, before anything is written: no state or
-		// header write, nothing sent, no unlocked, locked again.
+		// §12.5's deleting check: no state write and no header write but
+		// §11.8's reset of the PIN count (resetCount), nothing sent, no
+		// unlocked, locked again.
 		suite.Wipe(op.dek1)
 		suite.Wipe(op.uk)
 		suite.Wipe(dek)
@@ -454,7 +526,9 @@ func UnlockAlt(ctx context.Context, p AltUnlockParams) (*Manager, *AltUnlockOutc
 			}
 		}
 	}
-	m.hadFailures = hdr.Backoff.Failures > 0
+	// The stored header holds this attempt's count (§11.8, counted before
+	// the test): always written back reset, a PIN-only unlock too.
+	m.hadFailures = true
 	hdr.Backoff = Backoff{} // a correct PIN resets the backoff (§11.8)
 	if p.CancelRecovery && key != nil && hdr.Recovery != nil && !hdr.isRecoveryKey(key.IK) {
 		out.CancelledRecoveryID = hdr.Recovery.ID
@@ -708,7 +782,8 @@ func (m *Manager) syncUnlockKeysWith(k *UnlockKey) {
 // refuseUnreadable is §3.3's refusal (0.88.17, owner decision
 // 2026-11-11): a feature others call directly could not read its part,
 // and the vault is not run half. Answered state_unreadable after the
-// release decisions, before anything is written or sent, no unlocked,
+// release decisions, with nothing written but §11.8's reset of the PIN
+// count (resetCount) and nothing sent, no unlocked,
 // locked again (the keys wiped); a release that reads it opens it. What
 // the unlock had changed in memory goes with the manager, the
 // cancellation of a recovery included.
@@ -845,7 +920,8 @@ func (m *Manager) resume(ctx context.Context, p AltUnlockParams, out *AltUnlockO
 	}
 	// Persist: the state (release fields, tokens) and the header (backoff
 	// reset, counter, manifest serial) under this release. A PIN-only
-	// (development) unlock writes only a header that recorded failures.
+	// (development) unlock writes the header only: it always holds this
+	// attempt's count (§11.8), to reset.
 	var err2 error
 	switch {
 	case !p.pinOnly:

@@ -279,6 +279,13 @@ type PendingRelay struct {
 	// it says nothing of a wait already had: a 201 after it starts the
 	// wait (and clears it). Absent in a state written before. Not secret.
 	Unconfirmed time.Time `json:"unconfirmed,omitzero"`
+	// Attempt is stored before each relay-key attempt (relayKeyAttempt) and
+	// cleared by the write after its answer. A run that reads it set lost
+	// that write (a lock or a restart after a failed write): the answer,
+	// which may have made the key's mailbox afresh, came before that run,
+	// so the key is marked Unconfirmed at that run's first look and waits
+	// freshMailboxWait. Absent in a state written before. Not secret.
+	Attempt time.Time `json:"attempt,omitzero"`
 }
 
 // HeldTokens are one recipient's tokens for a pending relay key, and their

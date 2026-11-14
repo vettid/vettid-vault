@@ -823,6 +823,21 @@ func (m *Manager) relayKeyAttempt(ctx context.Context, atUnlock bool) bool {
 		return false
 	}
 	now := m.now()
+	if !pr.Attempt.IsZero() {
+		// An attempt of an earlier run whose answer's write was lost (this
+		// run clears its own in memory once answered): a 201 may have made
+		// the mailbox afresh before now, its time unknown. The key waits
+		// freshMailboxWait from now, its tokens minted again at completion.
+		if now.After(pr.Unconfirmed) {
+			pr.Unconfirmed = now.UTC()
+		}
+		pr.Attempt = time.Time{}
+		m.dirty = true
+		_ = m.persist(ctx, false) // a failure keeps the mark in memory; the stored attempt marks again
+		if m.st == nil {
+			return false
+		}
+	}
 	switch {
 	case pr.Refused != "":
 		// One attempt at each unlock, no sooner retries.
@@ -850,23 +865,31 @@ func (m *Manager) relayKeyAttempt(ctx context.Context, atUnlock bool) bool {
 	}
 	// §3.4.2 RK14 step 1: the anchor, in a write of its own just before
 	// the first attempt away from the current key. Nothing is sent until
-	// it is stored.
-	anchored := false
-	if m.st.Relay.Anchor.IsZero() {
+	// it is stored. The attempt is stored in the same write, before every
+	// attempt: an answer that made the mailbox afresh and whose own write
+	// is then lost (a lock or a restart) is still known to the next run.
+	// It fails closed: no attempt without it.
+	anchored := m.st.Relay.Anchor.IsZero()
+	if anchored {
 		m.st.Relay.Anchor = now.UTC()
-		m.dirty = true
-		if err := m.persist(ctx, false); err != nil {
-			if m.st != nil {
+	}
+	pr.Attempt = now.UTC()
+	m.dirty = true
+	if err := m.persist(ctx, false); err != nil {
+		if m.st != nil {
+			if anchored {
 				m.st.Relay.Anchor = time.Time{}
 			}
-			return false
+			pr.Attempt = time.Time{}
 		}
-		anchored = true
+		return false
 	}
 	if pr.Refused != "" {
 		m.rk.triedRefused = true
 	}
 	out, created, byRotate, err := m.relayKeyCall(ctx)
+	pr.Attempt = time.Time{} // answered (or not): the write below, or the next, clears it
+	m.dirty = true
 	switch out {
 	case relayDone:
 		if created && (pr.Created.IsZero() || byRotate) {

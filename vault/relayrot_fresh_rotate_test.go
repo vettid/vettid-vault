@@ -398,3 +398,71 @@ func TestRelayRotRegistrationAfterARotateUnansweredWaits(t *testing.T) {
 		t.Fatal("not made current after the wait")
 	}
 }
+
+// The registration after a rotate answers 201 (the successor made afresh)
+// and the write that stores its time fails; the vault then crashes. The
+// attempt stored before the call tells the next run that such an answer may
+// have been lost: the unlock does not complete the key (a rotate within the
+// grace would answer 200 and the registration 200), it waits
+// freshMailboxWait from that run, and the attempt after the wait completes
+// it.
+func TestRelayRotCreatedAnswerLostAtACrashWaits(t *testing.T) {
+	fx := newRotFx(t)
+	fx.w.rotate = []error{relayErr(503, "")}
+	if err := fx.credRotate(); err != nil {
+		t.Fatal(err)
+	}
+	pmb := fx.pendingMailbox()
+	fx.w.onRotate = func() {
+		fx.w.mu.Lock()
+		delete(fx.w.live, pmb) // the successor gone again: the registration makes it afresh (201)
+		fx.w.mu.Unlock()
+		fx.fs.setFail(1 << 20) // and every write after the rotate fails
+	}
+	fx.setClk(fx.clk.Add(time.Hour))
+	fx.do(func(m *Manager) { m.relayKeyStep(context.Background(), false) }) // the sooner retry
+	if pr := fx.pending(); pr == nil || pr.Created.IsZero() {
+		t.Fatalf("no 201 kept in memory: %+v", pr)
+	}
+	fx.w.onRotate = nil
+	fx.fs.setFail(0)
+	rot0, _ := fx.w.log()
+	fx.crash() // the 201's time was never stored
+	if rot, _ := fx.w.log(); len(rot) != len(rot0) || fx.pendingMailbox() != pmb {
+		t.Fatalf("the unlock attempted at once: rotates %v, pending %s", rot, fx.pendingMailbox())
+	}
+	pr := fx.pending()
+	if pr == nil || pr.Unconfirmed.IsZero() {
+		t.Fatalf("pending %+v: not marked", pr)
+	}
+	fx.setClk(pr.Unconfirmed.Add(freshMailboxWait - time.Second))
+	fx.batch()
+	if fx.pendingMailbox() != pmb {
+		t.Fatal("completed inside the wait")
+	}
+	fx.setClk(pr.Unconfirmed.Add(freshMailboxWait))
+	fx.batch()
+	if fx.mailbox() != pmb {
+		t.Fatal("not made current after the wait")
+	}
+}
+
+// The attempt's own write before the call fails: no call is made (it fails
+// closed), and nothing of the attempt stays in memory.
+func TestRelayRotAttemptNotStoredMakesNoCall(t *testing.T) {
+	fx := newRotFx(t)
+	fx.w.rotate = []error{relayErr(503, "")}
+	if err := fx.credRotate(); err != nil {
+		t.Fatal(err)
+	}
+	rot0, _ := fx.w.log()
+	fx.fs.setFail(1)
+	fx.setClk(fx.clk.Add(time.Hour))
+	fx.batch()
+	if rot, _ := fx.w.log(); len(rot) != len(rot0) {
+		t.Fatalf("a call without the attempt stored: rotates %v", rot)
+	}
+	if pr := fx.pending(); pr == nil || !pr.Attempt.IsZero() {
+		t.Fatalf("pending %+v", pr)
+	}
+}

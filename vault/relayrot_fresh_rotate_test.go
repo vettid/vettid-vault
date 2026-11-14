@@ -466,3 +466,57 @@ func TestRelayRotAttemptNotStoredMakesNoCall(t *testing.T) {
 		t.Fatalf("pending %+v", pr)
 	}
 }
+
+// An attempt stored by a run whose answer may have made the mailbox afresh,
+// that answer's own write lost: whatever else holds of the pending key
+// (the refused state, a retry_after run out, an older wait run out), the
+// next run's unlock and sooner retries make no attempt before
+// freshMailboxWait has run from that run, and one is made after it.
+func TestRelayRotStoredAttemptWaitsWhateverTheGate(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		set  func(pr *PendingRelay, now time.Time)
+	}{
+		{"plain", func(*PendingRelay, time.Time) {}},
+		{"refused", func(pr *PendingRelay, _ time.Time) { pr.Refused = "forbidden" }},
+		{"retry_after run out", func(pr *PendingRelay, now time.Time) { pr.RetryAfter = now.Add(-time.Minute) }},
+		{"older wait run out", func(pr *PendingRelay, now time.Time) { pr.Created = now.Add(-time.Hour) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fx := newRotFx(t)
+			fx.w.rotate = []error{relayErr(503, "")}
+			if err := fx.credRotate(); err != nil {
+				t.Fatal(err)
+			}
+			fx.setClk(fx.clk.Add(time.Hour))
+			fx.do(func(m *Manager) {
+				pr := m.st.Relay.Pending
+				tc.set(pr, m.now())
+				pr.Attempt = m.now().UTC()
+				m.dirty = true
+				if err := m.persist(context.Background(), false); err != nil {
+					t.Fatal(err)
+				}
+			})
+			calls := func() int { rot, regs := fx.w.log(); return len(rot) + len(regs) }
+			c0 := calls()
+			start := fx.clk
+			fx.crash() // the unlock finds the attempt
+			pr := fx.pending()
+			if calls() != c0 || pr == nil || pr.Unconfirmed.Before(start) || !pr.Attempt.IsZero() {
+				t.Fatalf("an attempt at once, or not marked: calls %d→%d, pending %+v", c0, calls(), pr)
+			}
+			fx.setClk(pr.Unconfirmed.Add(freshMailboxWait - time.Second))
+			fx.batch()
+			fx.restart()
+			if calls() != c0 {
+				t.Fatalf("an attempt inside the wait: calls %d→%d", c0, calls())
+			}
+			fx.setClk(pr.Unconfirmed.Add(freshMailboxWait))
+			fx.restart()
+			if calls() == c0 {
+				t.Fatal("no attempt after the wait")
+			}
+		})
+	}
+}

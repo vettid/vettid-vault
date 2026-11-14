@@ -280,7 +280,9 @@ type PendingRelay struct {
 	// wait (and clears it). Absent in a state written before. Not secret.
 	Unconfirmed time.Time `json:"unconfirmed,omitzero"`
 	// Attempt is stored before each relay-key attempt (relayKeyAttempt) and
-	// cleared by the write after its answer. A run that reads it set lost
+	// cleared by the write after the call, answered or not (a recovery's
+	// open clears it once its own mark or wait covers it). A run that reads
+	// it set lost
 	// that write (a lock or a restart after a failed write): the answer,
 	// which may have made the key's mailbox afresh, came before that run,
 	// so the key is marked Unconfirmed at that run's first look and waits

@@ -540,6 +540,8 @@ func TestRelayRotPhoneUnlockRetryReportsTheStoredHeaderSeqResetFails(t *testing.
 		delete(rw.live, k)
 		rw.register = []error{relayErr(503, "")}
 	})
+	// The open's mark: its wait runs first, as in the test above.
+	io.f.clock = io.f.clock.Add(freshMailboxWait)
 	if err := io.m.Lock(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -549,9 +551,13 @@ func TestRelayRotPhoneUnlockRetryReportsTheStoredHeaderSeqResetFails(t *testing.
 	// the reset after it fail.
 	io.f.st.passHeader, io.f.st.failHeader = 2, 2
 	io.f.st.mu.Unlock()
+	_, regs0 := io.rw.log()
 	m, uo := io.f.phoneUnlockOut()
 	if m != nil || uo.Code != CodeRetry {
 		t.Fatalf("unlock 1: %+v", uo)
+	}
+	if _, regs := io.rw.log(); len(regs) <= len(regs0) {
+		t.Fatal("the phone's unlock made no attempt")
 	}
 	if h := io.f.storedHeader(); uo.HeaderSeq != h.HeaderSeq || h.HeaderSeq != stored+2 {
 		t.Fatalf("retry reports header_seq %d; stored %d (before %d)", uo.HeaderSeq, h.HeaderSeq, stored)

@@ -107,6 +107,13 @@ func (m *Manager) inheritedKeyAtOpen(ctx context.Context, p RecoveryOpenParams, 
 			m.rk.next = at.Add(freshMailboxWait)
 			m.dirty = true
 		}
+		// The mark or this answer's wait comes after any answer of an
+		// attempt stored by an earlier run (relayKeyAttempt): that attempt
+		// is accounted for, and a later run does not wait again for it. A
+		// refused key keeps it: its next attempt waits from then.
+		if cur := m.st.Relay.Pending; cur == pr && (answered201 || pr.Refused == "") {
+			pr.Attempt = time.Time{}
+		}
 	}()
 	hadAnchor := !m.st.Relay.Anchor.IsZero()
 	out, created, byRotate, err := m.relayKeyCall(ctx)

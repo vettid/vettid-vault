@@ -838,6 +838,12 @@ func (m *Manager) relayKeyAttempt(ctx context.Context, atUnlock bool) bool {
 			return false
 		}
 	}
+	if m.freshWaitRuns(pr) {
+		// The wait after a mailbox that may have been made afresh, whatever
+		// else holds: at an unlock too, and for a key in the refused state
+		// (its one attempt at an unlock waits for an unlock after the wait).
+		return false
+	}
 	switch {
 	case pr.Refused != "":
 		// One attempt at each unlock, no sooner retries.
@@ -850,8 +856,6 @@ func (m *Manager) relayKeyAttempt(ctx context.Context, atUnlock bool) bool {
 		// The sooner retries' wait (full jitter) runs: no attempt may be
 		// made, before a collect either (beforeCollect).
 		return false
-	case m.freshWaitRuns(pr):
-		return false // the wait after a mailbox created afresh, at an unlock too
 	}
 	if !pr.Created.IsZero() && m.stateBehind {
 		// It fails closed: the answer's time of a mailbox made afresh is
@@ -888,7 +892,7 @@ func (m *Manager) relayKeyAttempt(ctx context.Context, atUnlock bool) bool {
 		m.rk.triedRefused = true
 	}
 	out, created, byRotate, err := m.relayKeyCall(ctx)
-	pr.Attempt = time.Time{} // answered (or not): the write below, or the next, clears it
+	pr.Attempt = time.Time{} // the call is over, answered or not: the write below, or the next, clears it
 	m.dirty = true
 	switch out {
 	case relayDone:

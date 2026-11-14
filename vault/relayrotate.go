@@ -74,6 +74,9 @@ type relayKeyRun struct {
 	// relay key stored as pending meanwhile is that recovery's own
 	// (PendingRelay.Recovery).
 	openRecovery string
+	// openRepeat: that open is a repeat whose step 2 was not stored
+	// (resumeRecovery): what the lost run learnt of the relay is unknown.
+	openRepeat bool
 	// unlockTried: this unlock's attempt was made before the recovered
 	// phone's bundle (relayKeyBeforeBundle).
 	unlockTried bool

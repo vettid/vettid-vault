@@ -4,6 +4,8 @@ import (
 	"context"
 	"testing"
 	"time"
+
+	"github.com/vettid/vettid-relay/relayclient"
 )
 
 // A rotate that succeeds and a registration after it answered 201 (the
@@ -352,6 +354,49 @@ func TestRelayRotInheritedMarkCompletionMintsAgain(t *testing.T) {
 	if fx.mailbox() != pmb {
 		t.Fatal("not made current after the wait")
 	}
+	fx.heldMintedSince(mark)
+}
+
+// The rotate succeeds and the registration after it gets no answer: it may
+// have made the successor afresh (a lost 201), so the key is not completed
+// at once; it waits freshMailboxWait from the answer, and the attempt after
+// the wait completes it, its held tokens minted again.
+func TestRelayRotRegistrationAfterARotateUnansweredWaits(t *testing.T) {
+	fx := newRotFx(t)
+	fx.w.rotate = []error{relayErr(503, "")}
+	if err := fx.credRotate(); err != nil {
+		t.Fatal(err)
+	}
+	pmb := fx.pendingMailbox()
+	fx.w.mu.Lock()
+	fx.w.register = []error{relayErr(503, "")} // the registration after the rotate: no answer
+	fx.w.mu.Unlock()
+	fx.setClk(fx.clk.Add(time.Hour))
+	fx.batch() // the sooner retry: the rotate answered, the registration not
+	pr := fx.pending()
+	if pr == nil || fx.pendingMailbox() != pmb || pr.Created.IsZero() {
+		t.Fatalf("completed at once, or no wait: pending %v", pr)
+	}
+	if n := len(fx.acts("identity.rotation_failed")); n != 1 {
+		t.Fatalf("the restarted wait audited %d times, want 1", n)
+	}
+	fx.setClk(pr.Created.Add(freshMailboxWait - time.Second))
+	fx.batch()
+	if fx.pendingMailbox() != pmb {
+		t.Fatal("completed inside the wait")
+	}
+	fx.setClk(pr.Created.Add(freshMailboxWait))
+	fx.batch()
+	if fx.mailbox() != pmb {
+		t.Fatal("not made current after the wait")
+	}
+	fx.heldMintedSince(pr.Created)
+}
+
+// heldMintedSince checks that every held token of the current key was
+// minted at or after from (iat).
+func (fx *rotFx) heldMintedSince(from time.Time) {
+	fx.t.Helper()
 	checked := 0
 	fx.do(func(m *Manager) {
 		for id, r := range m.st.Relay.Recipients {
@@ -360,14 +405,319 @@ func TestRelayRotInheritedMarkCompletionMintsAgain(t *testing.T) {
 					continue
 				}
 				c, err := parseOwnToken(m, s)
-				if err != nil || c.Iat.Before(mark) {
-					t.Fatalf("%s: iat %v before the mark %v (%v)", id, c.Iat, mark, err)
+				if err != nil || c.Iat.Before(from) {
+					fx.t.Fatalf("%s: iat %v before %v (%v)", id, c.Iat, from, err)
 				}
 				checked++
 			}
 		}
 	})
 	if checked == 0 {
-		t.Fatal("no held token to check")
+		fx.t.Fatal("no held token to check")
+	}
+}
+
+// The registration after a rotate that succeeded is refused by the relay
+// itself: a 429 with retry_after carried nothing out, so nothing was made
+// afresh; the retry_after is honored (no registration before it runs out)
+// and the unlock's failed attempt is audited. A definite refusal of that
+// registration created nothing either: the key is completed at once. A cut
+// call (the context ended) may have been a 201: the key waits.
+func TestRelayRotRegistrationAfterARotateRelaysOwnRefusal(t *testing.T) {
+	t.Run("429 retry_after", func(t *testing.T) {
+		fx := newRotFx(t)
+		fx.w.rotate = []error{relayErr(503, "")}
+		if err := fx.credRotate(); err != nil {
+			t.Fatal(err)
+		}
+		pmb := fx.pendingMailbox()
+		fx.w.mu.Lock()
+		fx.w.register = []error{&relayclient.Error{Status: 429, Code: "rate_limited", RetryAfter: 7200}}
+		fx.w.mu.Unlock()
+		fx.setClk(fx.clk.Add(time.Hour))
+		fx.restart() // the unlock's attempt
+		pr := fx.pending()
+		if pr == nil || fx.pendingMailbox() != pmb || !pr.Created.IsZero() || !pr.RetryAfter.Equal(fx.clk.Add(2*time.Hour)) {
+			t.Fatalf("pending %+v: want the retry_after kept, no wait", pr)
+		}
+		if n := len(fx.acts("identity.rotation_failed")); n != 1 {
+			t.Fatalf("audited %d times, want 1", n)
+		}
+		_, regs0 := fx.w.log()
+		for range 5 {
+			fx.setClk(fx.clk.Add(20 * time.Minute))
+			fx.batch()
+		}
+		if _, regs := fx.w.log(); len(regs) != len(regs0) {
+			t.Fatalf("registered inside the retry_after: %v", regs[len(regs0):])
+		}
+	})
+	t.Run("definite refusal", func(t *testing.T) {
+		fx := newRotFx(t)
+		fx.w.rotate = []error{relayErr(503, "")}
+		if err := fx.credRotate(); err != nil {
+			t.Fatal(err)
+		}
+		pmb := fx.pendingMailbox()
+		fx.w.mu.Lock()
+		fx.w.register = []error{relayErr(400, "bad_request")}
+		fx.w.mu.Unlock()
+		fx.setClk(fx.clk.Add(time.Hour))
+		fx.batch()
+		if fx.mailbox() != pmb {
+			t.Fatalf("not completed at once: pending %+v", fx.pending())
+		}
+	})
+	t.Run("cut call", func(t *testing.T) {
+		fx := newRotFx(t)
+		fx.w.rotate = []error{relayErr(503, "")}
+		if err := fx.credRotate(); err != nil {
+			t.Fatal(err)
+		}
+		pmb := fx.pendingMailbox()
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		fx.w.onRotate = cancel // the call is cut after the rotate, before the registration's answer
+		fx.w.mu.Lock()
+		fx.w.register = []error{context.Canceled}
+		fx.w.mu.Unlock()
+		fx.setClk(fx.clk.Add(time.Hour))
+		fx.do(func(m *Manager) { m.relayKeyStep(ctx, false) })
+		fx.w.onRotate = nil
+		if pr := fx.pending(); pr == nil || fx.pendingMailbox() != pmb || pr.Created.IsZero() {
+			t.Fatalf("pending %+v: want the wait", pr)
+		}
+	})
+}
+
+// The registration after a rotate answers 201 (the successor made afresh)
+// and the write that stores its time fails; the vault then crashes. The
+// attempt stored before the call tells the next run that such an answer may
+// have been lost: the unlock does not complete the key (a rotate within the
+// grace would answer 200 and the registration 200), it waits
+// freshMailboxWait from that run, and the attempt after the wait completes
+// it.
+func TestRelayRotCreatedAnswerLostAtACrashWaits(t *testing.T) {
+	fx := newRotFx(t)
+	fx.w.rotate = []error{relayErr(503, "")}
+	if err := fx.credRotate(); err != nil {
+		t.Fatal(err)
+	}
+	pmb := fx.pendingMailbox()
+	fx.w.onRotate = func() {
+		fx.w.mu.Lock()
+		delete(fx.w.live, pmb) // the successor gone again: the registration makes it afresh (201)
+		fx.w.mu.Unlock()
+		fx.fs.setFail(1 << 20) // and every write after the rotate fails
+	}
+	fx.setClk(fx.clk.Add(time.Hour))
+	fx.do(func(m *Manager) { m.relayKeyStep(context.Background(), false) }) // the sooner retry
+	if pr := fx.pending(); pr == nil || pr.Created.IsZero() {
+		t.Fatalf("no 201 kept in memory: %+v", pr)
+	}
+	fx.w.onRotate = nil
+	fx.fs.setFail(0)
+	rot0, _ := fx.w.log()
+	fx.crash() // the 201's time was never stored
+	if rot, _ := fx.w.log(); len(rot) != len(rot0) || fx.pendingMailbox() != pmb {
+		t.Fatalf("the unlock attempted at once: rotates %v, pending %s", rot, fx.pendingMailbox())
+	}
+	pr := fx.pending()
+	if pr == nil || pr.Unconfirmed.IsZero() {
+		t.Fatalf("pending %+v: not marked", pr)
+	}
+	fx.setClk(pr.Unconfirmed.Add(freshMailboxWait - time.Second))
+	fx.batch()
+	if fx.pendingMailbox() != pmb {
+		t.Fatal("completed inside the wait")
+	}
+	fx.setClk(pr.Unconfirmed.Add(freshMailboxWait))
+	fx.batch()
+	if fx.mailbox() != pmb {
+		t.Fatal("not made current after the wait")
+	}
+}
+
+// The attempt's own write before the call fails: no call is made (it fails
+// closed), and nothing of the attempt stays in memory.
+func TestRelayRotAttemptNotStoredMakesNoCall(t *testing.T) {
+	fx := newRotFx(t)
+	fx.w.rotate = []error{relayErr(503, "")}
+	if err := fx.credRotate(); err != nil {
+		t.Fatal(err)
+	}
+	for _, at := range []string{"state", "header"} {
+		rot0, _ := fx.w.log()
+		fx.fs.mu.Lock()
+		if at == "state" {
+			fx.fs.failState = 1
+		} else {
+			fx.fs.failHeader = 1 // the state put stored, the header put not
+		}
+		fx.fs.mu.Unlock()
+		fx.setClk(fx.clk.Add(time.Hour))
+		fx.batch()
+		if rot, _ := fx.w.log(); len(rot) != len(rot0) {
+			t.Fatalf("%s: a call without the attempt stored: rotates %v", at, rot)
+		}
+		if pr := fx.pending(); pr == nil || !pr.Attempt.IsZero() {
+			t.Fatalf("%s: pending %+v", at, pr)
+		}
+	}
+}
+
+// An attempt stored by a run whose answer may have made the mailbox afresh,
+// that answer's own write lost: whatever else holds of the pending key
+// (the refused state, a retry_after run out, an older wait run out), the
+// next run's unlock and sooner retries make no attempt before
+// freshMailboxWait has run from that run, and one is made after it.
+func TestRelayRotStoredAttemptWaitsWhateverTheGate(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		set  func(pr *PendingRelay, now time.Time)
+	}{
+		{"plain", func(*PendingRelay, time.Time) {}},
+		{"refused", func(pr *PendingRelay, _ time.Time) { pr.Refused = "forbidden" }},
+		{"retry_after run out", func(pr *PendingRelay, now time.Time) { pr.RetryAfter = now.Add(-time.Minute) }},
+		// Running at the next run, out inside the mark's wait: the mark is
+		// set all the same.
+		{"retry_after running", func(pr *PendingRelay, now time.Time) { pr.RetryAfter = now.Add(7 * time.Minute) }},
+		{"older wait run out", func(pr *PendingRelay, now time.Time) { pr.Created = now.Add(-time.Hour) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fx := newRotFx(t)
+			fx.w.rotate = []error{relayErr(503, "")}
+			if err := fx.credRotate(); err != nil {
+				t.Fatal(err)
+			}
+			fx.setClk(fx.clk.Add(time.Hour))
+			fx.do(func(m *Manager) {
+				pr := m.st.Relay.Pending
+				tc.set(pr, m.now())
+				pr.Attempt = m.now().UTC()
+				m.dirty = true
+				if err := m.persist(context.Background(), false); err != nil {
+					t.Fatal(err)
+				}
+			})
+			calls := func() int { rot, regs := fx.w.log(); return len(rot) + len(regs) }
+			c0 := calls()
+			fx.setClk(fx.clk.Add(5 * time.Minute)) // the next run comes later than the attempt
+			start := fx.clk
+			fx.crash() // the unlock finds the attempt
+			pr := fx.pending()
+			if calls() != c0 || pr == nil || pr.Unconfirmed.Before(start) || !pr.Attempt.IsZero() {
+				t.Fatalf("an attempt at once, or not marked: calls %d→%d, pending %+v", c0, calls(), pr)
+			}
+			// The mark is stored (by this run's writes): a crash now keeps it,
+			// and the run after does not mark again at its own time.
+			mark := pr.Unconfirmed
+			fx.setClk(fx.clk.Add(time.Minute))
+			fx.crash()
+			if pr = fx.pending(); pr == nil || !pr.Unconfirmed.Equal(mark) || calls() != c0 {
+				t.Fatalf("the mark not stored by its own write: pending %+v (mark %v)", pr, mark)
+			}
+			fx.setClk(pr.Unconfirmed.Add(freshMailboxWait - time.Second))
+			fx.batch()
+			fx.restart()
+			if calls() != c0 {
+				t.Fatalf("an attempt inside the wait: calls %d→%d", c0, calls())
+			}
+			fx.setClk(pr.Unconfirmed.Add(freshMailboxWait))
+			fx.restart()
+			if calls() == c0 {
+				t.Fatal("no attempt after the wait")
+			}
+		})
+	}
+}
+
+// Past the grace, a registration answered 201 while an older wait is
+// stored: the mailbox was made afresh again, so the wait starts again from
+// this answer (a 200 there would leave the stored wait standing).
+func TestRelayRotRegisteredAfreshPastTheGraceRestartsTheWait(t *testing.T) {
+	fx := newRotFx(t)
+	fx.w.rotate = []error{relayErr(503, "")}
+	if err := fx.credRotate(); err != nil {
+		t.Fatal(err)
+	}
+	pmb, k := fx.pendingMailbox(), fx.mailbox()
+	fx.do(func(m *Manager) {
+		m.st.Relay.Pending.Created = m.now().Add(-time.Hour).UTC() // a wait run out long ago
+		m.dirty = true
+		if err := m.persist(context.Background(), false); err != nil {
+			t.Fatal(err)
+		}
+	})
+	fx.w.mu.Lock()
+	delete(fx.w.live, k) // past the grace: the rotate is answered mailbox_unknown
+	fx.w.mu.Unlock()
+	fx.setClk(fx.clk.Add(time.Hour))
+	fx.batch()
+	pr := fx.pending()
+	if pr == nil || fx.pendingMailbox() != pmb || !pr.Created.Equal(fx.clk) {
+		t.Fatalf("completed inside the new wait, or the wait not restarted: pending %+v", pr)
+	}
+}
+
+// At a recovery's open, the registration after a rotate that succeeded
+// gets no answer: the key waits, and the relay's failure is audited, as at
+// an unlock.
+func TestRelayRotInheritedOpenUnansweredRegistrationAudited(t *testing.T) {
+	fx := newRotFx(t)
+	fx.w.rotate = []error{relayErr(503, "")}
+	if err := fx.credRotate(); err != nil {
+		t.Fatal(err)
+	}
+	fx.w.mu.Lock()
+	fx.w.register = []error{relayErr(503, "")}
+	fx.w.mu.Unlock()
+	fx.setClk(fx.clk.Add(time.Hour))
+	fx.do(func(m *Manager) {
+		m.inheritedKeyAtOpen(context.Background(), RecoveryOpenParams{Options: fx.fixture.opts}, fx.clk)
+	})
+	if pr := fx.pending(); pr == nil || pr.Created.IsZero() {
+		t.Fatalf("no wait: %+v", pr)
+	}
+	if n := len(fx.acts("identity.rotation_failed")); n != 1 {
+		t.Fatalf("audited %d times, want 1", n)
+	}
+}
+
+// A failed attempt write backs the sooner retries off: a batch inside that
+// backoff makes no attempt and tries no write for it.
+func TestRelayRotFailedAttemptWriteBacksOff(t *testing.T) {
+	fx := newRotFx(t)
+	fx.w.rotate = []error{relayErr(503, "")}
+	if err := fx.credRotate(); err != nil {
+		t.Fatal(err)
+	}
+	fx.setClk(fx.clk.Add(time.Hour))
+	fx.fs.setFail(1)
+	var fails0, fails int
+	var next time.Time
+	fx.do(func(m *Manager) {
+		fails0 = m.rk.fails
+		m.relayKeyStep(context.Background(), false)
+		fails, next = m.rk.fails, m.rk.next
+	})
+	if fails != fails0+1 {
+		t.Fatalf("the failed attempt write not counted: fails %d→%d", fails0, fails)
+	}
+	if !next.After(fx.clk) {
+		// The full jitter starts at 0; a draw of exactly no wait is negligible.
+		t.Fatalf("no backoff after the failed attempt write: next %v, now %v", next, fx.clk)
+	}
+	rot0, regs0 := fx.w.log()
+	fx.fs.setFail(1 << 20) // a write tried now would fail and count
+	fx.do(func(m *Manager) {
+		m.relayKeyStep(context.Background(), false) // still inside the backoff
+		if m.rk.fails != fails {
+			t.Fatalf("a write tried inside the backoff: fails %d, want %d", m.rk.fails, fails)
+		}
+	})
+	fx.fs.setFail(0)
+	if rot, regs := fx.w.log(); len(rot) != len(rot0) || len(regs) != len(regs0) {
+		t.Fatalf("an attempt inside the backoff: rotates %v, registers %v", rot, regs)
 	}
 }

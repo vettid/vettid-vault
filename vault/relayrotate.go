@@ -665,6 +665,15 @@ func relaysOwnRefusal(err error) bool {
 	return e.Status == 400 && e.Code == "bad_request" || e.Status == 401 && e.Code == "signature_invalid"
 }
 
+// mayHaveBeenCarriedOut reports whether a request that failed with err may
+// still have been carried out by the relay: an error with no answer from it
+// (transport) or a 5xx. Any 4xx is the relay's (or a proxy's) refusal: not
+// carried out.
+func mayHaveBeenCarriedOut(err error) bool {
+	st, ok := statusOf(err)
+	return !ok || st >= 500
+}
+
 // retryAfterOf is a 429 rate_limited answer's retry_after.
 func retryAfterOf(err error) time.Duration {
 	var e *relayclient.Error
@@ -696,15 +705,25 @@ func (m *Manager) relayKeyCall(ctx context.Context) (out relayOutcome, created, 
 		// mailbox afresh after all (the successor gone again): every held
 		// token is minted again after freshMailboxWait (RELAY-PROTOCOL
 		// §6.10).
-		if lim, c, rerr := pending.RegisterCreated(ctx); rerr == nil {
+		lim, c, rerr := pending.RegisterCreated(ctx)
+		switch {
+		case rerr == nil:
 			m.limits, created = lim, c
-		} else if ctx.Err() != nil || !definiteRefusal(rerr) {
-			// No definite answer: the registration may have been a 201 whose
-			// answer was lost (the successor gone again, made afresh), so it
-			// is taken as one and the key waits freshMailboxWait. A definite
-			// refusal created nothing.
-			created = true
+		case ctx.Err() != nil || mayHaveBeenCarriedOut(rerr):
+			// No answer (a cut call, a transport failure, a 5xx): the
+			// registration may have been a 201 whose answer was lost (the
+			// successor gone again, made afresh), so it is taken as one and
+			// the key waits freshMailboxWait. The error is reported with the
+			// outcome: a wait restarted this way is audited.
+			return relayDone, true, true, rerr
+		case !definiteRefusal(rerr):
+			// The relay's own refusal of the request (429 rate_limited,
+			// timestamp_stale, replay_detected): it carried nothing out and
+			// created nothing. The key stays pending and is retried as after
+			// no answer, its retry_after honored.
+			return relayNoAnswer, false, false, rerr
 		}
+		// A definite refusal created nothing either.
 		return relayDone, created, true, nil
 	}
 	if RelayCode(err) != CodeMailboxUnknown {
@@ -857,16 +876,6 @@ func (m *Manager) relayKeyAttempt(ctx context.Context, atUnlock bool) bool {
 		// made, before a collect either (beforeCollect).
 		return false
 	}
-	if !pr.Created.IsZero() && m.stateBehind {
-		// It fails closed: the answer's time of a mailbox made afresh is
-		// stored before the key is completed. Unstored, a lock or a restart
-		// would forget the wait, and an attempt then (a repeated rotate
-		// within the grace, answered 200) would complete it with tokens the
-		// relay refuses.
-		if m.persist(ctx, false) != nil {
-			return false
-		}
-	}
 	// §3.4.2 RK14 step 1: the anchor, in a write of its own just before
 	// the first attempt away from the current key. Nothing is sent until
 	// it is stored. The attempt is stored in the same write, before every
@@ -879,12 +888,19 @@ func (m *Manager) relayKeyAttempt(ctx context.Context, atUnlock bool) bool {
 	}
 	pr.Attempt = now.UTC()
 	m.dirty = true
+	// (It also stores a Created a failed write left behind, stateBehind:
+	// the answer's time of a mailbox made afresh is stored before the key
+	// is completed.)
 	if err := m.persist(ctx, false); err != nil {
 		if m.st != nil {
 			if anchored {
 				m.st.Relay.Anchor = time.Time{}
 			}
 			pr.Attempt = time.Time{}
+			m.dirty = true // the store may hold what memory no longer does
+			// The sooner retries back off while the write keeps failing.
+			m.rk.fails++
+			m.rk.next = now.Add(relayRetryWait(m.rk.fails))
 		}
 		return false
 	}
@@ -916,6 +932,11 @@ func (m *Manager) relayKeyAttempt(ctx context.Context, atUnlock bool) bool {
 			m.dirty = true
 			m.rk.fails, m.rk.next = 0, at.Add(freshMailboxWait)
 			_ = m.persist(ctx, false)
+			if err != nil {
+				// The wait was restarted by a registration with no answer: the
+				// relay failed it, so it is audited (once per unlock).
+				m.relayKeyFailed(at)
+			}
 			return false
 		}
 		if !m.makePendingCurrent(mayBeFresh(pr, created), now) {

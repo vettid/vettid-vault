@@ -120,6 +120,7 @@ func TestRelayRotStep2AnchorStoredBeforeTheRotate(t *testing.T) {
 	if rot, _ := fx.w.log(); len(rot) != 0 {
 		t.Fatalf("rotated without the anchor stored: %v", rot)
 	}
+	fx.setClk(fx.clk.Add(time.Minute)) // past the sooner retries' first backoff after the failed write
 	fx.batch()
 	rot, _ := fx.w.log()
 	if len(rot) != 1 || rot[0] != mb+">"+fx.pendingMailbox() || !anchorAtRotate.Equal(fx.clk) {

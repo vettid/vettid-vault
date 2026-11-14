@@ -90,8 +90,10 @@ func (m *Manager) inheritedKeyAtOpen(ctx context.Context, p RecoveryOpenParams, 
 	// tombstone's window. The mark is not Created: a real 201 after it
 	// still starts the wait. It costs a recovery that inherits a pending
 	// key a wait (and a second when a later registration makes the mailbox
-	// afresh). Not a key left in the refused state: relayKeyAttempt tries
-	// that one at the next unlock; a 201 then starts the wait, and an
+	// afresh). Not a key left in the refused state: the open does not mark
+	// it (an attempt an earlier run stored stays, below), and its next
+	// unlock's attempt waits only if a wait is stored (that kept attempt
+	// marks one, relayKeyAttempt); a 201 then starts the wait, and an
 	// answer that the mailbox exists completes it, its held tokens minted
 	// again only if a wait was stored with it (Created or Unconfirmed,
 	// mayBeFresh). A refused key with neither, or with an old Created, is
@@ -107,15 +109,22 @@ func (m *Manager) inheritedKeyAtOpen(ctx context.Context, p RecoveryOpenParams, 
 			m.rk.next = at.Add(freshMailboxWait)
 			m.dirty = true
 		}
+		// The mark or this answer's wait comes after any answer of an
+		// attempt stored by an earlier run (relayKeyAttempt): that attempt
+		// is accounted for, and a later run does not wait again for it. A
+		// refused key keeps it: its next attempt waits from then.
+		if cur := m.st.Relay.Pending; cur == pr && (answered201 || pr.Refused == "") {
+			pr.Attempt = time.Time{}
+		}
 	}()
 	hadAnchor := !m.st.Relay.Anchor.IsZero()
-	out, created, byRotate, err := m.relayKeyCall(ctx)
-	if !hadAnchor && !(out == relayRefused && byRotate && relaysOwnRefusal(err)) {
+	out, created, restarts, err := m.relayKeyCall(ctx)
+	if !hadAnchor && !(out == relayRefused && restarts && relaysOwnRefusal(err)) {
 		m.st.Relay.Anchor = now.UTC()
 	}
 	m.dirty = true
 	switch {
-	case out == relayDone && created && (pr.Created.IsZero() || byRotate):
+	case out == relayDone && created && (pr.Created.IsZero() || restarts):
 		// A mailbox created afresh: the key stays pending until
 		// freshMailboxWait has run (relayKeyAttempt), the answer's time
 		// stored with it by the step-2 write; the recovery's rotation owes
@@ -127,6 +136,11 @@ func (m *Manager) inheritedKeyAtOpen(ctx context.Context, p RecoveryOpenParams, 
 		pr.Unconfirmed = time.Time{} // a real answer's wait replaces a mark
 		m.rk.next = at.Add(freshMailboxWait)
 		answered201 = true
+		if err != nil && ctx.Err() == nil {
+			// The wait came from a registration after a rotate with no
+			// answer: a failure of the relay, audited as at an unlock.
+			m.relayKeyFailedAt(at)
+		}
 		return
 	case out == relayDone:
 		// The relay answers that the key's mailbox exists: it may have been
@@ -137,7 +151,7 @@ func (m *Manager) inheritedKeyAtOpen(ctx context.Context, p RecoveryOpenParams, 
 		// needlessly.
 		pr.Refused, pr.RetryAfter = "", time.Time{}
 		return
-	case out == relayRefused && byRotate:
+	case out == relayRefused && restarts:
 		m.relayKeyFailedAt(now)
 		named := pr.Named
 		m.dropPendingRelay()

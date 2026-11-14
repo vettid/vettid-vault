@@ -120,6 +120,7 @@ func TestRelayRotStep2AnchorStoredBeforeTheRotate(t *testing.T) {
 	if rot, _ := fx.w.log(); len(rot) != 0 {
 		t.Fatalf("rotated without the anchor stored: %v", rot)
 	}
+	fx.setClk(fx.clk.Add(time.Minute)) // past the sooner retries' first backoff after the failed write
 	fx.batch()
 	rot, _ := fx.w.log()
 	if len(rot) != 1 || rot[0] != mb+">"+fx.pendingMailbox() || !anchorAtRotate.Equal(fx.clk) {
@@ -215,9 +216,12 @@ func TestRelayRotCrashAfterStep1(t *testing.T) {
 	}
 }
 
-// A crash between the rotate and the second write: the next unlock calls
-// the rotate again with the same key, which the relay answers with the
-// same mailbox, and the second write follows.
+// A crash between the rotate and the second write: the attempt stored
+// before the call tells the next run that an answer may have been lost (a
+// 201 that made the mailbox afresh cannot be ruled out), so the key waits
+// freshMailboxWait from that run; then the rotate is called again with the
+// same key, which the relay answers with the same mailbox, and the second
+// write follows.
 func TestRelayRotCrashBetweenRotateAndSecondWrite(t *testing.T) {
 	fx := newRotFx(t)
 	mb := fx.mailbox()
@@ -231,8 +235,18 @@ func TestRelayRotCrashBetweenRotateAndSecondWrite(t *testing.T) {
 	}
 	fx.w.onRotate = nil
 	fx.fs.setFail(0)
-	// Memory went ahead; the store still holds the key pending.
+	// Memory went ahead; the store still holds the key pending, with its
+	// attempt.
 	fx.crash()
+	if rot, _ := fx.w.log(); len(rot) != 1 {
+		t.Fatalf("rotates %v: the unlock did not wait", rot)
+	}
+	pr := fx.pending()
+	if pr == nil || pr.Unconfirmed.IsZero() || !pr.Attempt.IsZero() {
+		t.Fatalf("pending %+v: want marked Unconfirmed, the attempt cleared", pr)
+	}
+	fx.setClk(pr.Unconfirmed.Add(freshMailboxWait))
+	fx.batch()
 	rot, _ := fx.w.log()
 	if len(rot) != 2 || rot[0] != rot[1] {
 		t.Fatalf("rotates %v: not the same key again", rot)

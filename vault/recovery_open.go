@@ -749,7 +749,9 @@ func resumeRecovery(ctx context.Context, p RecoveryOpenParams, hdr *Header, hver
 			m.zeroize()
 			return nil, out.fail(OpenNoRecovery)
 		}
+		m.rk.openRepeat = true
 		m.recoveryEvent(ctx, p, r, now)
+		m.rk.openRepeat = false
 	} else {
 		if err := m.loadKeys(); err != nil {
 			m.zeroize()

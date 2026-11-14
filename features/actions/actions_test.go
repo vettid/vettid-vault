@@ -418,7 +418,7 @@ func TestSharingThroughGrants(t *testing.T) {
 		id, _ := r.Obj(t).String("item_id")
 		return id
 	}
-	phone := put("data", "Phone", "555")
+	phone := put("data", "Phone", "phone-555")
 	wifi := put("secret", "Wi-Fi", "hunter22")
 	home := put("data", "Home", "1 Main")
 	a.h.Reset()
@@ -426,7 +426,7 @@ func TestSharingThroughGrants(t *testing.T) {
 	invoke(t, a, b, ItemsShare, `{"item_id":"`+phone+`","fields":["f1"]}`)
 	res := answer(t, a, b)
 	if str(t, res, "status") != StatusOK || strings.Count(string(res), `"grant_id"`) != 1 || !strings.Contains(string(res), `"ref":"`+phone+`"`) ||
-		strings.Contains(string(res), "555") || strings.Contains(string(res), "zz-hidden") || strings.Contains(string(res), "Other") {
+		strings.Contains(string(res), "phone-555") || strings.Contains(string(res), "zz-hidden") || strings.Contains(string(res), "Other") {
 		t.Fatalf("items.share: %s", res)
 	}
 	// B fetches the content through grants, sealed to its device.
@@ -448,7 +448,7 @@ func TestSharingThroughGrants(t *testing.T) {
 	if err != nil {
 		t.Fatalf("grant.value: %s", gv.Body)
 	}
-	if v, err := sharewire.OpenValue(rk, gid, fid, sealed); err != nil || !strings.Contains(string(v), `"value":"555"`) || strings.Contains(string(v), "Other") {
+	if v, err := sharewire.OpenValue(rk, gid, fid, sealed); err != nil || !strings.Contains(string(v), `"value":"phone-555"`) || strings.Contains(string(v), "Other") {
 		t.Fatalf("value: %q %v", v, err)
 	}
 	// One use only.

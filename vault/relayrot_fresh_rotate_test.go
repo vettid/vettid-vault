@@ -547,22 +547,26 @@ func TestRelayRotAttemptNotStoredMakesNoCall(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, at := range []string{"state", "header"} {
-		rot0, _ := fx.w.log()
-		fx.fs.mu.Lock()
-		if at == "state" {
-			fx.fs.failState = 1
-		} else {
-			fx.fs.failHeader = 1 // the state put stored, the header put not
-		}
-		fx.fs.mu.Unlock()
-		fx.setClk(fx.clk.Add(time.Hour))
-		fx.batch()
-		if rot, _ := fx.w.log(); len(rot) != len(rot0) {
-			t.Fatalf("%s: a call without the attempt stored: rotates %v", at, rot)
-		}
-		if pr := fx.pending(); pr == nil || !pr.Attempt.IsZero() {
-			t.Fatalf("%s: pending %+v", at, pr)
-		}
+		// Under the vault's lock: the collect loop makes sooner retries of
+		// its own, and nothing else may take the injected failure.
+		fx.do(func(m *Manager) {
+			fx.setClk(fx.clk.Add(time.Hour))
+			rot0, _ := fx.w.log()
+			fx.fs.mu.Lock()
+			if at == "state" {
+				fx.fs.failState = 1
+			} else {
+				fx.fs.failHeader = 1 // the state put stored, the header put not
+			}
+			fx.fs.mu.Unlock()
+			m.relayKeyStep(context.Background(), false) // the sooner retry
+			if rot, _ := fx.w.log(); len(rot) != len(rot0) {
+				t.Fatalf("%s: a call without the attempt stored: rotates %v", at, rot)
+			}
+			if pr := m.st.Relay.Pending; pr == nil || !pr.Attempt.IsZero() {
+				t.Fatalf("%s: pending %+v", at, pr)
+			}
+		})
 	}
 }
 
@@ -692,11 +696,11 @@ func TestRelayRotFailedAttemptWriteBacksOff(t *testing.T) {
 	if err := fx.credRotate(); err != nil {
 		t.Fatal(err)
 	}
-	fx.setClk(fx.clk.Add(time.Hour))
-	fx.fs.setFail(1)
 	var fails0, fails int
 	var next time.Time
-	fx.do(func(m *Manager) {
+	fx.do(func(m *Manager) { // under the vault's lock, as above
+		fx.setClk(fx.clk.Add(time.Hour))
+		fx.fs.setFail(1)
 		fails0 = m.rk.fails
 		m.relayKeyStep(context.Background(), false)
 		fails, next = m.rk.fails, m.rk.next
@@ -708,16 +712,16 @@ func TestRelayRotFailedAttemptWriteBacksOff(t *testing.T) {
 		// The full jitter starts at 0; a draw of exactly no wait is negligible.
 		t.Fatalf("no backoff after the failed attempt write: next %v, now %v", next, fx.clk)
 	}
-	rot0, regs0 := fx.w.log()
-	fx.fs.setFail(1 << 20) // a write tried now would fail and count
 	fx.do(func(m *Manager) {
+		rot0, regs0 := fx.w.log()
+		fx.fs.setFail(1 << 20) // a write tried now would fail and count
+		defer fx.fs.setFail(0)
 		m.relayKeyStep(context.Background(), false) // still inside the backoff
 		if m.rk.fails != fails {
 			t.Fatalf("a write tried inside the backoff: fails %d, want %d", m.rk.fails, fails)
 		}
+		if rot, regs := fx.w.log(); len(rot) != len(rot0) || len(regs) != len(regs0) {
+			t.Fatalf("an attempt inside the backoff: rotates %v, registers %v", rot, regs)
+		}
 	})
-	fx.fs.setFail(0)
-	if rot, regs := fx.w.log(); len(rot) != len(rot0) || len(regs) != len(regs0) {
-		t.Fatalf("an attempt inside the backoff: rotates %v, registers %v", rot, regs)
-	}
 }

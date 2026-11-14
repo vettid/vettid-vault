@@ -271,6 +271,14 @@ type PendingRelay struct {
 	// created the key's mailbox afresh (relayKeyCall): the second write
 	// waits until freshMailboxWait after it. Not secret.
 	Created time.Time `json:"created,omitzero"`
+	// Unconfirmed is when a recovery's open left the key pending without
+	// being able to rule out that a lost run of it (a failed step-1 or
+	// step-2 write, a crash after its attempt) had the key's mailbox made
+	// afresh, that answer's time lost with it (relayrecovery.go). The key is
+	// not completed before freshMailboxWait has run from it. Unlike Created
+	// it says nothing of a wait already had: a 201 after it starts the
+	// wait (and clears it). Absent in a state written before. Not secret.
+	Unconfirmed time.Time `json:"unconfirmed,omitzero"`
 }
 
 // HeldTokens are one recipient's tokens for a pending relay key, and their

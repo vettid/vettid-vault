@@ -307,3 +307,67 @@ func createdOf(pr *PendingRelay) time.Time {
 	}
 	return pr.Created
 }
+
+// A recovery's open over a key whose stored Created wait has run: a lost
+// run of this open may have had the mailbox made afresh again, its 201 newer
+// than Created, so an "exists" answer does not complete the key at the
+// open; it is marked Unconfirmed and waits.
+func TestRelayRotInheritedOpenOverARunCreatedWaitDoesNotComplete(t *testing.T) {
+	fx := newRotFx(t)
+	fx.w.rotate = []error{relayErr(503, "")}
+	if err := fx.credRotate(); err != nil {
+		t.Fatal(err)
+	}
+	pmb := fx.pendingMailbox()
+	fx.do(func(m *Manager) { m.st.Relay.Pending.Created = fx.clk.Add(-3 * freshMailboxWait) })
+	fx.do(func(m *Manager) {
+		m.inheritedKeyAtOpen(context.Background(), RecoveryOpenParams{Options: fx.fixture.opts}, fx.clk)
+	})
+	if pr := fx.pending(); pr == nil || fx.pendingMailbox() != pmb || pr.Unconfirmed.IsZero() {
+		t.Fatalf("completed at the open, or not marked: pending %v", pr)
+	}
+}
+
+// A key completed after its Unconfirmed mark's wait has every held token
+// minted again: the held tokens were minted before a lost run's deletion
+// could have come, so their iat may fall inside the tombstone's window.
+func TestRelayRotInheritedMarkCompletionMintsAgain(t *testing.T) {
+	fx := newRotFx(t)
+	fx.w.rotate = []error{relayErr(503, "")}
+	if err := fx.credRotate(); err != nil {
+		t.Fatal(err)
+	}
+	pmb := fx.pendingMailbox()
+	fx.setClk(fx.clk.Add(time.Hour))
+	fx.do(func(m *Manager) {
+		m.inheritedKeyAtOpen(context.Background(), RecoveryOpenParams{Options: fx.fixture.opts}, fx.clk)
+	})
+	pr := fx.pending()
+	if pr == nil || pr.Unconfirmed.IsZero() {
+		t.Fatalf("not marked: %v", pr)
+	}
+	mark := pr.Unconfirmed
+	fx.setClk(mark.Add(freshMailboxWait))
+	fx.batch()
+	if fx.mailbox() != pmb {
+		t.Fatal("not made current after the wait")
+	}
+	checked := 0
+	fx.do(func(m *Manager) {
+		for id, r := range m.st.Relay.Recipients {
+			for _, s := range []string{r.Standing, r.Reconnect} {
+				if s == "" {
+					continue
+				}
+				c, err := parseOwnToken(m, s)
+				if err != nil || c.Iat.Before(mark) {
+					t.Fatalf("%s: iat %v before the mark %v (%v)", id, c.Iat, mark, err)
+				}
+				checked++
+			}
+		}
+	})
+	if checked == 0 {
+		t.Fatal("no held token to check")
+	}
+}

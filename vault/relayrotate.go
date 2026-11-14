@@ -74,9 +74,6 @@ type relayKeyRun struct {
 	// relay key stored as pending meanwhile is that recovery's own
 	// (PendingRelay.Recovery).
 	openRecovery string
-	// openRepeat: that open is a repeat whose step 2 was not stored
-	// (resumeRecovery): what the lost run learnt of the relay is unknown.
-	openRepeat bool
 	// unlockTried: this unlock's attempt was made before the recovered
 	// phone's bundle (relayKeyBeforeBundle).
 	unlockTried bool
@@ -748,7 +745,31 @@ const freshMailboxTombstone = 90 * time.Second
 
 // freshWaitRuns reports whether pr waits for its mailbox made afresh.
 func (m *Manager) freshWaitRuns(pr *PendingRelay) bool {
-	return pr != nil && !pr.Created.IsZero() && m.now().Before(pr.Created.Add(freshMailboxWait))
+	end := freshWaitEnd(pr)
+	return !end.IsZero() && m.now().Before(end)
+}
+
+// freshWaitEnd is when the pending key's wait for a mailbox that may have
+// been made afresh ends: freshMailboxWait after the later of its Created and
+// Unconfirmed; zero with neither.
+func freshWaitEnd(pr *PendingRelay) time.Time {
+	if pr == nil {
+		return time.Time{}
+	}
+	from := pr.Created
+	if pr.Unconfirmed.After(from) {
+		from = pr.Unconfirmed
+	}
+	if from.IsZero() {
+		return time.Time{}
+	}
+	return from.Add(freshMailboxWait)
+}
+
+// mayBeFresh reports whether the pending key's held tokens must be minted
+// again when it is completed: the relay may have made its mailbox afresh.
+func mayBeFresh(pr *PendingRelay, created bool) bool {
+	return created || !pr.Created.IsZero() || !pr.Unconfirmed.IsZero()
 }
 
 // relayKeyStep completes a pending relay key after a state write: at the
@@ -858,12 +879,13 @@ func (m *Manager) relayKeyAttempt(ctx context.Context, atUnlock bool) bool {
 			// deletion may have come during the call.
 			at := m.now()
 			pr.Created, pr.Refused, pr.RetryAfter = at.UTC(), "", time.Time{}
+			pr.Unconfirmed = time.Time{} // a real answer's wait replaces the open's mark
 			m.dirty = true
 			m.rk.fails, m.rk.next = 0, at.Add(freshMailboxWait)
 			_ = m.persist(ctx, false)
 			return false
 		}
-		if !m.makePendingCurrent(created || !pr.Created.IsZero(), now) {
+		if !m.makePendingCurrent(mayBeFresh(pr, created), now) {
 			m.rk.next = now.Add(relayRetryWait(1))
 			return false
 		}
@@ -979,7 +1001,7 @@ func (m *Manager) relayKeyBeforeBundle(ctx context.Context) (code string, wait t
 	case now.Before(pr.RetryAfter):
 		wait = pr.RetryAfter.Sub(now)
 	case m.freshWaitRuns(pr):
-		wait = pr.Created.Add(freshMailboxWait).Sub(now)
+		wait = freshWaitEnd(pr).Sub(now)
 	case now.Before(m.rk.next):
 		wait = m.rk.next.Sub(now)
 	default:

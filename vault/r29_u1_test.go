@@ -21,11 +21,13 @@ type writeCounter struct {
 	store.Store
 	mu     sync.Mutex
 	writes int
+	keys   []string
 }
 
 func (w *writeCounter) Put(ctx context.Context, key string, data []byte, ifMatch store.Version) (store.Version, error) {
 	w.mu.Lock()
 	w.writes++
+	w.keys = append(w.keys, key)
 	w.mu.Unlock()
 	return w.Store.Put(ctx, key, data, ifMatch)
 }
@@ -33,8 +35,18 @@ func (w *writeCounter) Put(ctx context.Context, key string, data []byte, ifMatch
 func (w *writeCounter) Delete(ctx context.Context, key string, ifMatch store.Version) error {
 	w.mu.Lock()
 	w.writes++
+	w.keys = append(w.keys, key)
 	w.mu.Unlock()
 	return w.Store.Delete(ctx, key, ifMatch)
+}
+
+// onlyCountAndReset reports whether the writes were exactly an unlock's
+// count of its PIN attempt and its reset to 0, both to header key
+// hkey (§11.8: a right PIN whose unlock is refused writes nothing else).
+func (w *writeCounter) onlyCountAndReset(hkey string) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.writes == 2 && w.keys[0] == hkey && w.keys[1] == hkey
 }
 
 func (w *writeCounter) count() int {
@@ -74,8 +86,9 @@ func TestR29U1UnlockRefused(t *testing.T) {
 		if out.StateSeq == 0 {
 			t.Fatalf("messaging_release %d: no state_seq on the refusal (state_unreadable gives it)", release)
 		}
-		if wc.count() != 0 {
-			t.Fatalf("messaging_release %d: %d writes on refusal", release, wc.count())
+		// §11.8: the attempt's count and its reset, header only.
+		if !wc.onlyCountAndReset(store.HeaderKey(f.vid, testRelease.PCR0)) {
+			t.Fatalf("messaging_release %d: %d writes on refusal: %v", release, wc.count(), wc.keys)
 		}
 		for _, ev := range out.Events {
 			if ev.Event == "unlocked" {

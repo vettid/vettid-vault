@@ -441,7 +441,7 @@ type Manager struct {
 	idleOpened  bool
 	idleGrace   time.Time
 	started     bool
-	hadFailures bool // the header recorded failures before this unlock
+	hadFailures bool // the stored header holds a failure count this unlock resets
 	holdsDEK    bool // counted in unlocked
 	// ocCred caches whether the vault has a credential, for the owner
 	// check (refreshOwnerCred).
@@ -797,9 +797,6 @@ func newManager(o Options, st *State, hdr *Header, dek []byte) *Manager {
 		ephemeralSeen: map[string]time.Time{}, rates: map[string]*rateWindow{}, requests: map[string]string{}, requestTypes: map[string]string{},
 		unlockID: newUnlockID(),
 	}
-	if hdr != nil {
-		m.storedHeaderSeq = hdr.HeaderSeq
-	}
 	if o.Now != nil {
 		m.openedAt = o.Now()
 	}
@@ -809,6 +806,7 @@ func newManager(o Options, st *State, hdr *Header, dek []byte) *Manager {
 	}
 	if hdr != nil {
 		m.storedView = viewOf(hdr) // Create clears it: its header is not stored yet
+		m.storedHeaderSeq = hdr.HeaderSeq
 	}
 	if hdr != nil && len(hdr.AppKey) > 0 {
 		// The stored header names it already (a crash that lost the report

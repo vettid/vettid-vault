@@ -96,7 +96,15 @@ func fromParams(p recovery.Params) KDFParams {
 
 // deriveUnlockKey is §11.14.1's unlock_key from the PIN, the phone's
 // secret, the KDF parameters and the pepper.
+// onDeriveUnlockKey is a test seam: called, when set, at every derivation of
+// an unlock key from a PIN (§11.8: none before an unlock's count is
+// stored). Nil outside tests.
+var onDeriveUnlockKey func()
+
 func deriveUnlockKey(pin string, secret []byte, k KDFParams, pepper []byte, vaultID string) ([]byte, error) {
+	if onDeriveUnlockKey != nil {
+		onDeriveUnlockKey()
+	}
 	if pin == "" || len(secret) != recovery.SecretSize || !k.valid() {
 		return nil, ErrKDF
 	}

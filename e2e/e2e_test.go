@@ -236,27 +236,29 @@ func connOf(t *testing.T, tv *testVault) string {
 }
 
 // V2 exit: the split-brain guard locks a second writer (§12.3). Two
-// instances hold the same vault; after the first flushes, the second's
-// conditional write finds a newer version and it zeroizes at once,
-// without acking, so the message is redelivered to the first.
+// instances hold the same vault. The later unlock stores the header
+// (§11.8 counts the attempt before the PIN is tested), so the instance
+// unlocked first is the stale one: after the current one flushes, the
+// stale one's conditional write finds a newer version and it zeroizes at
+// once, without acking, so the message is redelivered to the current one.
 func TestSplitBrainLocksSecondWriter(t *testing.T) {
 	r := relaytest.Start(t, nil)
 	a := newTestVault(t, r.URL, "a", nil)
 	a.stop()
 	ctx := ctxT(t, 60*time.Second)
 
-	second, _, err := a.unlock(ctx, nil)
+	stale := a.manager()
+	current, _, err := a.unlock(ctx, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	first := a.manager()
-	// The first instance processes a request and flushes.
+	// The current instance processes a request and flushes.
 	id, err := a.app.Send(ctx, "vault.status", json.RawMessage(`{}`))
 	if err != nil {
 		t.Fatal(err)
 	}
 	for {
-		n, err := first.Step(ctx)
+		n, err := current.Step(ctx)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -267,13 +269,13 @@ func TestSplitBrainLocksSecondWriter(t *testing.T) {
 	if _, err := a.app.AwaitResponse(ctx, id); err != nil {
 		t.Fatal(err)
 	}
-	// The stale second instance gets the next message and must lock.
+	// The stale instance gets the next message and must lock.
 	id2, err := a.app.Send(ctx, "vault.status", json.RawMessage(`{}`))
 	if err != nil {
 		t.Fatal(err)
 	}
-	for !second.Locked() {
-		_, err := second.Step(ctx)
+	for !stale.Locked() {
+		_, err := stale.Step(ctx)
 		if errors.Is(err, vault.ErrSplitBrain) || errors.Is(err, vault.ErrLocked) {
 			break
 		}
@@ -281,14 +283,14 @@ func TestSplitBrainLocksSecondWriter(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if !second.Locked() {
-		t.Fatal("second writer not locked")
+	if !stale.Locked() {
+		t.Fatal("stale writer not locked")
 	}
-	// Not acked: redelivered to the first instance after the visibility
+	// Not acked: redelivered to the current instance after the visibility
 	// timeout.
-	a.start(first)
+	a.start(current)
 	if _, err := a.app.AwaitResponse(ctx, id2); err != nil {
-		t.Fatalf("redelivery to the first writer: %v", err)
+		t.Fatalf("redelivery to the current writer: %v", err)
 	}
 }
 
@@ -315,8 +317,11 @@ func TestLockUnlockRollback(t *testing.T) {
 		t.Fatalf("bad PIN: %v", err)
 	}
 	_, res2, err := vault.Unlock(ctx, vault.UnlockParams{Options: o, VaultID: a.vaultID, PIN: pin, MinStateSeq: 1 << 40, UnlockSecret: devenclave.DevUnlockSecret})
-	if !errors.Is(err, vault.ErrRollback) || res2.HeaderSeq != res.HeaderSeq {
-		t.Fatalf("rollback: %v", err)
+	// The state floor is checked once the state opens, after the right PIN:
+	// the count's write and its reset each store the header (§11.8), and
+	// the answer reports the reset's stored header_seq.
+	if !errors.Is(err, vault.ErrRollback) || res2.HeaderSeq != res.HeaderSeq+2 {
+		t.Fatalf("rollback: %v, header_seq %d (bad PIN's %d)", err, res2.HeaderSeq, res.HeaderSeq)
 	}
 	m, f, err := a.unlock(ctx, nil)
 	if err != nil {

@@ -689,10 +689,12 @@ func retryAfterOf(err error) time.Duration {
 // been created afresh, at an id that may carry a tombstone (RELAY-PROTOCOL
 // §6.10): every registration past the grace that succeeds (a 201, or a 200
 // that may follow this vault's own 201 whose answer or record was lost),
-// and a 201 to the registration after a rotate. byRotate: the answer was
-// the rotate's (a refusal of it, or its success, after which a created
-// mailbox is told by a 201 itself).
-func (m *Manager) relayKeyCall(ctx context.Context) (out relayOutcome, created, byRotate bool, err error) {
+// and a 201 to the registration after a rotate. restarts: a wait already
+// stored does not stand: the answer was the rotate's (a refusal of it, or
+// its success, after which a created mailbox is told by the registration's
+// 201 itself, or by no answer to it), or a 201 past the grace (a 200 there
+// may only follow a lost 201, and a stored wait stands for it).
+func (m *Manager) relayKeyCall(ctx context.Context) (out relayOutcome, created, restarts bool, err error) {
 	rot, ok := m.relay.(RelayRotator)
 	pending, ok2 := m.pendingRelayClient().(RelayRotator)
 	if !ok || !ok2 {
@@ -717,9 +719,8 @@ func (m *Manager) relayKeyCall(ctx context.Context) (out relayOutcome, created, 
 			// outcome: a wait restarted this way is audited.
 			return relayDone, true, true, rerr
 		case !definiteRefusal(rerr):
-			// The relay's own refusal of the request (429 rate_limited,
-			// timestamp_stale, replay_detected): it carried nothing out and
-			// created nothing. The key stays pending and is retried as after
+			// A refusal that carried nothing out (429 rate_limited,
+			// timestamp_stale, replay_detected): it created nothing. The key stays pending and is retried as after
 			// no answer, its retry_after honored.
 			return relayNoAnswer, false, false, rerr
 		}
@@ -734,10 +735,10 @@ func (m *Manager) relayKeyCall(ctx context.Context) (out relayOutcome, created, 
 	}
 	// §3.4.2 RK14 step 1: the current mailbox's collects end, for good.
 	m.mailboxGone(m.st.Relay.Mailbox, m.now())
-	lim, _, err := pending.RegisterCreated(ctx)
+	lim, c, err := pending.RegisterCreated(ctx)
 	if err == nil {
 		m.limits = lim
-		return relayDone, true, false, nil
+		return relayDone, true, c, nil // a 201 received restarts the wait; a 200 leaves a stored one
 	}
 	if ctx.Err() == nil && definiteRefusal(err) {
 		return relayRefused, false, false, err
@@ -907,12 +908,12 @@ func (m *Manager) relayKeyAttempt(ctx context.Context, atUnlock bool) bool {
 	if pr.Refused != "" {
 		m.rk.triedRefused = true
 	}
-	out, created, byRotate, err := m.relayKeyCall(ctx)
+	out, created, restarts, err := m.relayKeyCall(ctx)
 	pr.Attempt = time.Time{} // the call is over, answered or not: the write below, or the next, clears it
 	m.dirty = true
 	switch out {
 	case relayDone:
-		if created && (pr.Created.IsZero() || byRotate) {
+		if created && (pr.Created.IsZero() || restarts) {
 			// (A 201 after a rotate, the wait already stored: the mailbox
 			// was made afresh again, and the wait starts again. Past the
 			// grace a registration cannot tell a 200 from a 201, so a
@@ -932,9 +933,10 @@ func (m *Manager) relayKeyAttempt(ctx context.Context, atUnlock bool) bool {
 			m.dirty = true
 			m.rk.fails, m.rk.next = 0, at.Add(freshMailboxWait)
 			_ = m.persist(ctx, false)
-			if err != nil {
+			if err != nil && ctx.Err() == nil {
 				// The wait was restarted by a registration with no answer: the
-				// relay failed it, so it is audited (once per unlock).
+				// relay failed it, so it is audited (once per unlock). A call a
+				// lock cut short is not a failure of the relay.
 				m.relayKeyFailed(at)
 			}
 			return false
@@ -952,7 +954,7 @@ func (m *Manager) relayKeyAttempt(ctx context.Context, atUnlock bool) bool {
 		if pr.Refused == "" {
 			pr.Refused = "refused"
 		}
-		if anchored && byRotate && relaysOwnRefusal(err) {
+		if anchored && restarts && relaysOwnRefusal(err) {
 			m.st.Relay.Anchor = time.Time{} // the relay did not carry it out
 		}
 		m.dirty = true

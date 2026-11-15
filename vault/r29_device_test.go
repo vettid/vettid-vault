@@ -153,3 +153,62 @@ func TestR29D4NotForUnpairedDevice(t *testing.T) {
 		t.Fatal("judged a device that is not paired")
 	}
 }
+
+// A device's first message under the pending epoch arrives in the batch
+// that reaches B (0.90.13): it confirms the epoch, with no b_passed and no
+// device.update_needed, though B had passed when the batch began.
+func TestR29DeviceConfirmedInTheBatchThatReachesB(t *testing.T) {
+	g := newGapF(t)
+	p := g.td.peer
+	p.Standing.Exp = g.clk.Add(365 * 24 * time.Hour)
+	g.d.withLock(func(m *Manager) { m.startRekey(p, g.clk) })
+	g.drain()
+	resp := g.answerRekey(g.take(), g.e0)
+	if p.Pending == nil {
+		t.Fatal("setup: not pending")
+	}
+	e1 := g.finish(resp)
+	g.d.withLock(func(m *Manager) {
+		p.PeerFeatures, p.Heard, p.UpdateNoticed = nil, true, false // would raise it at B
+		m.drainedOnce = true
+	})
+	g.clk = g.clk.Add(PendingLife + time.Hour)
+	g.sendUnder(e1, "vault.status", []byte(`{}`))
+	if p.Pending != nil || g.d.audited("pending_abandoned_b_passed") {
+		t.Fatal("the device's message under the pending epoch did not confirm it before B")
+	}
+	if n := updateNotices(g.sink, p.ID); n != 0 {
+		t.Fatalf("%d update notices for a device confirmed in the batch", n)
+	}
+}
+
+// The one-batch bound toward a device: a message that carries the pending
+// epoch's kid but does not open defers B to the end of that batch, where B
+// ends the epoch and raises device.update_needed (R29-D4) as before.
+func TestR29DeviceKidThatDoesNotOpenEndsAtBInTheBatch(t *testing.T) {
+	g := newGapF(t)
+	p := g.td.peer
+	p.Standing.Exp = g.clk.Add(365 * 24 * time.Hour)
+	g.d.withLock(func(m *Manager) { m.startRekey(p, g.clk) })
+	g.drain()
+	resp := g.answerRekey(g.take(), g.e0)
+	e1 := g.finish(resp)
+	g.d.withLock(func(m *Manager) {
+		p.PeerFeatures, p.Heard, p.UpdateNoticed = nil, true, false
+		m.drainedOnce = true
+	})
+	g.clk = g.clk.Add(PendingLife + time.Hour)
+	id, _ := envelope.NewULID(g.clk)
+	raw, err := e1.Seal(&envelope.Inner{ID: id, Type: "vault.status", TS: g.clk, Body: []byte(`{}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw[len(raw)-1] ^= 0xff // the header and its kid intact; it does not open
+	g.fromDevice(raw)
+	if p.Pending != nil || !g.d.audited("pending_abandoned_b_passed") {
+		t.Fatal("B did not end the epoch at the end of the batch it waited for")
+	}
+	if n := updateNotices(g.sink, p.ID); n != 1 {
+		t.Fatalf("%d update notices at B, want 1", n)
+	}
+}

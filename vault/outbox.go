@@ -1023,6 +1023,13 @@ func (m *Manager) housekeeping(now time.Time) {
 	for _, p := range m.allPeers() {
 		m.tickDemoted(p, now)
 		m.tickStale(p, now)
+		if m.bWaitsFor(p, now) {
+			// B waits for the batch's messages (tickPendingB): nothing
+			// else of this peer's housekeeping ends the epoch before it.
+			// The rest of it (sweepCarried, tickConfirm, pruneEpochs, the
+			// rekey at NeedsRekey) waits for the next batch.
+			continue
+		}
 		m.tickPending(p, now)
 		m.sweepCarried(p, now) // 0.88.2 §6.3.1: the carried tokens' bound
 		m.tickConfirm(p, now)

@@ -319,20 +319,74 @@ func (m *Manager) abandonPending(p *Peer, why string, restart bool, now time.Tim
 	}
 }
 
+// bPassed reports whether B is judged and has passed for p's pending
+// epoch (§6.3.1): judged only once a collect since this unlock returned
+// fewer than max messages.
+func (m *Manager) bPassed(p *Peer, now time.Time) bool {
+	return p.Pending != nil && m.drainedOnce && now.Sub(p.Pending.FinAt) > PendingLife
+}
+
+// bWaitsFor reports whether p's pending epoch is past B and the batch
+// carries a message under it: B waits for the batch's messages
+// (tickPendingB), and until then nothing else of the batch's housekeeping
+// ends the epoch.
+func (m *Manager) bWaitsFor(p *Peer, now time.Time) bool {
+	return m.bWaits[p.ID] && m.bPassed(p, now)
+}
+
+// pendingUnderIn marks the peers past B whose pending epoch a message of
+// msgs is addressed to (its recipient kid, read without opening it): such
+// a message, if it opens, confirms the epoch (§6.3.1), so B waits for it.
+// A kid that does not open gains nothing beyond this batch: B is judged
+// at its end.
+func (m *Manager) pendingUnderIn(msgs []Message, now time.Time) map[string]bool {
+	var waits map[string]bool
+	for _, p := range m.allPeers() {
+		kr := m.sessions[p.ID]
+		if kr == nil || !m.bPassed(p, now) {
+			continue
+		}
+		pe := kr.Pending()
+		if pe == nil {
+			continue
+		}
+		for _, msg := range msgs {
+			env, err := envelope.Parse(msg.Payload)
+			if err == nil && env.Mode() == envelope.ModeSession && env.RecipientKid().Equal(pe.RecvKid()) {
+				if waits == nil {
+					waits = map[string]bool{}
+				}
+				waits[p.ID] = true
+				break
+			}
+		}
+	}
+	return waits
+}
+
 // tickPending applies B (§6.3.1): judged only once a collect since this
-// unlock returned fewer than max messages. A pending rekey is also
-// abandoned when the vault holds no valid standing token for the peer
-// (§6.3.1 "Initiator", R29-I6; a pending reconnect is not: it ends at B).
-// Afterwards a connection reconnects, a device gets a rekey from the
-// current epoch.
+// unlock returned fewer than max messages; (0.90.13) where the batch
+// carries a message under the pending epoch, after the batch's messages
+// instead (tickPendingB). A pending rekey is also abandoned when the vault
+// holds no valid standing token for the peer (§6.3.1 "Initiator", R29-I6;
+// a pending reconnect is not: it ends at B). Afterwards a connection
+// reconnects, a device gets a rekey from the current epoch.
 func (m *Manager) tickPending(p *Peer, now time.Time) {
 	pe := p.Pending
 	switch {
 	case pe == nil:
-	case m.drainedOnce && now.Sub(pe.FinAt) > PendingLife:
+	case m.bPassed(p, now):
 		m.abandonPending(p, "b_passed", true, now)
 	case pe.Purpose == handshake.PurposeRekey && (p.Standing.Token == "" || !now.Before(p.Standing.Exp)) && !m.carriedWait(p, now):
 		m.abandonPending(p, "no_token", true, now) // 0.88.2: not while carried tokens wait (review F4)
+	}
+}
+
+// tickPendingB applies B after the batch's messages to the peers whose B
+// waited for them (bWaitsFor).
+func (m *Manager) tickPendingB(p *Peer, now time.Time) {
+	if m.bWaitsFor(p, now) {
+		m.abandonPending(p, "b_passed", true, now)
 	}
 }
 

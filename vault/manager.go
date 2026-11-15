@@ -414,6 +414,10 @@ type Manager struct {
 	// this unlock; holdAnswers: housekeeping keeps back the due held
 	// neutral answers until then (0.80.0, §10.4.1).
 	drainedOnce, holdAnswers bool
+	// bWaits: the peers, past B, whose pending epoch the current batch
+	// carries a message under (by recipient kid): B is judged for them
+	// after the batch's messages (§6.3.1, 0.90.13). Set for one batch.
+	bWaits map[string]bool
 	// openedAt is when this Manager was made (the unlock): the hold ends
 	// at the first drain or HeldAnswerHoldBound after it, whichever is
 	// first, so a mailbox that stays full cannot hold the answers forever.

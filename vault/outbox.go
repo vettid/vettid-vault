@@ -1026,6 +1026,8 @@ func (m *Manager) housekeeping(now time.Time) {
 		if m.bWaitsFor(p, now) {
 			// B waits for the batch's messages (tickPendingB): nothing
 			// else of this peer's housekeeping ends the epoch before it.
+			// The rest of it (sweepCarried, tickConfirm, pruneEpochs, the
+			// rekey at NeedsRekey) waits for the next batch.
 			continue
 		}
 		m.tickPending(p, now)

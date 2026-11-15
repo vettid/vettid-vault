@@ -693,7 +693,7 @@ func retryAfterOf(err error) time.Duration {
 // stored does not stand: the answer was the rotate's (a refusal of it, or
 // its success, after which a created mailbox is told by the registration's
 // 201 itself, or by no answer to it), or a 201 past the grace (a 200 there
-// may only follow a lost 201, and a stored wait stands for it).
+// can follow nothing but a lost 201, and a stored wait stands for it).
 func (m *Manager) relayKeyCall(ctx context.Context) (out relayOutcome, created, restarts bool, err error) {
 	rot, ok := m.relay.(RelayRotator)
 	pending, ok2 := m.pendingRelayClient().(RelayRotator)
@@ -717,7 +717,9 @@ func (m *Manager) relayKeyCall(ctx context.Context) (out relayOutcome, created, 
 			// registration may have been a 201 whose answer was lost (the
 			// successor gone again, made afresh), so it is taken as one and
 			// the key waits freshMailboxWait. The error is reported with the
-			// outcome: a wait restarted this way is audited.
+			// outcome: a wait restarted this way is audited. A 4xx status
+			// line that came before the cut is the relay's refusal, and is
+			// taken as one (below).
 			return relayDone, true, true, rerr
 		case !definiteRefusal(rerr):
 			// A refusal that carried nothing out (429 rate_limited,

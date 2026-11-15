@@ -725,3 +725,69 @@ func TestRelayRotFailedAttemptWriteBacksOff(t *testing.T) {
 		}
 	})
 }
+
+// A registration after a rotate that a lock cut short (the call's context
+// cancelled) waits as one with no answer, but is not audited: the relay
+// failed nothing. At an unlock's step and at a recovery's open.
+func TestRelayRotLockCutRegistrationNotAudited(t *testing.T) {
+	for _, atOpen := range []bool{false, true} {
+		fx := newRotFx(t)
+		fx.w.rotate = []error{relayErr(503, "")}
+		if err := fx.credRotate(); err != nil {
+			t.Fatal(err)
+		}
+		fx.w.mu.Lock()
+		fx.w.register = []error{context.Canceled}
+		fx.w.mu.Unlock()
+		cut, cancel := context.WithCancel(context.Background())
+		cancel()
+		fx.do(func(m *Manager) {
+			fx.setClk(fx.clk.Add(time.Hour))
+			if atOpen {
+				m.inheritedKeyAtOpen(cut, RecoveryOpenParams{Options: fx.fixture.opts}, fx.clk)
+			} else {
+				m.relayKeyStep(cut, false)
+			}
+		})
+		if pr := fx.pending(); pr == nil || pr.Created.IsZero() {
+			t.Fatalf("atOpen %v: a cut registration did not wait: %+v", atOpen, pr)
+		}
+		if n := len(fx.acts("identity.rotation_failed")); n != 0 {
+			t.Fatalf("atOpen %v: a lock-cut call audited %d times", atOpen, n)
+		}
+	}
+}
+
+// The mark set for a stored attempt is stored by its own write: with no
+// other write after it (the process dies at once), the next run finds the
+// mark, not the attempt, and does not mark again at its own later time.
+func TestRelayRotStoredAttemptMarkHasItsOwnWrite(t *testing.T) {
+	fx := newRotFx(t)
+	fx.w.rotate = []error{relayErr(503, "")}
+	if err := fx.credRotate(); err != nil {
+		t.Fatal(err)
+	}
+	fx.setClk(fx.clk.Add(time.Hour))
+	var mark time.Time
+	fx.do(func(m *Manager) {
+		pr := m.st.Relay.Pending
+		pr.Attempt = m.now().UTC() // an earlier run's attempt, its answer's write lost
+		m.dirty = true
+		if err := m.persist(context.Background(), false); err != nil {
+			t.Fatal(err)
+		}
+		m.relayKeyAttempt(context.Background(), false) // marks, and writes the mark
+		mark = pr.Unconfirmed
+		fx.fs.setFail(1 << 20) // no other write stores it (the collect loop's included)
+	})
+	if mark.IsZero() {
+		t.Fatal("setup: not marked")
+	}
+	fx.setClk(fx.clk.Add(time.Minute)) // inside freshMailboxWait
+	fx.m.Crash()                       // the process dies
+	fx.fs.setFail(0)
+	fx.open()
+	if pr := fx.pending(); pr == nil || !pr.Unconfirmed.Equal(mark) || !pr.Attempt.IsZero() {
+		t.Fatalf("the mark was not stored by its own write: pending %+v (mark %v)", pr, mark)
+	}
+}

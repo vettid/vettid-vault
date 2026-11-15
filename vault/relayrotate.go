@@ -711,8 +711,9 @@ func (m *Manager) relayKeyCall(ctx context.Context) (out relayOutcome, created, 
 		switch {
 		case rerr == nil:
 			m.limits, created = lim, c
-		case ctx.Err() != nil || mayHaveBeenCarriedOut(rerr):
-			// No answer (a cut call, a transport failure, a 5xx): the
+		case mayHaveBeenCarriedOut(rerr):
+			// No answer (a cut call, which carries no status, a transport
+			// failure, a 5xx): the
 			// registration may have been a 201 whose answer was lost (the
 			// successor gone again, made afresh), so it is taken as one and
 			// the key waits freshMailboxWait. The error is reported with the

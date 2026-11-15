@@ -209,8 +209,8 @@ func (m *Manager) issueToMarked(p *Peer, kind string, prompt bool, now time.Time
 // left (§7.2), and starts reconnects for connections whose token expired.
 func (m *Manager) refreshHeld(now time.Time) {
 	for _, p := range m.allPeers() {
-		if p.State != PeerActive || p.Standing.Token == "" && p.Kind != KindConnection {
-			continue
+		if p.State != PeerActive || p.Standing.Token == "" && p.Kind != KindConnection || m.bWaitsFor(p, now) {
+			continue // B waits for the batch's messages (tickPendingB) and decides first
 		}
 		if p.Standing.Token == "" || !now.Before(p.Standing.Exp) {
 			// Expired, or (0.88.2 §8.6) none held after a token_revoked;

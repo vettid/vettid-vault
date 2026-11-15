@@ -571,7 +571,7 @@ func (m *Manager) rk6Ticks(now time.Time) {
 		return
 	}
 	for _, p := range m.allPeers() {
-		if p.RelayRestart != nil {
+		if p.RelayRestart != nil && !m.bWaitsFor(p, now) { // B waits for the batch's messages and decides first
 			m.rk6Tick(p, now)
 		}
 	}

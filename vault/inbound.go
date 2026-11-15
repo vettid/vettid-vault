@@ -253,6 +253,7 @@ func (m *Manager) ProcessBatch(ctx context.Context, c Collector, msgs []Message)
 	// only after the first mailbox drain after the unlock, so that a
 	// withdraw collected in that drain still drops them (0.80.0, §10.4.1).
 	m.holdAnswers = !m.drainedOnce && now.Sub(m.openedAt) < HeldAnswerHoldBound
+	m.bWaits = m.pendingUnderIn(msgs, now)
 	m.housekeeping(now)
 	m.notifyUnlocked(now)
 	var durable, ephemeral []string
@@ -281,6 +282,13 @@ func (m *Manager) ProcessBatch(ctx context.Context, c Collector, msgs []Message)
 	m.noteCollected(c, msgs, processed)
 	m.noteBatchDrained(c, msgs, now)
 
+	// §6.3.1 (0.90.13): B waits for the batch's messages where the batch
+	// carries one under the pending epoch (bWaits), so that a confirmation
+	// comes first.
+	for _, p := range m.allPeers() {
+		m.tickPendingB(p, now)
+	}
+	m.bWaits = nil
 	m.batchEndFeatures(now) // after the messages: call liveness sees the batch's keep-alives
 	m.reconfirmAll(now)     // §6.3.1: hs.confirm again, once per batch, unless one is queued
 	if len(msgs) < MaxBatch {

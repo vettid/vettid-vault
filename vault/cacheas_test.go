@@ -15,7 +15,8 @@ type cacheAsFeature struct{ calls int }
 
 func (f *cacheAsFeature) Name() string { return "cacheasstub" }
 func (f *cacheAsFeature) Types() []TypeSpec {
-	return []TypeSpec{{Type: "test.secret", Request: true, From: []string{KindApp}}}
+	return []TypeSpec{{Type: "test.secret", Request: true, From: []string{KindApp}},
+		{Type: "test.secretheld", Request: true, From: []string{KindApp, KindDesktop}, DesktopApproval: true}}
 }
 func (f *cacheAsFeature) Load(json.RawMessage) error     { return nil }
 func (f *cacheAsFeature) Save() (json.RawMessage, error) { return nil, nil }
@@ -92,5 +93,31 @@ func TestDeviceMessagesNeverHeldUnsealed(t *testing.T) {
 	}
 	if st, _ := json.Marshal(d.m.st); strings.Contains(string(st), "SECRET") {
 		t.Fatal("the state holds a device's message in the clear")
+	}
+}
+
+// A request held for an app's approval (a desktop's step-up) and then run caches its answer as the handler named it
+// too: the held path keeps no secret either.
+func TestHeldResponseCachedAsAnotherBody(t *testing.T) {
+	f := newOCFixture(t)
+	st := &cacheAsFeature{}
+	f.m.addFeature(st)
+	id := f.sendAs(f.desk, "test.secretheld", `{}`)
+	ap := find(f.inbox(f.app, f.desk)["dev1"], ofType("approval.pending"))
+	if ap == nil || st.calls != 0 {
+		t.Fatal("not held")
+	}
+	f.sendAs(f.app, "approval.decide", `{"approval_id":"`+bodyStr(t, ap, "approval_id")+`","approve":true}`)
+	r := find(f.inbox(f.app, f.desk)["desk1"], reply(id))
+	if r == nil || r.Status != envelope.StatusOK || !strings.Contains(string(r.Body), "SECRET") || st.calls != 1 {
+		t.Fatalf("approved: %+v", r)
+	}
+	for k, c := range f.m.st.Responses {
+		if strings.HasSuffix(k, "|"+id) && (strings.Contains(string(c.Inner), "SECRET") || !strings.Contains(string(c.Inner), "public")) {
+			t.Fatalf("held answer cached as: %s", c.Inner)
+		}
+	}
+	if !f.cached(id) {
+		t.Fatal("held answer not cached")
 	}
 }

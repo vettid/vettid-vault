@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/vettid/vettid-vault/vms/strictjson"
 	"slices"
 	"strconv"
 	"strings"
@@ -16,6 +15,7 @@ import (
 	"github.com/vettid/vettid-vault/vault"
 	"github.com/vettid/vettid-vault/vms/callswire"
 	"github.com/vettid/vettid-vault/vms/callwire"
+	"github.com/vettid/vettid-vault/vms/strictjson"
 	"github.com/vettid/vettid-vault/vms/suite"
 )
 
@@ -502,7 +502,7 @@ func (b bigIssuer) Credentials(_ context.Context, count int) (*callswire.Answer,
 	}
 	var creds []string
 	for i := range count {
-		creds = append(creds, `{"username":"u`+strconv.Itoa(i)+`","credential":"c","exp":`+strconv.FormatInt(t0.Add(6*time.Hour).Unix(), 10)+`}`)
+		creds = append(creds, `{"username":"u`+strconv.Itoa(i)+`","credential":"c","exp":`+strconv.FormatInt(t0.Add(5*time.Hour).Unix(), 10)+`}`)
 	}
 	body := `{"stun":[` + strings.Join(stun, ",") + `],"turn":[` + strings.Join(turn, ",") + `],"credentials":[` +
 		strings.Join(creds, ",") + `]}`
@@ -785,7 +785,40 @@ func TestStartCachedWithoutTheCredential(t *testing.T) {
 	if len(cached.Servers) != 1 || cached.Servers[0].Username != "" || !cached.Exp.Equal(first.Exp) || cached.CallID != first.CallID {
 		t.Fatalf("cached %+v, first %+v", cached, first)
 	}
-	if strings.Contains(string(r.Cached), "u1") || str(t, r.Cached, "exp") != str(t, r.Body, "exp") {
-		t.Fatalf("cached %s", r.Cached)
+	// The cached configuration's bytes (decoded) hold no username or credential.
+	co, _ := strictjson.ParseObject(r.Cached)
+	ccfg, _ := co.Base64("ice_config", -1)
+	if strings.Contains(string(ccfg), "username") || strings.Contains(string(ccfg), "credential") || str(t, r.Cached, "exp") != str(t, r.Body, "exp") {
+		t.Fatalf("cached %s", ccfg)
+	}
+}
+
+// While the vault is held for the owner check the pool asks for nothing (a held vault makes no calls); once the
+// hold ends it asks again.
+func TestPoolSkipsWhileHeld(t *testing.T) {
+	is := &fakeIssuer{exp: t0.Add(6 * time.Hour)}
+	p := poolWith(is)
+	h := featuretest.NewHost()
+	h.Hold = vault.OwnerCheckHeld
+	prime(p, t0) // a nil session knows no hold: the pool fills
+	p.mu.Lock()
+	p.creds = nil
+	p.mu.Unlock()
+	p.Prime(vault.NewSession(context.Background(), h, vault.PeerInfo{}, t0.Add(time.Hour), nil), t0.Add(time.Hour))
+	p.mu.Lock()
+	asked := p.inFlight || len(p.sent) != 1
+	p.mu.Unlock()
+	if asked {
+		t.Fatal("a held vault's pool asked")
+	}
+	h.Hold = ""
+	prime2 := vault.NewSession(context.Background(), h, vault.PeerInfo{}, t0.Add(time.Hour), nil)
+	p.Prime(prime2, t0.Add(time.Hour))
+	p.mu.Lock()
+	d := p.done
+	p.mu.Unlock()
+	<-d
+	if n := len(is.asked()); n != 2 {
+		t.Fatalf("not asked once the hold ended: %d", n)
 	}
 }

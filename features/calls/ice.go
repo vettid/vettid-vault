@@ -18,8 +18,9 @@ type ICESource interface {
 	// Servers returns the servers for callID's configuration and the configuration's exp. It never waits for
 	// the issuer (§10.10 "Never waiting, almost": the wait is a MAY, and a handler holds the vault's lock).
 	Servers(s *vault.Session, callID string, now time.Time) ([]callwire.ICEServer, time.Time, error)
-	// Retire takes the credential callID was given out of use: the call was placed (call.start succeeded) or
-	// answered on this side. A credential that only went out with offers nobody answered stays in use.
+	// Retire takes the credential callID was given out of use: the call was placed (call.start succeeded), or any
+	// device's call.answer for it reached the vault (delivered onward or not: that device has allocated with it).
+	// A credential that only went out with offers nobody answered stays in use.
 	Retire(callID string)
 	// Drop takes the credential callID was given out of use because the configuration it went into could not be
 	// made (it would have been too large to sign): it is not offered again.

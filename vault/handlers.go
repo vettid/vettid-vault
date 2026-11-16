@@ -230,7 +230,7 @@ type Session struct {
 // credential); body must be a valid answer to the same request.
 func (s *Session) CacheResponseAs(body json.RawMessage) { s.cacheBody = body }
 
-// CachedResponse returns the body set by CacheResponseAs (nil: the answer is cached as sent).
+// CachedResponseBody returns the body set by CacheResponseAs (nil: the answer is cached as sent).
 func (s *Session) CachedResponseBody() json.RawMessage { return s.cacheBody }
 
 // Host is what a Session acts on. The Manager implements it for the

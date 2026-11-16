@@ -656,6 +656,15 @@ func (f *Feature) start(ctx context.Context, s *vault.Session, body []byte) (jso
 	if err != nil {
 		return nil, errInternal
 	}
+	// §10.10 (0.90.15): the answer is cached (§8.2) for a retransmission without its TURN entry, so no credential
+	// is kept in the vault's state: the same call id and exp, STUN only (or no servers, should that form fail),
+	// signed again. Made before the offer goes, so that nothing can fail once the call is placed.
+	scfg, ssig, err := stunOnly(s, cfg, false)
+	if err != nil {
+		if scfg, ssig, err = stunOnly(s, cfg, true); err != nil {
+			return nil, errInternal
+		}
+	}
 	ob := v.add(strictjson.NewBuilder().String("call_id", id).String("media", st.Media).String("sdp", st.SDP).Base64("ek", st.EK))
 	if st.Suites != nil {
 		ob.Raw("suites", suitesJSON(st.Suites)).Base64("device_sig2", v2.DeviceSig).Base64("vault_sig2", v2.VaultSig)
@@ -676,28 +685,20 @@ func (f *Feature) start(ctx context.Context, s *vault.Session, body []byte) (jso
 		return strictjson.NewBuilder().String("call_id", id).String("exp", envelope.FormatTS(exp)).
 			Base64("ice_config", cfg).Base64("ice_sig", isig).Bytes()
 	}
-	// §10.10 (0.90.15): the answer is cached (§8.2) for a retransmission without its TURN entry, so no credential
-	// is kept in the vault's state: the same call id and exp, STUN only, signed again. The answer sent now is
-	// unchanged. The STUN-only form is smaller than the one just signed, so making it fails only if signing itself
-	// does: then nothing with a credential is cached either, and the call is left to its ring timer.
-	scfg, ssig, err := stunOnly(s, cfg)
-	if err != nil {
-		return nil, errInternal
-	}
 	s.CacheResponseAs(answer(scfg, ssig))
 	return answer(cfg, isig), nil
 }
 
-// stunOnly returns the configuration cfg without its TURN entries (those with a credential), signed again with the
-// same call id and exp.
-func stunOnly(s *vault.Session, cfg []byte) (out, sig []byte, err error) {
+// stunOnly returns the configuration cfg without its TURN entries (those with a credential), or (none) without
+// any server, signed again with the same call id and exp.
+func stunOnly(s *vault.Session, cfg []byte, none bool) (out, sig []byte, err error) {
 	c, err := callwire.ParseICEConfig(cfg)
 	if err != nil {
 		return nil, nil, err
 	}
 	var kept []callwire.ICEServer
 	for _, sv := range c.Servers {
-		if sv.Username == "" && sv.Credential == "" {
+		if !none && sv.Username == "" && sv.Credential == "" {
 			kept = append(kept, sv)
 		}
 	}

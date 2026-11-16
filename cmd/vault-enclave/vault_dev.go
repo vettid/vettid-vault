@@ -33,6 +33,7 @@ func platform() (supervisor.Config, error) {
 	debug := flag.Bool("debug", false, "debug logging")
 	devPolicy := flag.String("dev-device-policy", "", "JSON file extending the TEST device-attestation policy (DEVELOPMENT ONLY; enclavetest.DevDevicePolicy)")
 	pushURL := flag.String("push-url", "", "push gateway stand-in, https://host (its host is allowlisted; DEVELOPMENT ONLY); empty: push.register is unavailable")
+	callsURL := flag.String("calls-url", "", "calling service's issuer stand-in, https://host (its host is allowlisted; DEVELOPMENT ONLY); empty: calls carry no ICE servers")
 	recClock := flag.String("dev-recovery-clock", "", "file holding the recovery clock's offset from real time, e.g. 24h, re-read at every check (DEVELOPMENT ONLY; enclavetest.DevRecoveryClock)")
 	devFeatures := flag.String("dev-features", "all", "optional features the vaults register: all, none (production release 1's list) or a comma-separated list of actions,calls,intro,leash,location,presence,wallet (DEVELOPMENT ONLY; a release image's list is its embedded channel file's)")
 	timeScale := flag.Uint64("dev-time-scale", 1, "time scale: the waits of STAGING-TIME-SCALE §2.1 are divided by it, e.g. 3600 makes the owner check's 24 h 24 s (1 to 86400; DEVELOPMENT ONLY; a release image's scale is its channel file's, 1 in production)")
@@ -82,9 +83,9 @@ func platform() (supervisor.Config, error) {
 		return supervisor.Config{}, err
 	}
 	cfg, err := enclavetest.DevSupervisor(enclavetest.DevOptions{Release: *release, Control: *control, Egress: *egress,
-		RelayURL: *relayURL, MaxVaults: *maxVaults, DownLock: *downLock, LogLevel: lvl, DevicePolicy: dp, RecoveryClock: *recClock, PushURL: *pushURL, TimeScale: *timeScale,
-		VaultExec: append(append(append(append(append(append([]string{exe, vaultproc.Arg}, enclavetest.DevVaultArgs(*release, *relayURL)...),
-			enclavetest.DevVaultPolicyArgs(dp)...), enclavetest.DevVaultRecoveryClockArgs(*recClock)...), enclavetest.DevVaultPushArgs(*pushURL)...), enclavetest.DevVaultFeatureArgs(features)...), enclavetest.DevVaultTimeScaleArgs(*timeScale)...)})
+		RelayURL: *relayURL, MaxVaults: *maxVaults, DownLock: *downLock, LogLevel: lvl, DevicePolicy: dp, RecoveryClock: *recClock, PushURL: *pushURL, CallsURL: *callsURL, TimeScale: *timeScale,
+		VaultExec: append(append(append(append(append(append(append([]string{exe, vaultproc.Arg}, enclavetest.DevVaultArgs(*release, *relayURL)...),
+			enclavetest.DevVaultPolicyArgs(dp)...), enclavetest.DevVaultRecoveryClockArgs(*recClock)...), enclavetest.DevVaultPushArgs(*pushURL)...), enclavetest.DevVaultCallsArgs(*callsURL)...), enclavetest.DevVaultFeatureArgs(features)...), enclavetest.DevVaultTimeScaleArgs(*timeScale)...)})
 	cfg.Proc.UIDBase = *uidBase
 	cfg.Harden = true
 	return cfg, err

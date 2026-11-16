@@ -56,8 +56,9 @@ func (s *stack) control() http.Handler {
 			dp = s.policy.Summary()
 		}
 		// tls_root: the TEST TLS root that the stack's TLS fronts
-		// (relay.vettid.test at relay_tls, push.vettid.test at push_tls)
-		// chain to; the certificate only, never a private key.
+		// (relay.vettid.test at relay_tls, push.vettid.test at push_tls,
+		// calls.vettid.test at calls_tls) chain to; the certificate only,
+		// never a private key.
 		root := enclavetest.TestTLSCA().Cert.Raw
 		writeJSON(w, 200, map[string]any{
 			"nitro_root":    base64.StdEncoding.EncodeToString(enclavetest.TestNitroCA().Root.Cert.Raw),
@@ -101,7 +102,8 @@ func (s *stack) control() http.Handler {
 		writeJSON(w, 200, vs[0])
 	})
 	mux.HandleFunc("POST /dev/recovery/code", s.recoveryCode)
-	s.pushControl(mux) // push.go
+	s.pushControl(mux)  // push.go
+	s.callsControl(mux) // calls.go
 	mux.HandleFunc("POST /dev/peer/event", func(w http.ResponseWriter, r *http.Request) {
 		var in struct {
 			Type     string            `json:"type"`

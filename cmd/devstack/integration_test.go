@@ -124,6 +124,7 @@ func TestDevStackLocalStack(t *testing.T) {
 	}
 
 	testRecovery(t, o, info)
+	testCalls(t, o, info)
 	testPush(t, info) // last: it locks the peer's vault
 
 	cancel()
@@ -410,4 +411,117 @@ func testPush(t *testing.T, info map[string]any) {
 	if w["platform"] != "fcm" || w["app_id"] != "com.vettid.app" || w["class"] != "notify" {
 		t.Fatalf("wake %v", w)
 	}
+}
+
+// testCalls: a vault asks the stack's issuer stand-in for TURN credentials when it opens (VAULT-MESSAGING §10.10
+// "Servers and credentials", CALLING-SERVICE §5.4), through the supervisor, which attaches the dev enclave's TEST
+// attestation: a request signed by a key of its own, not the vault's relay key, attested, and answered. This covers
+// the dev wiring (-calls-url, the egress host, the parent's allowlist) and, in the vault process, the release
+// wiring of the issuer client.
+func testCalls(t *testing.T, o *options, info map[string]any) {
+	ctl, api := info["ctl"].(string), info["api"].(string)
+	if info["calls_url"] != "https://calls.vettid.test" {
+		t.Fatalf("calls_url %v", info["calls_url"])
+	}
+	type request struct {
+		At        time.Time `json:"at"`
+		Key       string    `json:"key"`
+		Attested  bool      `json:"attested"`
+		Count     int       `json:"count"`
+		Status    int       `json:"status"`
+		Code      string    `json:"code"`
+		Usernames []string  `json:"usernames"`
+	}
+	requests := func() []request {
+		t.Helper()
+		r, err := http.Get(ctl + "/dev/calls")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer r.Body.Close()
+		var st struct {
+			Requests []request `json:"requests"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&st); err != nil || r.StatusCode != 200 {
+			t.Fatalf("/dev/calls: %d %v", r.StatusCode, err)
+		}
+		return st.Requests
+	}
+	const guid, pin = "member-calls", "97531864"
+	state := filepath.Join(t.TempDir(), "member.json")
+	vaultctl := func(args ...string) string {
+		t.Helper()
+		cmd := exec.Command(filepath.Join(o.dataDir, "bin", "vaultctl"), append([]string{"-state", state, "-timeout", "150s"}, args...)...)
+		cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "VAULTCTL_DEV_RESOLVE=" + relayHost + "=" + info["relay_tls"].(string), childProcs}
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("vaultctl %v: %v\n%s", args, err, out)
+		}
+		return string(out)
+	}
+	vaultctl("init", "-role", "app", "-name", "phone", "-relay", relayURL)
+	vaultctl("api-enroll", "-api", api, "-guid", guid, "-pin", pin)
+	vaultctl("api-lock", "-api", api, "-guid", guid)
+	// The member's vault relay key, from the app's state.
+	b, err := os.ReadFile(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var st struct {
+		Vault struct {
+			RelayPK []byte `json:"relay_pk"`
+		} `json:"vault"`
+	}
+	if err := json.Unmarshal(b, &st); err != nil || len(st.Vault.RelayPK) != 32 {
+		t.Fatalf("app state: %v", err)
+	}
+	relayKey := base64.StdEncoding.EncodeToString(st.Vault.RelayPK)
+
+	// The pool asks at the opening: within 5 s of the unlock.
+	if code, m := postJSON(t, ctl+"/dev/calls/reset", `{}`); code != 200 {
+		t.Fatalf("reset: %d %v", code, m)
+	}
+	unlocked := time.Now() // before the unlock is sent: the 5 s count from it, round trip included
+	vaultctl("api-unlock", "-api", api, "-guid", guid, "-pin", pin)
+	var rs []request
+	for {
+		if rs = requests(); len(rs) > 0 || time.Since(unlocked) > 5*time.Second {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if len(rs) == 0 {
+		t.Fatalf("issuer requests within 5 s of the unlock: %+v", rs)
+	}
+	// One request at the opening (an empty pool asks once, for 4): settle a moment and count again.
+	time.Sleep(2 * time.Second)
+	if rs = requests(); len(rs) != 1 {
+		t.Fatalf("issuer requests after the opening: %+v", rs)
+	}
+	r := rs[0]
+	if d := r.At.Sub(unlocked); d > 5*time.Second {
+		t.Fatalf("issuer request %v after the unlock was sent, over 5 s", d)
+	}
+	// §10.10: it asks for 4 (an empty pool) in one request.
+	if r.Status != 200 || !r.Attested || r.Count != 4 || len(r.Usernames) != r.Count || r.Key == "" {
+		t.Fatalf("issuer request %+v", r)
+	}
+	// A cross-check: the supervisor already denies a request signed with the relay key before it leaves (prochost.go,
+	// TestCallsChannel's "relay key"), which would show here as no request at all.
+	if r.Key == relayKey {
+		t.Fatal("the issuer request is signed with the vault's relay key")
+	}
+	t.Logf("issuer request %v after the unlock was sent, %d credentials", r.At.Sub(unlocked).Round(time.Millisecond), r.Count)
+}
+
+func postJSON(t *testing.T, url, body string) (int, map[string]any) {
+	t.Helper()
+	r, err := http.Post(url, "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Body.Close()
+	var m map[string]any
+	_ = json.NewDecoder(r.Body).Decode(&m)
+	return r.StatusCode, m
 }

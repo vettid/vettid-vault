@@ -105,6 +105,9 @@ type Options struct {
 	// Push is the channel's push gateway (0.24.0, §14); nil: the release
 	// has none and push.register is answered unavailable.
 	Push PushGateway
+	// Calls is the channel's calling-service issuer (VAULT-MESSAGING §10.10 "Servers and credentials"); nil: the
+	// release has none, and every call's ICE configuration has an empty server list.
+	Calls CallsIssuer
 	// PushTiming overrides the wake rules' numbers (tests).
 	PushTiming *PushTiming
 	// Transfers is the instance's admission of blob transfers (the
@@ -315,6 +318,8 @@ type Manager struct {
 	featureReqs map[string]featureReq
 	// unlockSeen: UnlockObserver features were told of this opening.
 	unlockSeen bool
+	// openSeen: OpenObserver features were told of this opening.
+	openSeen bool
 	// restoring is set while a reconnect that named an older epoch of a
 	// service activates (§6.6, 0.72.0): it is told as
 	// connection.restored_reconnect, not connection.reconnected.

@@ -33,6 +33,7 @@ func (f *Feature) Tick(s *vault.Session) {
 	gap := !f.lastTick.IsZero() && now.Sub(f.lastTick) > CollectGap
 	f.lastTick = now
 	f.sweepLimited(s, now) // a limit that lapsed with time is announced
+	f.iceSrc.Prime(s, now) // the pool is refilled when it runs short and the limits allow
 	for _, id := range f.sorted() {
 		c := f.calls[id]
 		switch {

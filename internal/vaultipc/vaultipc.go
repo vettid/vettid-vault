@@ -152,6 +152,12 @@ const (
 	// process's own and passes the request to the parent, one try per
 	// request: the process retries.
 	KindAppKeyNext hostproto.Kind = 0x5e
+	// KindCalls carries a request to the channel's calling-service issuer (VAULT-MESSAGING §10.10 "Servers and
+	// credentials", CALLING-SERVICE §5.2): POST /v1/credentials of the issuer URL the supervisor pins, signed by an
+	// Ed25519 key this process made for the one request. The supervisor verifies the signature, refuses the
+	// process's relay key, and attaches the NSM attestation itself (public_key = the request's key, user_data =
+	// the request's digest): a vault process never obtains an attestation over user_data of its choosing.
+	KindCalls hostproto.Kind = 0x5f
 )
 
 // Bounds the supervisor puts on a vault process's answers, after which it
@@ -189,7 +195,7 @@ const (
 )
 
 // VaultRequests is every request kind a vault process may send.
-var VaultRequests = []hostproto.Kind{KindStoreGet, KindStorePut, KindStoreDelete, KindAttestRecipient, KindAttestVault, KindKMS, KindHTTP, KindStatusList, KindPush, KindTransfer, KindCounter, KindHeavyPermit, KindMarkDeleting, KindAppKeyNext}
+var VaultRequests = []hostproto.Kind{KindStoreGet, KindStorePut, KindStoreDelete, KindAttestRecipient, KindAttestVault, KindKMS, KindHTTP, KindStatusList, KindPush, KindTransfer, KindCounter, KindHeavyPermit, KindMarkDeleting, KindAppKeyNext, KindCalls}
 
 // KMS operations.
 const (

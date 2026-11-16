@@ -30,6 +30,7 @@ import (
 	"github.com/vettid/vettid-vault/vault"
 	"github.com/vettid/vettid-vault/vault/store"
 	"github.com/vettid/vettid-vault/vms/altchan"
+	"github.com/vettid/vettid-vault/vms/callswire"
 	"github.com/vettid/vettid-vault/vms/pushwire"
 )
 
@@ -903,6 +904,8 @@ func (p *vproc) handle(ctx context.Context, f *hostproto.Frame) [][]byte {
 		return p.http(ctx, f.Fields)
 	case vaultipc.KindPush:
 		return p.push(ctx, f.Fields)
+	case vaultipc.KindCalls:
+		return p.calls(ctx, f.Fields)
 	case vaultipc.KindTransfer:
 		return p.transfer(ctx, f.Fields)
 	case vaultipc.KindCounter:
@@ -1230,6 +1233,95 @@ func (p *vproc) push(ctx context.Context, f [][]byte) [][]byte {
 	// answered (it counts toward push_registrations, VAULT-MESSAGING
 	// 0.24.1 §14.1) and refuses the answer as oversized.
 	b, err := io.ReadAll(io.LimitReader(resp.Body, pushwire.MaxAnswer+1))
+	if err != nil {
+		return hostproto.Strings(hostproto.StatusError)
+	}
+	rh := http.Header{}
+	for _, k := range []string{"Content-Type", "Retry-After"} {
+		if v := resp.Header.Values(k); len(v) > 0 {
+			rh[k] = v
+		}
+	}
+	return [][]byte{[]byte(hostproto.StatusOK), []byte(strconv.Itoa(resp.StatusCode)), vaultipc.EncodeHeaders(rh), b}
+}
+
+// maxCallsBody bounds a calling-service request: CALLING-SERVICE §5.2 allows at most 1 KiB.
+const maxCallsBody = 1 << 10
+
+// callsBody reports whether b is exactly a credentials request's body, {"count":n} with n in 1..4, byte for byte: the
+// body carries nothing a vault process chose beyond that number. (The process still chooses the request's key,
+// timestamp and signature, which the issuer checks.)
+func callsBody(b []byte) bool {
+	for n := 1; n <= callswire.MaxCount; n++ {
+		if bytes.Equal(b, callswire.RequestBody(n)) {
+			return true
+		}
+	}
+	return false
+}
+
+// callsAttempt is how long one calling-service request may take (VAULT-MESSAGING §10.10: 10 s); tests shorten it.
+var callsAttempt = 10 * time.Second
+
+// calls passes a vault process's request for TURN credentials to the channel's calling-service issuer
+// (vaultipc.KindCalls; VAULT-MESSAGING §10.10 "Servers and credentials", CALLING-SERVICE §5.2): only POST
+// /v1/credentials, signed (Relay Protocol §4.1) by a key that is not this process's relay key. The supervisor
+// attaches the NSM attestation itself, with public_key = the signing key and user_data = the request's digest,
+// which it computes: a vault process never obtains an attestation over user_data of its choosing.
+func (p *vproc) calls(ctx context.Context, f [][]byte) [][]byte {
+	s := p.h.s
+	base := s.encCfg.CallsURL
+	if base == "" || len(f) != 3 || len(f[2]) > maxCallsBody || string(f[0]) != callswire.PathCredentials || !callsBody(f[2]) {
+		return deny()
+	}
+	path := callswire.PathCredentials
+	in, err := vaultipc.DecodeHeaders(f[1])
+	if err != nil {
+		return deny()
+	}
+	sr, err := relayauth.ParseHeaders(in)
+	bh := relayauth.BodyHash(f[2])
+	if err != nil || sr.Verify(http.MethodPost, path, bh, time.Now()) != nil {
+		return deny()
+	}
+	p.mu.Lock()
+	relayKey := p.relayKey != nil && p.relayKey.Equal(sr.Key)
+	p.mu.Unlock()
+	if relayKey {
+		return deny()
+	}
+	hdr := http.Header{}
+	for _, k := range []string{relayauth.HeaderKey, relayauth.HeaderTimestamp, relayauth.HeaderSig} {
+		hdr.Set(k, in.Get(k))
+	}
+	hdr.Set("Content-Type", "application/json")
+	// VAULT-MESSAGING §10.10: an attempt waits at most 10 s.
+	rctx, cancel := context.WithTimeout(ctx, callsAttempt)
+	defer cancel()
+	// The slot first: a process gets no more attestations at once than it has requests in flight.
+	release, ok := p.egressSlot(rctx)
+	if !ok {
+		return hostproto.Strings(hostproto.StatusError)
+	}
+	defer release()
+	d := relayauth.Digest(http.MethodPost, path, sr.Timestamp, bh)
+	doc, err := s.cfg.NSM.Attest(d[:], nil, sr.Key)
+	if err != nil {
+		return hostproto.Strings(hostproto.StatusError)
+	}
+	hdr.Set(callswire.HeaderAttestation, base64.StdEncoding.EncodeToString(doc))
+	req, err := http.NewRequestWithContext(rctx, http.MethodPost, strings.TrimSuffix(base, "/")+path, bytes.NewReader(f[2]))
+	if err != nil {
+		return deny()
+	}
+	req.Header = hdr
+	resp, err := s.relayHTTP.Do(req)
+	if err != nil {
+		return hostproto.Strings(hostproto.StatusError)
+	}
+	defer resp.Body.Close()
+	// Cut to MaxAnswer+1 bytes, so the vault process sees an oversized answer as one.
+	b, err := io.ReadAll(io.LimitReader(resp.Body, callswire.MaxAnswer+1))
 	if err != nil {
 		return hostproto.Strings(hostproto.StatusError)
 	}

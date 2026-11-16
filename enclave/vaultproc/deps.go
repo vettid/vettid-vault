@@ -15,6 +15,7 @@ import (
 	"github.com/vettid/vettid-vault/internal/vaultipc"
 	"github.com/vettid/vettid-vault/vault"
 	"github.com/vettid/vettid-vault/vault/store"
+	"github.com/vettid/vettid-vault/vms/callswire"
 	"github.com/vettid/vettid-vault/vms/devattest"
 	"github.com/vettid/vettid-vault/vms/pushwire"
 )
@@ -241,10 +242,23 @@ func pushGateway(base string, ch channel) vault.PushGateway {
 	return &pushwire.Client{BaseURL: base, HTTP: &http.Client{Transport: chanPushTransport{ch: ch}, Timeout: 20 * time.Second}}
 }
 
+// callsIssuer is the channel's calling-service issuer through the supervisor (nil without one: calls carry no ICE
+// servers). The supervisor attaches each request's attestation (vaultipc.KindCalls).
+func callsIssuer(base string, ch channel) vault.CallsIssuer {
+	if base == "" {
+		return nil
+	}
+	return &callswire.Client{BaseURL: base, HTTP: &http.Client{Transport: chanPushTransport{ch: ch, kind: vaultipc.KindCalls}, Timeout: 15 * time.Second}}
+}
+
 // chanPushTransport carries a push gateway request (signed in this
-// process by the wake key) to the supervisor, which sends it to the
-// gateway URL it pins; only the path is passed.
-type chanPushTransport struct{ ch channel }
+// process by the wake key), or with kind KindCalls a calling-service
+// request, to the supervisor, which sends it to the URL it pins; only the
+// path is passed.
+type chanPushTransport struct {
+	ch   channel
+	kind hostproto.Kind // zero: vaultipc.KindPush
+}
 
 func (t chanPushTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	var body []byte
@@ -259,7 +273,11 @@ func (t chanPushTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 	if req.Method != http.MethodPost {
 		return nil, errChan
 	}
-	r, err := t.ch.call(req.Context(), vaultipc.KindPush, []byte(req.URL.EscapedPath()), vaultipc.EncodeHeaders(req.Header), body)
+	kind := t.kind
+	if kind == 0 {
+		kind = vaultipc.KindPush
+	}
+	r, err := t.ch.call(req.Context(), kind, []byte(req.URL.EscapedPath()), vaultipc.EncodeHeaders(req.Header), body)
 	if err != nil {
 		return nil, err
 	}

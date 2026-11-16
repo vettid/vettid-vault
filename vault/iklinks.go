@@ -448,10 +448,17 @@ func (m *Manager) f1Demote(p *Peer, app []*handshake.Rotation, msgEpoch []byte, 
 // same inner id (receivers dedupe by it), under the next current epoch;
 // one whose exp passes first is discarded; an ephemeral one is not sent.
 
-// holdDemoted queues a message made while p's current epoch is demoted.
+// holdDemoted queues a message made while p's current epoch is demoted. Only a connection's: a message to a device
+// is sealed to it when queued and never held unsealed (VAULT-MESSAGING §10.10, 0.90.15: the answer to call.start
+// and the call.offer to a device carry a TURN credential). Links demote connection epochs only, so a device's
+// current epoch is never demoted; should one be, its message is not sent rather than kept in the clear.
 func (m *Manager) holdDemoted(p *Peer, in *envelope.Inner, wake string) {
 	if te := m.registry[in.Type]; te != nil && te.spec.Ephemeral {
 		return // ephemeral: not sent
+	}
+	if p.Kind != KindConnection {
+		m.note(m.now(), "device_message_not_held", p.ID)
+		return
 	}
 	m.holdInner(p, in, wake)
 }
@@ -498,8 +505,8 @@ func (m *Manager) resealAtKeyChange(p *Peer, kr *handshake.Keyring) {
 // hs.confirm excepted (as it is); an ephemeral entry stays as it is, and an
 // hs.confirm under ep is superseded (done).
 func (m *Manager) reholdAt(p *Peer, ep *handshake.Epoch, keyChange bool, now time.Time) {
-	if ep == nil {
-		return
+	if ep == nil || p.Kind != KindConnection {
+		return // a device's entries stay sealed (holdDemoted)
 	}
 	for _, e := range m.st.Outbox {
 		if e.Done || e.PeerID != p.ID || e.Op != OpDeposit || e.Held != nil || e.Handshake || len(e.Payload) == 0 {

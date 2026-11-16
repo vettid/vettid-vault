@@ -1121,6 +1121,8 @@ func (f *Feature) ConnectionRemoved(_ *vault.Session, conn string) {
 		}
 	}
 	delete(f.st.Profile.Peers, conn)
+	delete(f.st.Profile.Contract, conn)
+	delete(f.st.Profile.Claimed, conn)
 }
 
 // DeviceRemoved implements vault.DeviceRemovedObserver: an unlinked

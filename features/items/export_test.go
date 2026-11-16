@@ -11,6 +11,9 @@ func OpenSealed(vaultID string, it *itemspec.Item, e *credential.Item) ([]byte, 
 	return open(vaultID, it, e)
 }
 
+// SetContract makes f stand for an image whose `contract` is v (§10.8).
+func (f *Feature) SetContract(v string) { f.contract = v }
+
 // SetKeptHook sees the stored values a critical replacement opens for its
 // kept values (0.21.0), before they are wiped; nil removes it.
 func SetKeptHook(h func(fields map[string][]byte)) {

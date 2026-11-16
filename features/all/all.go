@@ -85,7 +85,7 @@ type Options struct {
 	CredentialKDF credential.KDF
 	// ICE issues call ICE servers and credentials (CALLING-SERVICE §5);
 	// nil means none (no calling service yet).
-	ICE calls.ICEIssuer
+	ICE calls.ICESource
 	// WalletNetworks are the Bitcoin networks new wallets may use; nil
 	// means mainnet, testnet, testnet4 and signet (§10.18, 0.35.0).
 	WalletNetworks []string

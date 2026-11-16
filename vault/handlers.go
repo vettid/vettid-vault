@@ -384,6 +384,15 @@ func (s *Session) SetRelayTime(t time.Time) { s.relayAt = t }
 // Now returns the processing time.
 func (s *Session) Now() time.Time { return s.now }
 
+// CallsIssuer is the channel's calling-service issuer (Options.Calls); nil without one, or for a session no
+// Manager built.
+func (s *Session) CallsIssuer() CallsIssuer {
+	if s.m == nil {
+		return nil
+	}
+	return s.m.opt.Calls
+}
+
 // Context returns the request context.
 func (s *Session) Context() context.Context {
 	if s.ctx == nil {

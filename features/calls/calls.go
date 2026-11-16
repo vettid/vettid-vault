@@ -13,15 +13,13 @@
 // the device-to-device hybrid KEM; the separate initiate/accept/reject/
 // cancel/offer/answer/candidate/busy/blocked peer events collapse into
 // offer, answer, ice, ringing and end with a reason; the vault's TURN
-// proxy (Cloudflare via the parent) becomes the ICEIssuer interface.
+// proxy becomes the pool of credentials from the calling service's issuer
+// (ice.go; the shared secret never enters a vault).
 package calls
 
 import (
 	"context"
 	"crypto/ed25519"
-	"crypto/hmac"
-	"crypto/sha1" // coturn use-auth-secret is HMAC-SHA1 (CALLING-SERVICE §5)
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"sort"
@@ -63,51 +61,6 @@ const (
 var Reasons = map[string]bool{"hangup": true, "decline": true, "busy": true, "timeout": true,
 	"answered_elsewhere": true, "unavailable": true, "failed": true}
 
-// ICEIssuer issues a call's ICE servers and short-lived credentials
-// (CALLING-SERVICE §5). It is the only provider-specific code in the call
-// path.
-type ICEIssuer interface {
-	Issue(ctx context.Context, callID string, ttl time.Duration) ([]callwire.ICEServer, error)
-}
-
-// NoServers issues an empty list: devices use host and server-reflexive
-// candidates only. It is the default until a calling service exists.
-type NoServers struct{}
-
-// Issue implements ICEIssuer.
-func (NoServers) Issue(context.Context, string, time.Duration) ([]callwire.ICEServer, error) {
-	return nil, nil
-}
-
-// Coturn issues coturn `use-auth-secret` credentials: username =
-// "<expiry>:<call_id>", credential = base64(HMAC-SHA1(secret, username)).
-// STUN entries carry no credentials.
-type Coturn struct {
-	STUN   []string
-	TURN   []string
-	Secret []byte
-	Now    func() time.Time
-}
-
-// Issue implements ICEIssuer.
-func (c Coturn) Issue(_ context.Context, callID string, ttl time.Duration) ([]callwire.ICEServer, error) {
-	now := time.Now
-	if c.Now != nil {
-		now = c.Now
-	}
-	var out []callwire.ICEServer
-	if len(c.STUN) > 0 {
-		out = append(out, callwire.ICEServer{URLs: c.STUN})
-	}
-	if len(c.TURN) > 0 && len(c.Secret) > 0 {
-		user := strconv.FormatInt(now().Add(ttl).Unix(), 10) + ":" + callID
-		mac := hmac.New(sha1.New, c.Secret)
-		mac.Write([]byte(user))
-		out = append(out, callwire.ICEServer{URLs: c.TURN, Username: user, Credential: base64.StdEncoding.EncodeToString(mac.Sum(nil))})
-	}
-	return out, nil
-}
-
 // Call is one call record.
 type Call struct {
 	ID       string    `json:"id"`
@@ -140,14 +93,15 @@ func (c *Call) live(now time.Time) bool {
 
 // Options configure the feature.
 type Options struct {
-	// ICE issues ICE servers; nil means NoServers.
-	ICE ICEIssuer
+	// ICE gives each call's ICE configuration its servers; nil: a Pool over the session's issuer
+	// (vault.Options.Calls), an empty server list without one.
+	ICE ICESource
 }
 
 // Feature implements vault.Feature and vault.ConnectionRemovedObserver.
 type Feature struct {
 	mu     sync.Mutex
-	issuer ICEIssuer
+	iceSrc ICESource
 	// ringMu guards ringingIn: the incoming calls that ring, by id, with
 	// their offer's exp. Kept apart from mu, which a handler holds across a
 	// network call, so that the wake's look (CallRinging) never waits on it.
@@ -171,9 +125,9 @@ type Feature struct {
 // New returns the feature.
 func New(o Options) *Feature {
 	if o.ICE == nil {
-		o.ICE = NoServers{}
+		o.ICE = &Pool{}
 	}
-	return &Feature{issuer: o.ICE, calls: map[string]*Call{}, alive: map[string]time.Time{},
+	return &Feature{iceSrc: o.ICE, calls: map[string]*Call{}, alive: map[string]time.Time{},
 		off: map[string]bool{}, unanswered: map[string][]time.Time{}, limitedSent: map[string]bool{}}
 }
 
@@ -182,6 +136,10 @@ var (
 	both   = []string{vault.KindApp, vault.KindDesktop, vault.KindConnection}
 	conns  = []string{vault.KindConnection}
 )
+
+// Unlocked implements vault.UnlockObserver: the pool asks for its credentials at the opening (§10.10: within 5 s
+// of unlock).
+func (f *Feature) Unlocked(s *vault.Session) { f.iceSrc.Prime(s, s.Now()) }
 
 // Name implements vault.Feature.
 func (f *Feature) Name() string { return "calls" }
@@ -354,13 +312,13 @@ func (f *Feature) sorted() []string {
 	return ids
 }
 
-// iceFor issues and signs this vault's ICE configuration for a call.
-func (f *Feature) iceFor(ctx context.Context, s *vault.Session, callID string) (cfg, sig []byte, err error) {
-	servers, err := f.issuer.Issue(ctx, callID, ICETTL)
+// iceFor makes and signs this vault's ICE configuration for a call (§10.10 "Servers and credentials").
+func (f *Feature) iceFor(_ context.Context, s *vault.Session, callID string) (cfg, sig []byte, err error) {
+	servers, exp, err := f.iceSrc.Servers(s, callID, s.Now())
 	if err != nil {
 		return nil, nil, err
 	}
-	c := &callwire.ICEConfig{CallID: callID, Exp: s.Now().Add(ICETTL).UTC().Truncate(time.Second), Servers: servers}
+	c := &callwire.ICEConfig{CallID: callID, Exp: exp.UTC().Truncate(time.Second), Servers: servers}
 	if cfg, err = c.Marshal(); err != nil {
 		return nil, nil, err
 	}
@@ -673,6 +631,7 @@ func (f *Feature) start(ctx context.Context, s *vault.Session, body []byte) (jso
 	}
 	f.calls[id] = &Call{ID: id, Conn: st.ConnectionID, Dir: DirOut, Media: st.Media, State: StateRinging, Device: s.From().ID,
 		Created: now, Exp: exp, Watched: st.Keepalive}
+	f.iceSrc.Retire(id) // placed: its credential serves this call alone
 	f.prune(now)
 	s.Record(vault.Activity{Kind: "call.outgoing", ConnectionID: st.ConnectionID, Ref: id, Direction: DirOut, Audit: true})
 	f.clearUnanswered(s, st.ConnectionID, now) // a call the member places clears the counts
@@ -1011,6 +970,7 @@ func (f *Feature) answerFromDevice(s *vault.Session, body []byte) error {
 		return unavailable(s, a.CallID)
 	}
 	c.State, c.Device, c.Answered, c.Watched = StateActive, s.From().ID, now, a.Keepalive
+	f.iceSrc.Retire(c.ID) // answered on this side: its credential serves this call alone
 	f.notRinging(c.ID)
 	f.clearUnanswered(s, c.Conn, now) // an answered call from the connection clears the counts
 	f.alive[c.ID] = now               // the 90 s count from the answer until the first keep-alive

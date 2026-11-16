@@ -4,8 +4,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/ed25519"
-	"crypto/hmac"
-	"crypto/sha1"
 	"crypto/sha256"
 	"encoding/base64"
 	"strings"
@@ -396,38 +394,6 @@ func TestBadBodies(t *testing.T) {
 	}
 	if r := featuretest.Call(s.f, s.h, t0, "app", "call.list", `{"limit":0}`); r.Code != "bad_request" {
 		t.Error("limit 0 accepted")
-	}
-}
-
-// CALLING-SERVICE §5: coturn use-auth-secret credentials.
-func TestCoturnIssuer(t *testing.T) {
-	c := Coturn{STUN: []string{"stun:stun.example.org:3478"}, TURN: []string{"turns:turn.example.org:5349?transport=tcp"},
-		Secret: []byte("shared"), Now: func() time.Time { return t0 }}
-	servers, err := c.Issue(context.Background(), "01JB2Z6V9K3M4N5P6Q7R8S9T0A", time.Hour)
-	if err != nil || len(servers) != 2 {
-		t.Fatal(err)
-	}
-	user := servers[1].Username
-	if want := "1791032400:01JB2Z6V9K3M4N5P6Q7R8S9T0A"; user != want {
-		t.Fatalf("username %q", user)
-	}
-	mac := hmac.New(sha1.New, []byte("shared"))
-	mac.Write([]byte(user))
-	if servers[1].Credential != b64(mac.Sum(nil)) {
-		t.Fatal("credential")
-	}
-	if s, _ := (NoServers{}).Issue(context.Background(), "x", time.Hour); len(s) != 0 {
-		t.Fatal("NoServers issued servers")
-	}
-	f := New(Options{ICE: c})
-	h := featuretest.NewHost()
-	h.AddConnection("c1")
-	h.AddDevice("dev-app", "app")
-	sk, _ := suite.GeneratePrivateKey()
-	r := featuretest.Call(f, h, t0, "app", "call.start", startBody("c1", sk.Public().Bytes()))
-	cfg, _ := r.Obj(t).Base64("ice_config", -1)
-	if !strings.Contains(string(cfg), `"username":"`) || !strings.Contains(string(cfg), "turns:turn.example.org") {
-		t.Fatalf("issued config %s", cfg)
 	}
 }
 

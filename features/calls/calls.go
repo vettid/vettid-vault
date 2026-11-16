@@ -672,8 +672,43 @@ func (f *Feature) start(ctx context.Context, s *vault.Session, body []byte) (jso
 	f.prune(now)
 	s.Record(vault.Activity{Kind: "call.outgoing", ConnectionID: st.ConnectionID, Ref: id, Direction: DirOut, Audit: true})
 	f.clearUnanswered(s, st.ConnectionID, now) // a call the member places clears the counts
-	return strictjson.NewBuilder().String("call_id", id).String("exp", envelope.FormatTS(exp)).
-		Base64("ice_config", cfg).Base64("ice_sig", isig).Bytes(), nil
+	answer := func(cfg, isig []byte) json.RawMessage {
+		return strictjson.NewBuilder().String("call_id", id).String("exp", envelope.FormatTS(exp)).
+			Base64("ice_config", cfg).Base64("ice_sig", isig).Bytes()
+	}
+	// §10.10 (0.90.15): the answer is cached (§8.2) for a retransmission without its TURN entry, so no credential
+	// is kept in the vault's state: the same call id and exp, STUN only, signed again. The answer sent now is
+	// unchanged. The STUN-only form is smaller than the one just signed, so making it fails only if signing itself
+	// does: then nothing with a credential is cached either, and the call is left to its ring timer.
+	scfg, ssig, err := stunOnly(s, cfg)
+	if err != nil {
+		return nil, errInternal
+	}
+	s.CacheResponseAs(answer(scfg, ssig))
+	return answer(cfg, isig), nil
+}
+
+// stunOnly returns the configuration cfg without its TURN entries (those with a credential), signed again with the
+// same call id and exp.
+func stunOnly(s *vault.Session, cfg []byte) (out, sig []byte, err error) {
+	c, err := callwire.ParseICEConfig(cfg)
+	if err != nil {
+		return nil, nil, err
+	}
+	var kept []callwire.ICEServer
+	for _, sv := range c.Servers {
+		if sv.Username == "" && sv.Credential == "" {
+			kept = append(kept, sv)
+		}
+	}
+	c.Servers = kept
+	if out, err = c.Marshal(); err != nil {
+		return nil, nil, err
+	}
+	if sig, err = s.SignICEConfig(out); err != nil {
+		return nil, nil, err
+	}
+	return out, sig, nil
 }
 
 // Offer is a parsed call.offer body (from a peer vault, which may be

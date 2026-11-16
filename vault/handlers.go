@@ -220,7 +220,18 @@ type Session struct {
 	relayAt time.Time
 	// epoch is the epoch the message opened under (core handlers).
 	epoch *handshake.Epoch
+	// cacheBody, if set, is the body the request's answer is cached with instead of the one sent (CacheResponseAs).
+	cacheBody json.RawMessage
 }
+
+// CacheResponseAs makes the answer to the request being handled cached (§8.2: a retransmission is answered from
+// the cache, not executed again) with body instead of the body the handler returns, which is sent once as it is.
+// For an answer that holds something the vault must not keep in its state (VAULT-MESSAGING §10.10, 0.90.15: a TURN
+// credential); body must be a valid answer to the same request.
+func (s *Session) CacheResponseAs(body json.RawMessage) { s.cacheBody = body }
+
+// CachedResponse returns the body set by CacheResponseAs (nil: the answer is cached as sent).
+func (s *Session) CachedResponseBody() json.RawMessage { return s.cacheBody }
 
 // Host is what a Session acts on. The Manager implements it for the
 // messages it dispatches; tests of feature packages supply their own.

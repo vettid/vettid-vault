@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/vettid/vettid-vault/vms/strictjson"
 	"slices"
 	"strconv"
 	"strings"
@@ -745,5 +746,46 @@ func TestPoolBackoffFromTheFailure(t *testing.T) {
 	prime(p, t0.Add(time.Minute+7*time.Second))
 	if n := len(is.asked()); n != 2 {
 		t.Fatalf("not asked a minute after the failure: %d", n)
+	}
+}
+
+// §10.10 (0.90.15): call.start's answer is sent with its TURN entry, and cached for a retransmission without it:
+// the same call id and exp, STUN only, signed again with ik.
+func TestStartCachedWithoutTheCredential(t *testing.T) {
+	is := &fakeIssuer{exp: t0.Add(5 * time.Hour)}
+	p := poolWith(is)
+	prime(p, t0)
+	f := New(Options{ICE: p})
+	h := featuretest.NewHost()
+	h.AddConnection("c1")
+	h.AddDevice("dev-app", "app")
+	sk, _ := suite.GeneratePrivateKey()
+	r := featuretest.Call(f, h, t0, "app", "call.start", startBody("c1", sk.Public().Bytes()))
+	if !r.OK() || r.Cached == nil {
+		t.Fatalf("%s: cached %v", r.Code, r.Cached != nil)
+	}
+	id := str(t, r.Body, "call_id")
+	sent := func(b []byte) *callwire.ICEConfig {
+		o, err := strictjson.ParseObject(b)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg, _ := o.Base64("ice_config", -1)
+		sig, _ := o.Base64("ice_sig", -1)
+		c, err := callwire.VerifyICE(h.IK, cfg, sig, id, t0)
+		if err != nil {
+			t.Fatalf("%v", err)
+		}
+		return c
+	}
+	first, cached := sent(r.Body), sent(r.Cached)
+	if len(first.Servers) != 2 || first.Servers[1].Username == "" {
+		t.Fatalf("the first answer lost its TURN entry: %+v", first.Servers)
+	}
+	if len(cached.Servers) != 1 || cached.Servers[0].Username != "" || !cached.Exp.Equal(first.Exp) || cached.CallID != first.CallID {
+		t.Fatalf("cached %+v, first %+v", cached, first)
+	}
+	if strings.Contains(string(r.Cached), "u1") || str(t, r.Cached, "exp") != str(t, r.Body, "exp") {
+		t.Fatalf("cached %s", r.Cached)
 	}
 }

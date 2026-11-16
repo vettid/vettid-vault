@@ -1248,8 +1248,9 @@ func (p *vproc) push(ctx context.Context, f [][]byte) [][]byte {
 // maxCallsBody bounds a calling-service request: CALLING-SERVICE §5.2 allows at most 1 KiB.
 const maxCallsBody = 1 << 10
 
-// callsBody reports whether b is exactly a credentials request's body, {"count":n} with n in 1..4: a calls request
-// carries nothing a vault process chose beyond that number.
+// callsBody reports whether b is exactly a credentials request's body, {"count":n} with n in 1..4, byte for byte: the
+// body carries nothing a vault process chose beyond that number. (The process still chooses the request's key,
+// timestamp and signature, which the issuer checks.)
 func callsBody(b []byte) bool {
 	for n := 1; n <= callswire.MaxCount; n++ {
 		if bytes.Equal(b, callswire.RequestBody(n)) {

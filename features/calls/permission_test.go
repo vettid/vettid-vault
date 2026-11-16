@@ -292,6 +292,7 @@ func (failingICE) Servers(*vault.Session, string, time.Time) ([]callwire.ICEServ
 	return nil, time.Time{}, context.DeadlineExceeded
 }
 func (failingICE) Retire(string)                   {}
+func (failingICE) Drop(string)                     {}
 func (failingICE) Prime(*vault.Session, time.Time) {}
 
 // Calls off is checked before glare. Turning calls off ends the member's

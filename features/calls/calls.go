@@ -137,6 +137,14 @@ var (
 	conns  = []string{vault.KindConnection}
 )
 
+// Zeroize implements vault.Zeroizer: at lock the pool's credentials and URLs go from memory, and it asks for
+// nothing more (a feature value lives for one opening).
+func (f *Feature) Zeroize() {
+	if z, ok := f.iceSrc.(vault.Zeroizer); ok {
+		z.Zeroize()
+	}
+}
+
 // Opened implements vault.OpenObserver: the pool asks for its credentials at the opening, before the first collect
 // (§10.10: within 5 s of unlock).
 func (f *Feature) Opened(s *vault.Session) { f.iceSrc.Prime(s, s.Now()) }
@@ -314,18 +322,45 @@ func (f *Feature) sorted() []string {
 
 // iceFor makes and signs this vault's ICE configuration for a call (§10.10 "Servers and credentials").
 func (f *Feature) iceFor(_ context.Context, s *vault.Session, callID string) (cfg, sig []byte, err error) {
-	servers, exp, err := f.iceSrc.Servers(s, callID, s.Now())
+	now := s.Now()
+	servers, exp, err := f.iceSrc.Servers(s, callID, now)
 	if err != nil {
 		return nil, nil, err
 	}
-	c := &callwire.ICEConfig{CallID: callID, Exp: exp.UTC().Truncate(time.Second), Servers: servers}
-	if cfg, err = c.Marshal(); err != nil {
-		return nil, nil, err
+	// The calling service may cost a member the relay, never a direct call (CALLING-SERVICE §7.5): servers the
+	// configuration cannot carry (an issuer's answer that passed its checks but whose configuration would be over
+	// callwire.MaxICEConfig) fall back to the STUN entry alone, then to none, and the credential is dropped.
+	fallbacks := [][]callwire.ICEServer{servers}
+	if len(servers) > 0 {
+		var stun []callwire.ICEServer
+		for _, sv := range servers {
+			if sv.Username == "" {
+				stun = append(stun, sv)
+			}
+		}
+		if len(stun) < len(servers) {
+			fallbacks = append(fallbacks, stun)
+		}
+		if len(stun) > 0 {
+			fallbacks = append(fallbacks, nil)
+		}
 	}
-	if sig, err = s.SignICEConfig(cfg); err != nil {
-		return nil, nil, err
+	for i, list := range fallbacks {
+		e := exp
+		if i > 0 {
+			f.iceSrc.Drop(callID)
+			e = now.Add(ICETTL) // no credential: the configuration's own lifetime
+		}
+		c := &callwire.ICEConfig{CallID: callID, Exp: e.UTC().Truncate(time.Second), Servers: list}
+		if cfg, err = c.Marshal(); err != nil {
+			continue
+		}
+		if sig, err = s.SignICEConfig(cfg); err != nil {
+			continue
+		}
+		return cfg, sig, nil
 	}
-	return cfg, sig, nil
+	return nil, nil, err
 }
 
 // Start is a parsed call.start body.
@@ -945,6 +980,9 @@ func (f *Feature) answerFromDevice(s *vault.Session, body []byte) error {
 	if err != nil {
 		return err
 	}
+	// Any answer from a device that reached the vault retires the credential the call's configuration carried,
+	// whatever happens to it next: that device has already allocated with it.
+	f.iceSrc.Retire(a.CallID)
 	c := f.calls[a.CallID]
 	now := s.Now()
 	if c == nil || c.Dir != DirIn || c.State != StateRinging || !now.Before(c.Exp) {
@@ -972,9 +1010,6 @@ func (f *Feature) answerFromDevice(s *vault.Session, body []byte) error {
 		return unavailable(s, a.CallID)
 	}
 	c.State, c.Device, c.Answered, c.Watched = StateActive, s.From().ID, now, a.Keepalive
-	// Answered on this side (the answer was delivered: one that could not be sent ended the call unanswered, and its
-	// credential stays in use): it serves this call alone.
-	f.iceSrc.Retire(c.ID)
 	f.notRinging(c.ID)
 	f.clearUnanswered(s, c.Conn, now) // an answered call from the connection clears the counts
 	f.alive[c.ID] = now               // the 90 s count from the answer until the first keep-alive

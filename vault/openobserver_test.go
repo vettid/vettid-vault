@@ -41,3 +41,19 @@ func TestOpenObserverBeforeTheFirstCollect(t *testing.T) {
 		t.Fatalf("told %d times in one opening", o.opened)
 	}
 }
+
+// A locked vault tells no feature that it is open: beforeCollect refuses first.
+func TestOpenObserverNotWhileLocked(t *testing.T) {
+	d := newDevFixture(t)
+	o := &openStub{}
+	d.m.addFeature(o)
+	d.m.mu.Lock()
+	d.m.locked = true
+	d.m.mu.Unlock()
+	if err := d.m.beforeCollect(context.Background()); err != ErrLocked {
+		t.Fatalf("%v", err)
+	}
+	if o.opened != 0 {
+		t.Fatal("a locked vault told a feature it was open")
+	}
+}

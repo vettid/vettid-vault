@@ -3,6 +3,7 @@ package calls
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"strconv"
 	"strings"
@@ -335,9 +336,10 @@ func TestFeaturePrimesAtUnlockAndTick(t *testing.T) {
 	}
 }
 
-// A start whose offer could not be sent placed nothing: its credential stays in use. An answer that could not be
-// delivered answered nothing either.
-func TestFailedSendsKeepTheCredential(t *testing.T) {
+// A start whose offer could not be sent placed nothing: its credential stays in use (the device never got the
+// configuration). An answer that reached the vault retires its call's credential even when it could not be passed
+// on, and so does one the vault refuses: the answering device has already allocated with it.
+func TestFailedSendsAndTheCredential(t *testing.T) {
 	is := &fakeIssuer{exp: t0.Add(6 * time.Hour)}
 	p := poolWith(is)
 	prime(p, t0)
@@ -362,8 +364,21 @@ func TestFailedSendsKeepTheCredential(t *testing.T) {
 	b.h.DownConns["cA"] = true
 	enc, _, _ := callwire.Answer(ek, id)
 	featuretest.Call(b.f, b.h, t0.Add(time.Second), "app", "call.answer", answerBody("dev-app", id, enc))
-	if len(p.creds) != PoolSize {
-		t.Fatalf("an answer that was not delivered retired a credential: %d left", len(p.creds))
+	if len(p.creds) != PoolSize-1 {
+		t.Fatalf("an answer that was not delivered kept its credential: %d left", len(p.creds))
+	}
+	// An answer the vault refuses (the call is over by then) still retires the credential its offer carried.
+	id2 := newCallID("cA")
+	b.h.DownConns["cA"] = false
+	featuretest.CallExp(b.f, b.h, t0.Add(2*time.Second), t0.Add(2*time.Second+OfferTTL), "connection:cA", "call.offer",
+		peerOffer("cA", id2, "audio", ek))
+	enc2, _, _ := callwire.Answer(ek, id2)
+	if _, ok := p.given[id2]; !ok {
+		t.Fatal("the second offer was given no credential")
+	}
+	featuretest.Call(b.f, b.h, t0.Add(2*time.Second+OfferTTL+time.Second), "app", "call.answer", answerBody("dev-app", id2, enc2))
+	if len(p.creds) != PoolSize-2 {
+		t.Fatalf("a refused answer kept its credential: %d left", len(p.creds))
 	}
 }
 
@@ -446,6 +461,7 @@ func TestJitterRange(t *testing.T) {
 func TestPoolTakesCountAndNoUsernameTwice(t *testing.T) {
 	p := poolWith(&repeatIssuer{})
 	p.creds = []callswire.Credential{{Username: "held", Credential: "c", Exp: t0.Add(6 * time.Hour)}}
+	p.turn = []string{"turn:h:3478"} // the same servers as the answer's
 	prime(p, t0)
 	var names []string
 	for _, c := range p.creds {
@@ -468,4 +484,266 @@ func (repeatIssuer) Credentials(_ context.Context, count int) (*callswire.Answer
 		panic(count)
 	}
 	return a, nil
+}
+
+// bigIssuer answers with URLs that pass the vault's checks but make a configuration too large to sign (each " or \
+// is escaped to two bytes): 4 TURN URLs, and as many STUN URLs as stun says, all of 512 bytes.
+type bigIssuer struct{ stun int }
+
+func (b bigIssuer) Credentials(_ context.Context, count int) (*callswire.Answer, error) {
+	url := func(scheme string) string { return `"` + scheme + strings.Repeat(`\\`, 512-len(scheme)) + `"` }
+	var stun, turn []string
+	for range b.stun {
+		stun = append(stun, url("stun:"))
+	}
+	for range 4 {
+		turn = append(turn, url("turn:"))
+	}
+	var creds []string
+	for i := range count {
+		creds = append(creds, `{"username":"u`+strconv.Itoa(i)+`","credential":"c","exp":`+strconv.FormatInt(t0.Add(6*time.Hour).Unix(), 10)+`}`)
+	}
+	body := `{"stun":[` + strings.Join(stun, ",") + `],"turn":[` + strings.Join(turn, ",") + `],"credentials":[` +
+		strings.Join(creds, ",") + `]}`
+	return callswire.ParseAnswer([]byte(body), t0)
+}
+
+// An issuer's answer that passes its checks but makes a configuration too large to sign does not break calls
+// (CALLING-SERVICE §7.5): the configuration falls back to the STUN entry (4 escaped URLs always fit), and the
+// credential is dropped.
+func TestOversizedServersFallBack(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		stun int
+		want int // servers in the configuration
+	}{{"4 STUN and 4 TURN URLs", 4, 1}} {
+		p := poolWith(bigIssuer{stun: tc.stun})
+		prime(p, t0)
+		if len(p.creds) != PoolSize {
+			t.Fatalf("%s: the answer was not taken: %d", tc.name, len(p.creds))
+		}
+		f := New(Options{ICE: p})
+		h := featuretest.NewHost()
+		h.AddConnection("c1")
+		h.AddDevice("dev-app", "app")
+		sk, _ := suite.GeneratePrivateKey()
+		r := featuretest.Call(f, h, t0, "app", "call.start", startBody("c1", sk.Public().Bytes()))
+		if !r.OK() {
+			t.Fatalf("%s: call.start failed: %s", tc.name, r.Body)
+		}
+		raw, _ := r.Obj(t).Base64("ice_config", -1)
+		c, err := callwire.ParseICEConfig(raw)
+		if err != nil || len(c.Servers) != tc.want || !c.Exp.Equal(t0.Add(ICETTL)) {
+			t.Fatalf("%s: %v %+v", tc.name, err, c)
+		}
+		for _, sv := range c.Servers {
+			if sv.Username != "" {
+				t.Fatalf("%s: a credential went out", tc.name)
+			}
+		}
+		if len(p.creds) != PoolSize-1 {
+			t.Fatalf("%s: the credential was not dropped: %d left", tc.name, len(p.creds))
+		}
+		// An incoming offer's configuration too: its credential is dropped although nobody answered.
+		b := newSide("cA")
+		b.f = New(Options{ICE: p})
+		ok, _ := callwire.NewOfferKey()
+		featuretest.CallExp(b.f, b.h, t0, t0.Add(OfferTTL), "connection:cA", "call.offer",
+			peerOffer("cA", newCallID("cA"), "audio", ok.Public().Bytes()))
+		if len(p.creds) != PoolSize-2 {
+			t.Fatalf("%s: the offer's credential was not dropped: %d left", tc.name, len(p.creds))
+		}
+	}
+}
+
+// A call's configuration expires with its credential, not 6 h from now.
+func TestConfigurationExpiresWithTheCredential(t *testing.T) {
+	is := &fakeIssuer{exp: t0.Add(5*time.Hour + 17*time.Second)}
+	p := poolWith(is)
+	prime(p, t0)
+	f := New(Options{ICE: p})
+	h := featuretest.NewHost()
+	h.AddConnection("c1")
+	h.AddDevice("dev-app", "app")
+	sk, _ := suite.GeneratePrivateKey()
+	r := featuretest.Call(f, h, t0, "app", "call.start", startBody("c1", sk.Public().Bytes()))
+	raw, _ := r.Obj(t).Base64("ice_config", -1)
+	c, err := callwire.ParseICEConfig(raw)
+	if err != nil || !c.Exp.Equal(is.exp) {
+		t.Fatalf("%v %+v", err, c)
+	}
+}
+
+// blockingIssuer holds each request until released.
+type blockingIssuer struct {
+	*fakeIssuer
+	release chan struct{}
+}
+
+func (b *blockingIssuer) Credentials(ctx context.Context, n int) (*callswire.Answer, error) {
+	select {
+	case <-b.release:
+	case <-ctx.Done():
+		_, _ = b.fakeIssuer.Credentials(ctx, n)
+		return nil, ctx.Err()
+	}
+	return b.fakeIssuer.Credentials(ctx, n)
+}
+
+// While a request is in flight no second one goes; Servers asks the issuer itself when the pool is short.
+func TestPoolOneRequestInFlight(t *testing.T) {
+	is := &fakeIssuer{exp: t0.Add(6 * time.Hour)}
+	b := &blockingIssuer{fakeIssuer: is, release: make(chan struct{})}
+	p := poolWith(b)
+	// Servers primes: the request starts from it.
+	if servers, _, _ := p.Servers(nil, "x", t0); len(servers) != 0 {
+		t.Fatalf("%+v", servers)
+	}
+	p.mu.Lock()
+	fromServers := p.inFlight
+	p.mu.Unlock()
+	if !fromServers {
+		t.Fatal("Servers did not ask the issuer for a short pool")
+	}
+	p.Prime(nil, t0.Add(time.Second))
+	p.Prime(nil, t0.Add(2*time.Second))
+	p.mu.Lock()
+	inFlight, sent, d := p.inFlight, len(p.sent), p.done
+	p.mu.Unlock()
+	if !inFlight || sent != 1 {
+		t.Fatalf("in flight %v, %d requests", inFlight, sent)
+	}
+	close(b.release)
+	<-d
+	if got := is.asked(); len(got) != 1 || got[0] != PoolSize {
+		t.Fatalf("asked %v", got)
+	}
+}
+
+// At lock the pool forgets its credentials and URLs, a request in flight is cancelled and its answer not taken, and
+// nothing more is asked for.
+func TestPoolZeroizedAtLock(t *testing.T) {
+	is := &fakeIssuer{exp: t0.Add(6 * time.Hour)}
+	p := poolWith(is)
+	prime(p, t0)
+	_, _, _ = p.Servers(nil, "x", t0)
+	f := New(Options{ICE: p})
+	var z vault.Zeroizer = f
+	z.Zeroize()
+	if len(p.creds) != 0 || p.stun != nil || p.turn != nil || len(p.given) != 0 {
+		t.Fatal("the pool kept something at lock")
+	}
+	prime(p, t0.Add(time.Hour))
+	if len(is.asked()) != 1 {
+		t.Fatal("a zeroized pool asked again")
+	}
+	if servers, _, _ := p.Servers(nil, "y", t0.Add(time.Hour)); len(servers) != 0 {
+		t.Fatalf("%+v", servers)
+	}
+
+	// A request in flight at the lock: cancelled, and its answer not taken.
+	b := &blockingIssuer{fakeIssuer: &fakeIssuer{exp: t0.Add(6 * time.Hour)}, release: make(chan struct{})}
+	q := poolWith(b)
+	q.Prime(nil, t0)
+	q.mu.Lock()
+	d := q.done
+	q.mu.Unlock()
+	q.Zeroize()
+	select {
+	case <-d:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the request in flight was not cancelled at the lock")
+	}
+	if len(q.creds) != 0 {
+		t.Fatal("an answer came in after the lock")
+	}
+
+	// An issuer that answers whatever the cancellation: its answer is not taken after the lock.
+	st := &stubbornIssuer{fakeIssuer: &fakeIssuer{exp: t0.Add(6 * time.Hour)}, release: make(chan struct{})}
+	r := poolWith(st)
+	r.Prime(nil, t0)
+	r.mu.Lock()
+	d = r.done
+	r.mu.Unlock()
+	r.Zeroize()
+	close(st.release)
+	<-d
+	if len(r.creds) != 0 || r.turn != nil {
+		t.Fatal("an answer that came after the lock was taken")
+	}
+}
+
+type stubbornIssuer struct {
+	*fakeIssuer
+	release chan struct{}
+}
+
+func (s *stubbornIssuer) Credentials(ctx context.Context, n int) (*callswire.Answer, error) {
+	<-s.release
+	return s.fakeIssuer.Credentials(ctx, n)
+}
+
+// New TURN URLs drop the credentials of the earlier answer: they never go out with other servers.
+func TestPoolNewTURNURLsDropOldCredentials(t *testing.T) {
+	is := &fakeIssuer{exp: t0.Add(6 * time.Hour)}
+	p := poolWith(is)
+	prime(p, t0)
+	for _, id := range []string{"a", "b", "c"} {
+		_, _, _ = p.Servers(nil, id, t0)
+		p.Retire(id)
+	}
+	if len(p.creds) != 1 {
+		t.Fatalf("%d", len(p.creds))
+	}
+	old := p.creds[0].Username
+	p.Issuer = func(*vault.Session) vault.CallsIssuer { return movedIssuer{is} }
+	p.issuerSeen = false
+	prime(p, t0.Add(time.Minute))
+	for _, c := range p.creds {
+		if c.Username == old {
+			t.Fatal("a credential of the earlier servers was kept")
+		}
+	}
+	if !slices.Equal(p.turn, []string{"turn:moved.example.org:3478"}) {
+		t.Fatal(p.turn)
+	}
+}
+
+type movedIssuer struct{ *fakeIssuer }
+
+func (m movedIssuer) Credentials(ctx context.Context, n int) (*callswire.Answer, error) {
+	a, err := m.fakeIssuer.Credentials(ctx, n)
+	if a != nil {
+		a.TURN = []string{"turn:moved.example.org:3478"}
+	}
+	return a, err
+}
+
+// The pool prints none of what it holds.
+func TestPoolPrintsNothing(t *testing.T) {
+	p := poolWith(&fakeIssuer{exp: t0.Add(6 * time.Hour)})
+	prime(p, t0)
+	for _, f := range []string{"%v", "%+v", "%#v", "%s"} {
+		if s := fmt.Sprintf(f, p); strings.Contains(s, "u1") || strings.Contains(s, "calls.example.org") {
+			t.Fatalf("%s: %s", f, s)
+		}
+	}
+}
+
+// The backoff counts from the failure, not from the attempt's start: an attempt that took 7 s waits a minute from
+// then.
+func TestPoolBackoffFromTheFailure(t *testing.T) {
+	is := &fakeIssuer{}
+	is.set(time.Time{}, errors.New("down"))
+	p := poolWith(is)
+	p.Since = func(time.Time) time.Duration { return 7 * time.Second }
+	prime(p, t0)
+	prime(p, t0.Add(time.Minute+6*time.Second))
+	if n := len(is.asked()); n != 1 {
+		t.Fatalf("asked again before a minute after the failure: %d", n)
+	}
+	prime(p, t0.Add(time.Minute+7*time.Second))
+	if n := len(is.asked()); n != 2 {
+		t.Fatalf("not asked a minute after the failure: %d", n)
+	}
 }

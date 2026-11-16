@@ -21,6 +21,9 @@ type ICESource interface {
 	// Retire takes the credential callID was given out of use: the call was placed (call.start succeeded) or
 	// answered on this side. A credential that only went out with offers nobody answered stays in use.
 	Retire(callID string)
+	// Drop takes the credential callID was given out of use because the configuration it went into could not be
+	// made (it would have been too large to sign): it is not offered again.
+	Drop(callID string)
 	// Prime asks the issuer for credentials when the pool is short and the limits allow: at unlock, at each
 	// tick, and before a configuration is made.
 	Prime(s *vault.Session, now time.Time)
@@ -61,6 +64,8 @@ type Pool struct {
 	Issuer func(*vault.Session) vault.CallsIssuer
 	// Jitter returns a factor in [-0.2, 0.2] for a wait (default: random).
 	Jitter func() float64
+	// Since is how long has passed since a time of the monotonic clock (default: time.Since; tests).
+	Since func(time.Time) time.Duration
 
 	mu         sync.Mutex
 	issuer     vault.CallsIssuer
@@ -73,7 +78,28 @@ type Pool struct {
 	failures   int         // failed attempts in a row
 	next       time.Time   // no request before
 	inFlight   bool
-	done       chan struct{} // closed when the request in flight ends (tests)
+	cancel     context.CancelFunc // the request in flight's
+	done       chan struct{}      // closed when the request in flight ends (tests)
+	closed     bool               // zeroized at lock: nothing is asked for or taken any more
+}
+
+// String keeps the pool's credentials out of logs and errors.
+func (p *Pool) String() string { return "calls.Pool" }
+
+// GoString is String, for %#v.
+func (p *Pool) GoString() string { return p.String() }
+
+// Zeroize forgets everything the pool holds and closes it (the vault locks): the credentials, the URLs and the
+// calls given them; a request in flight is cancelled, and its answer, if it still comes, is not taken.
+func (p *Pool) Zeroize() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.closed = true
+	if p.cancel != nil {
+		p.cancel()
+	}
+	clear(p.creds)
+	p.creds, p.stun, p.turn, p.given, p.givenOrder = nil, nil, nil, nil, nil
 }
 
 func (p *Pool) issuerFor(s *vault.Session) vault.CallsIssuer {
@@ -112,8 +138,12 @@ func (p *Pool) allowed(now time.Time) bool {
 func (p *Pool) Prime(s *vault.Session, now time.Time) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	// While the vault is held for the owner check it may skip (§3.6.3): a held vault makes no calls.
+	if p.closed || p.inFlight || (s != nil && s.OwnerHeld()) {
+		return
+	}
 	is := p.issuerFor(s)
-	if is == nil || p.inFlight {
+	if is == nil {
 		return
 	}
 	p.usable(now)
@@ -123,29 +153,48 @@ func (p *Pool) Prime(s *vault.Session, now time.Time) {
 	p.inFlight = true
 	p.done = make(chan struct{})
 	p.sent = append(p.sent, now)
-	go p.fetch(is, PoolSize-len(p.creds), now, p.done)
+	ctx, cancel := context.WithTimeout(context.Background(), RequestTime)
+	p.cancel = cancel
+	go p.fetch(ctx, cancel, is, PoolSize-len(p.creds), now, p.done)
 }
 
 // fetch makes one attempt and takes its answer: the URLs, and the credentials up to PoolSize. A failure is not
 // audited and creates no feed item; it only sets the wait before the next attempt.
-func (p *Pool) fetch(is vault.CallsIssuer, count int, at time.Time, done chan struct{}) {
+func (p *Pool) fetch(ctx context.Context, cancel context.CancelFunc, is vault.CallsIssuer, count int, at time.Time,
+	done chan struct{}) {
 	defer close(done)
-	ctx, cancel := context.WithTimeout(context.Background(), RequestTime)
 	defer cancel()
+	start := time.Now()
 	a, err := is.Credentials(ctx, count)
+	// The time of the failure on the vault's clock: the attempt's start plus what it took (monotonic, in whole
+	// seconds).
+	since := time.Since
+	if p.Since != nil {
+		since = p.Since
+	}
+	failedAt := at.Add(since(start).Truncate(time.Second))
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.inFlight = false
+	p.inFlight, p.cancel = false, nil
+	if p.closed {
+		return // locked meanwhile: nothing is kept
+	}
 	if err != nil {
 		w := backoffAfter
 		if p.failures < len(backoff) {
 			w = jittered(backoff[p.failures], p.Jitter)
 		}
 		p.failures++
-		p.next = at.Add(w)
+		p.next = failedAt.Add(w) // counted from the failure, not the attempt's start
 		return
 	}
 	p.failures, p.next = 0, time.Time{}
+	// New TURN URLs: the credentials of the earlier answer are for the earlier servers, and never go out with
+	// these.
+	if !slices.Equal(p.turn, a.TURN) {
+		clear(p.creds)
+		p.creds = nil
+	}
 	// The STUN URLs last learned stay when the issuer cannot be reached; an answer replaces them.
 	p.stun, p.turn = a.STUN, a.TURN
 	// At most the count asked for, and no username twice (in the answer or the pool): a retire takes out the
@@ -211,6 +260,9 @@ func (p *Pool) give(callID, user string) {
 	}
 	p.given[callID] = user
 }
+
+// Drop implements ICESource: the credential goes as a retired one does.
+func (p *Pool) Drop(callID string) { p.Retire(callID) }
 
 // Retire implements ICESource.
 func (p *Pool) Retire(callID string) {

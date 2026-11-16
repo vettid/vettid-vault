@@ -8,6 +8,7 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -201,5 +202,45 @@ func TestAnotherRoot(t *testing.T) {
 	c := client(srv, func(pub ed25519.PublicKey, d [32]byte) ([]byte, error) { return nsm.Attest(d[:], nil, pub) })
 	if _, err := c.Credentials(context.Background(), 1); code(err) != callswire.CodeAttestationInvalid {
 		t.Fatal(err)
+	}
+}
+
+// recording keeps the last response's headers and body.
+type recording struct {
+	rt   http.RoundTripper
+	hdr  http.Header
+	body []byte
+}
+
+func (r *recording) RoundTrip(req *http.Request) (*http.Response, error) {
+	resp, err := r.rt.RoundTrip(req)
+	if err != nil {
+		return nil, err
+	}
+	b, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	r.hdr, r.body = resp.Header.Clone(), b
+	resp.Body = io.NopCloser(bytes.NewReader(b))
+	return resp, nil
+}
+
+// An error answers as the issuer does (Relay Protocol §7.1): code, message and retry_after, with the Retry-After
+// header; and the record keeps the latest 1,000 requests.
+func TestErrorFormAndRecordCap(t *testing.T) {
+	s, srv, nsm := setup(t)
+	c := client(srv, func(pub ed25519.PublicKey, d [32]byte) ([]byte, error) { return nsm.Attest(d[:], nil, pub) })
+	rec := &recording{rt: srv.Client().Transport}
+	c.HTTP = &http.Client{Transport: rec}
+	s.FailNext(Failure{Status: 429, Code: callswire.CodeRateLimited, RetryAfter: 30})
+	_, _ = c.Credentials(context.Background(), 1)
+	if rec.hdr.Get("Retry-After") != "30" || !bytes.Contains(rec.body, []byte(`"message":`)) || !bytes.Contains(rec.body, []byte(`"retry_after":30`)) {
+		t.Fatalf("%v %s", rec.hdr, rec.body)
+	}
+	for range maxRequests + 5 {
+		_, _ = srv.Client().Get(srv.URL + callswire.PathHealth) // not recorded
+		_, _ = srv.Client().Post(srv.URL+callswire.PathCredentials, "application/json", nil)
+	}
+	if n := len(s.Requests()); n != maxRequests {
+		t.Fatalf("%d recorded", n)
 	}
 }

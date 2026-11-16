@@ -493,7 +493,15 @@ func testCalls(t *testing.T, o *options, info map[string]any) {
 	if len(rs) == 0 {
 		t.Fatalf("issuer requests within 5 s of the unlock: %+v", rs)
 	}
+	// One request at the opening (an empty pool asks once, for 4): settle a moment and count again.
+	time.Sleep(2 * time.Second)
+	if rs = requests(); len(rs) != 1 {
+		t.Fatalf("issuer requests after the opening: %+v", rs)
+	}
 	r := rs[0]
+	if d := r.At.Sub(unlocked); d > 5*time.Second {
+		t.Fatalf("issuer request %v after the unlock was sent, over 5 s", d)
+	}
 	// §10.10: it asks for 4 (an empty pool) in one request.
 	if r.Status != 200 || !r.Attested || r.Count != 4 || len(r.Usernames) != r.Count || r.Key == "" {
 		t.Fatalf("issuer request %+v", r)

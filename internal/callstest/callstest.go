@@ -17,6 +17,7 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -106,6 +107,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// maxRequests bounds the record of requests: the latest ones are kept.
+const maxRequests = 1000
+
 func writeJSON(w http.ResponseWriter, status int, b []byte) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
@@ -123,7 +127,13 @@ func (s *Server) credentials(w http.ResponseWriter, r *http.Request) {
 		}
 		s.mu.Lock()
 		s.requests = append(s.requests, rec)
+		if len(s.requests) > maxRequests {
+			s.requests = append([]Request(nil), s.requests[len(s.requests)-maxRequests:]...)
+		}
 		s.mu.Unlock()
+		if retryAfter > 0 {
+			w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
+		}
 		writeJSON(w, status, b)
 	}
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxBody+1))
@@ -271,7 +281,8 @@ func (s *Server) Reset() {
 
 // errorBody is an error body (Relay Protocol §7.1).
 func errorBody(code string, retryAfter int) []byte {
-	b := strictjson.NewBuilder().String("code", code)
+	// Relay Protocol §7.1, as the issuer answers: code, a human-readable message, and retry_after when set.
+	b := strictjson.NewBuilder().String("code", code).String("message", "callstest: "+strings.ReplaceAll(code, "_", " "))
 	if retryAfter > 0 {
 		b.Uint("retry_after", uint64(retryAfter))
 	}

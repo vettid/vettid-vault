@@ -334,20 +334,45 @@ func TestContractReceived(t *testing.T) {
 	if _, ok := claimed()["cA"]; ok {
 		t.Error("a person's contract kept")
 	}
+	// The value sent to cB is recorded (a name change sends services one).
+	sent := func() map[string]string {
+		raw, err := e.set.Items.Save()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return profileState(t, raw).Contract
+	}
+	profileVersion := 0
+	setName := func(name string) {
+		t.Helper()
+		e.ok(e.call("app", "profile.set", `{"version":`+strconv.Itoa(profileVersion)+`,"name":"`+name+`"}`))
+		profileVersion++
+	}
+	setName("Al")
+	if got := sent()["cB"]; got != vault.ServiceContract {
+		t.Fatalf("sent: %q", got)
+	}
 	// A connection gone without its removal observed is pruned at the next
-	// applied update from another.
+	// applied update from another: both what it claimed and what it was sent.
 	send("cB", `"1.0"`)
 	cB := e.h.Conns["cB"]
 	delete(e.h.Conns, "cB")
 	send("cA", ``)
 	if _, ok := claimed()["cB"]; ok {
-		t.Error("not pruned with Peers")
+		t.Error("claimed not pruned with Peers")
+	}
+	if _, ok := sent()["cB"]; ok {
+		t.Error("sent not pruned with Peers")
 	}
 	e.h.Conns["cB"] = cB
 	send("cB", `"1.0"`)
-	// Removing the connection forgets it.
+	setName("Bo")
+	if len(claimed()) != 1 || len(sent()) != 1 {
+		t.Fatalf("before removal: claimed %v, sent %v", claimed(), sent())
+	}
+	// Removing the connection forgets both.
 	e.set.Items.ConnectionRemoved(vault.NewSession(context.Background(), e.h, vault.PeerInfo{}, e.clk.T, nil), "cB")
-	if len(claimed()) != 0 {
-		t.Errorf("after removal: %v", claimed())
+	if len(claimed()) != 0 || len(sent()) != 0 {
+		t.Errorf("after removal: claimed %v, sent %v", claimed(), sent())
 	}
 }

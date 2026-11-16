@@ -11,10 +11,13 @@ import (
 // State is the DEK-encrypted vault state (§3.3). It is serialized as JSON
 // and encrypted under the DEK on every flush. It is secret in its entirety.
 type State struct {
-	V        int    `json:"v"`
-	VaultID  string `json:"vault_id"`
-	UserGUID string `json:"user_guid"`
-	StateSeq uint64 `json:"state_seq"`
+	// AppDocumentTold (0.89.0) is whether the features were last told that the member's app lists
+	// approval_document (syncAppFeatures).
+	AppDocumentTold bool   `json:"app_document_told,omitempty"`
+	V               int    `json:"v"`
+	VaultID         string `json:"vault_id"`
+	UserGUID        string `json:"user_guid"`
+	StateSeq        uint64 `json:"state_seq"`
 	// MessagingRelease is §6.3.1's marker (0.87.1, "No upgrade: release 29
 	// starts clean"): written as 29 from a vault's first flush; a state
 	// without it, or with a smaller value, is not started (R29-U1).

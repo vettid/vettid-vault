@@ -53,6 +53,19 @@ type AppFeaturesObserver interface {
 	AppFeaturesChanged(s *Session)
 }
 
+// syncAppFeatures tells AppFeaturesObserver features when whether the app lists approval_document differs from
+// what they were last told (State.AppDocumentTold): after any change to it, whether the app's list changed or the
+// devices did (a pairing, a transfer, a recovery, a removal). Run at each batch's end.
+func (m *Manager) syncAppFeatures(now time.Time) {
+	cur := m.appFeature(FeatureApprovalDocument)
+	if cur == m.st.AppDocumentTold {
+		return
+	}
+	m.st.AppDocumentTold = cur
+	m.dirty = true
+	m.notifyAppFeatures(now)
+}
+
 func (m *Manager) notifyAppFeatures(now time.Time) {
 	for _, f := range m.features {
 		if o, ok := f.(AppFeaturesObserver); ok {
@@ -140,12 +153,8 @@ func (m *Manager) noteFeatures(p *Peer, names []string) {
 		return
 	}
 	if p.Kind != KindConnection && !slices.Equal(p.LastFeatures, names) {
-		was := m.appFeature(FeatureApprovalDocument)
 		p.LastFeatures = slices.Clone(names)
-		m.dirty = true
-		if m.appFeature(FeatureApprovalDocument) != was {
-			m.notifyAppFeatures(m.now())
-		}
+		m.dirty = true // features are told at the batch's end (syncAppFeatures)
 	}
 	if p.PeerFeatures == nil {
 		p.PeerFeatures = []string{}

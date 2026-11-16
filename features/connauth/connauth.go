@@ -214,6 +214,15 @@ func (c *Challenge) wire() *peerwire.ConnAuthChallenge {
 	return &peerwire.ConnAuthChallenge{RequestID: c.ID, Nonce: c.Nonce, Context: c.Context, Purpose: c.Purpose, MatchCode: c.MatchCode}
 }
 
+// BatchEnd implements vault.BatchEndObserver: closed asks expire at each batch's end too, not only at the next
+// connauth message, so that an expired approval's document leaves the vault's state promptly ("erased when the ask
+// closes", §10.4 "Approval documents").
+func (f *Feature) BatchEnd(s *vault.Session) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.expire(s.Now())
+}
+
 // Handle implements vault.Handler.
 func (f *Feature) Handle(_ context.Context, s *vault.Session, in *envelope.Inner) (json.RawMessage, error) {
 	f.mu.Lock()

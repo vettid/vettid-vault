@@ -1083,6 +1083,7 @@ func statusOf(err error) (int, bool) {
 // batchEndFeatures runs the clock work that follows a batch's messages
 // (BatchEndObserver).
 func (m *Manager) batchEndFeatures(now time.Time) {
+	m.syncAppFeatures(now)
 	for _, f := range m.features {
 		if o, ok := f.(BatchEndObserver); ok {
 			o.BatchEnd(m.session(now))

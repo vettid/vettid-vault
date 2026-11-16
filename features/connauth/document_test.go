@@ -2,6 +2,7 @@ package connauth
 
 import (
 	"bytes"
+	"context"
 	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/base64"
@@ -36,7 +37,8 @@ func docChallenge(t *testing.T, m *side, conn, doc string, required bool, purpos
 	t.Helper()
 	nextID++
 	d := sha256.Sum256([]byte(doc))
-	c := &peerwire.ConnAuthChallenge{RequestID: "01JB2Z6V9K3M4N5P6Q7R8S9T" + string(rune('A'+nextID/26)) + string(rune('A'+nextID%26)),
+	const crockford = "0123456789ABCDEFGHJKMNPQRSTVWXYZ" // a ULID's alphabet (no I, L, O or U)
+	c := &peerwire.ConnAuthChallenge{RequestID: "01JB2Z6V9K3M4N5P6Q7R8S9T" + string(crockford[nextID/32%32]) + string(crockford[nextID%32]),
 		Nonce: bytes.Repeat([]byte{4}, peerwire.ConnAuthNonceSize), Context: "Approve: Budget — ref " + peerwire.DocumentRef(d),
 		Purpose: purpose, Document: []byte(doc), DocumentRequired: required}
 	featuretest.CallExp(m.f, m.h, t0, t0.Add(time.Hour), "connection:"+conn, peerwire.TypeConnAuthChallenge, string(c.Marshal()))
@@ -252,4 +254,44 @@ func TestDocumentFetchIsVolatile(t *testing.T) {
 		}
 	}
 	t.Fatal("connection.authenticate.document is not registered")
+}
+
+// The document's checks come before the connection's limit: a bad document on a full connection is dropped as a bad
+// document, not as one over the limit. And the decision table comes before the unlock window: with the window
+// closed, an approval without the hash of a document_required challenge is update_required, not credential_locked.
+func TestApprovalDocumentOrder(t *testing.T) {
+	m, _ := member()
+	for range MaxPendingIn {
+		docChallenge(t, m, "cS", goodDoc, false, peerwire.PurposeApproval)
+	}
+	docChallenge(t, m, "cS", `{"action":"A","payload":{},"summary":""}`, false, peerwire.PurposeApproval)
+	var drop string
+	for _, a := range m.h.Activities {
+		if strings.HasPrefix(a.Kind, "drop.") {
+			drop = a.Kind
+		}
+	}
+	if drop != "drop.approval_document" {
+		t.Fatalf("a bad document on a full connection: %q", drop)
+	}
+	m2, _ := member()
+	c := docChallenge(t, m2, "cS", goodDoc, true, peerwire.PurposeApproval)
+	m2.w.open = false
+	if r := call(m2, "app", "connection.authenticate.approve", `{"request_id":"`+c.RequestID+`"}`); r.Code != "update_required" {
+		t.Fatalf("window closed: %q", r.Code)
+	}
+}
+
+// An expired ask's document leaves the vault's state at the next batch's end, without waiting for a connauth
+// message.
+func TestApprovalDocumentExpiresAtBatchEnd(t *testing.T) {
+	m, _ := member()
+	docChallenge(t, m, "cS", goodDoc, false, peerwire.PurposeApproval)
+	if raw, _ := m.f.Save(); !strings.Contains(string(raw), `"document"`) {
+		t.Fatalf("not kept to begin with: %s", raw)
+	}
+	m.f.BatchEnd(vault.NewSession(context.Background(), m.h, vault.PeerInfo{}, t0.Add(2*time.Hour), nil))
+	if raw, _ := m.f.Save(); strings.Contains(string(raw), `"document"`) {
+		t.Fatalf("an expired ask's document kept: %s", raw)
+	}
 }

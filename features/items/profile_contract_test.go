@@ -125,7 +125,7 @@ func TestContractChangedByAnImage(t *testing.T) {
 
 // A vault whose state predates `contract` (none recorded as sent): a value
 // never sent differs, so the first unlock sends each active service one
-// update, and a reader of the old state is unaffected by the new member.
+// update.
 func TestContractNeverSentCountsAsDiffering(t *testing.T) {
 	h := contractHost()
 	set := newContractSet("vote")
@@ -152,6 +152,73 @@ func TestContractNeverSentCountsAsDiffering(t *testing.T) {
 	next.Items.Unlocked(s)
 	if ups := toConn(h, "cB"); len(ups) != 1 || !strings.Contains(string(ups[0].Body), `"version":2`) {
 		t.Fatalf("first unlock: %v", h.Sent)
+	}
+}
+
+// The value is recorded only when the update is queued: a service that cannot
+// be sent to at the unlock gets it at a later one, once.
+func TestContractRecordedOnlyWhenQueued(t *testing.T) {
+	h := contractHost()
+	old := newContractSet("vote")
+	s := contractSession(h)
+	old.Items.ConnectionAdded(s, "cB")
+	raw, _ := old.Items.Save()
+	next := newContractSet("vote")
+	next.Items.SetContract("1.1")
+	if err := next.Items.Load(raw); err != nil {
+		t.Fatal(err)
+	}
+	h.Reset()
+	h.DownConns["cB"] = true
+	next.Items.Unlocked(s)
+	saved, _ := next.Items.Save()
+	if got := profileState(t, saved).Contract["cB"]; got != vault.ServiceContract {
+		t.Fatalf("recorded without a send: %q", got)
+	}
+	delete(h.DownConns, "cB")
+	h.Reset()
+	next.Items.Unlocked(s)
+	if ups := toConn(h, "cB"); len(ups) != 1 || !strings.HasSuffix(string(ups[0].Body), `,"contract":"1.1"}`) {
+		t.Fatalf("next unlock: %v", h.Sent)
+	}
+	h.Reset()
+	next.Items.Unlocked(s)
+	if len(h.Sent) != 0 {
+		t.Errorf("again: %v", h.Sent)
+	}
+}
+
+// A service connection whose rotation is pending is skipped at the unlock and
+// gets the value with its update after the rotation, recorded then.
+func TestContractAfterARotation(t *testing.T) {
+	h := contractHost()
+	old := newContractSet("vote")
+	s := contractSession(h)
+	old.Items.ConnectionAdded(s, "cB")
+	raw, _ := old.Items.Save()
+	next := newContractSet("vote")
+	next.Items.SetContract("1.1")
+	if err := next.Items.Load(raw); err != nil {
+		t.Fatal(err)
+	}
+	c := h.Conns["cB"]
+	c.RotationPending = true
+	h.Conns["cB"] = c
+	h.Reset()
+	next.Items.Unlocked(s)
+	if len(toConn(h, "cB")) != 0 {
+		t.Fatalf("sent while the rotation is pending: %v", h.Sent)
+	}
+	c.RotationPending = false
+	h.Conns["cB"] = c
+	next.Items.ConnectionRotated(s, "cB")
+	if ups := toConn(h, "cB"); len(ups) != 1 || !strings.HasSuffix(string(ups[0].Body), `,"contract":"1.1"}`) {
+		t.Fatalf("after the rotation: %v", h.Sent)
+	}
+	h.Reset()
+	next.Items.Unlocked(s)
+	if len(h.Sent) != 0 {
+		t.Errorf("unlock after the rotation: %v", h.Sent)
 	}
 }
 
@@ -197,19 +264,20 @@ func TestContractReceived(t *testing.T) {
 		}
 		return profileState(t, raw).Claimed
 	}
-	core := func(id string) string {
-		return `"first_name":"Svc","last_name":"Co","ik":"` + base64.StdEncoding.EncodeToString(e.h.Conns[id].IK) + `","items":[]`
+	core := func(ik []byte) string {
+		return `"first_name":"Svc","last_name":"Co","ik":"` + base64.StdEncoding.EncodeToString(ik) + `","items":[]`
 	}
 	version := 0
-	send := func(id, contract string) {
+	sendIK := func(id string, ik []byte, contract string) {
 		t.Helper()
 		version++
-		body := `{"version":` + strconv.Itoa(version) + `,` + core(id)
+		body := `{"version":` + strconv.Itoa(version) + `,` + core(ik)
 		if contract != "" {
 			body += `,"contract":` + contract
 		}
 		e.ok(e.call("connection:"+id, "profile.update", body+`}`))
 	}
+	send := func(id, contract string) { t.Helper(); sendIK(id, e.h.Conns[id].IK, contract) }
 	send("cB", `"1.0"`)
 	if got := claimed()["cB"]; got != "1.0" {
 		t.Fatalf("claimed: %q", got)
@@ -249,11 +317,34 @@ func TestContractReceived(t *testing.T) {
 	if got := claimed()["cB"]; got != "1.0" {
 		t.Errorf("a dropped update changed it: %q", got)
 	}
+	// An update under another ik (dropped) or an earlier ik of the peer's
+	// chain (ignored) changes nothing.
+	other := make([]byte, 32)
+	other[0] = 7
+	sendIK("cB", other, `"9.9"`)
+	prior := make([]byte, 32)
+	prior[0] = 8
+	e.h.PriorIKs = map[string][][]byte{"cB": {prior}}
+	sendIK("cB", prior, ``)
+	if got := claimed()["cB"]; got != "1.0" {
+		t.Errorf("another or an earlier ik changed it: %q", got)
+	}
 	// A person's contract is ignored.
 	send("cA", `"1.0"`)
 	if _, ok := claimed()["cA"]; ok {
 		t.Error("a person's contract kept")
 	}
+	// A connection gone without its removal observed is pruned at the next
+	// applied update from another.
+	send("cB", `"1.0"`)
+	cB := e.h.Conns["cB"]
+	delete(e.h.Conns, "cB")
+	send("cA", ``)
+	if _, ok := claimed()["cB"]; ok {
+		t.Error("not pruned with Peers")
+	}
+	e.h.Conns["cB"] = cB
+	send("cB", `"1.0"`)
 	// Removing the connection forgets it.
 	e.set.Items.ConnectionRemoved(vault.NewSession(context.Background(), e.h, vault.PeerInfo{}, e.clk.T, nil), "cB")
 	if len(claimed()) != 0 {

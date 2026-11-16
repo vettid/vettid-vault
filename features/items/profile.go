@@ -617,7 +617,9 @@ func (f *Feature) profileUpdate(s *vault.Session, body []byte) error {
 	}
 	from := s.From()
 	conn := from.ID
-	if o, err := strictjson.ParseObject(body); err == nil {
+	// ParseUpdate parsed it strictly already: this only reads members by name.
+	o, oerr := strictjson.ParseObject(body)
+	if oerr == nil {
 		// §10.8 (0.86.0): hs_confirm is read from any connection's update
 		// and kept once seen, whatever the version.
 		if arr, ok, err := o.OptArray("features"); err == nil && ok {
@@ -652,7 +654,7 @@ func (f *Feature) profileUpdate(s *vault.Session, body []byte) error {
 	f.st.Profile.Peers[conn] = u.Version
 	if from.IsService() {
 		var claimed json.RawMessage
-		if o, err := strictjson.ParseObject(body); err == nil {
+		if oerr == nil {
 			claimed = o["contract"]
 		}
 		f.keepClaimed(conn, claimed)
@@ -660,6 +662,13 @@ func (f *Feature) profileUpdate(s *vault.Session, body []byte) error {
 	for id := range f.st.Profile.Peers {
 		if _, ok := s.Connection(id); !ok {
 			delete(f.st.Profile.Peers, id)
+		}
+	}
+	for _, m := range []map[string]string{f.st.Profile.Contract, f.st.Profile.Claimed} {
+		for id := range m {
+			if _, ok := s.Connection(id); !ok {
+				delete(m, id)
+			}
 		}
 	}
 	s.NotifyAllDevices("connection.event", strictjson.NewBuilder().String("connection_id", conn).String("event", "profile").Bytes())

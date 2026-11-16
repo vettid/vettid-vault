@@ -81,20 +81,22 @@ func TestParseAnswerRefusals(t *testing.T) {
 		"long credential":       body(s, tu, cred("u", strings.Repeat("c", 513), exp)),
 		"control in credential": body(s, tu, cred("u", `c\u007f`, exp)),
 		"expired":               body(s, tu, cred("u", "c", t0.Unix())),
-		"too far ahead":         body(s, tu, cred("u", "c", t0.Add(6*time.Hour+time.Second).Unix())),
-		"exp not a number":      body(s, tu, `{"username":"u","credential":"c","exp":"1"}`),
-		"exp fraction":          body(s, tu, `{"username":"u","credential":"c","exp":1.5}`),
-		"no exp":                body(s, tu, `{"username":"u","credential":"c"}`),
-		"url not a string":      body(`1`, tu, ok),
-		"too large":             body(s, tu, ok) + strings.Repeat(" ", MaxAnswer),
+		// §10.10 (0.90.14): 6 h + 5 min is the furthest; a second more is refused.
+		"too far ahead":    body(s, tu, cred("u", "c", t0.Add(6*time.Hour+5*time.Minute+time.Second).Unix())),
+		"exp not a number": body(s, tu, `{"username":"u","credential":"c","exp":"1"}`),
+		"exp fraction":     body(s, tu, `{"username":"u","credential":"c","exp":1.5}`),
+		"no exp":           body(s, tu, `{"username":"u","credential":"c"}`),
+		"url not a string": body(`1`, tu, ok),
+		"too large":        body(s, tu, ok) + strings.Repeat(" ", MaxAnswer),
 	} {
 		if _, err := ParseAnswer([]byte(b), t0); !errors.Is(err, ErrResponse) {
 			t.Errorf("%s: %v", name, err)
 		}
 	}
-	// The bounds themselves pass: 4 of each kind, 512-byte fields, exp exactly 6 h ahead.
+	// The bounds themselves pass: 4 of each kind, 512-byte fields, an exp exactly 6 h + 5 min ahead (a vault clock 5
+	// minutes behind the issuer's, §10.10 0.90.14).
 	long := strings.Repeat("u", 512)
-	b := body(strings.Repeat(s+",", 3)+s, strings.Repeat(tu+",", 3)+tu, strings.Repeat(cred(long, long, t0.Add(6*time.Hour).Unix())+",", 3)+ok)
+	b := body(strings.Repeat(s+",", 3)+s, strings.Repeat(tu+",", 3)+tu, strings.Repeat(cred(long, long, t0.Add(6*time.Hour+5*time.Minute).Unix())+",", 3)+ok)
 	if _, err := ParseAnswer([]byte(b), t0); err != nil {
 		t.Fatalf("bounds: %v", err)
 	}

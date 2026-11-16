@@ -55,6 +55,10 @@ type DevOptions struct {
 	// internal/pushtest; 0.24.0): its host is allowlisted with the test
 	// TLS root. The vault processes need it too: append DevVaultPushArgs.
 	PushURL string
+	// CallsURL, if set, is the calling service's issuer stand-in (https://host, internal/callstest; VAULT-MESSAGING
+	// §10.10 "Servers and credentials"): its host is allowlisted with the test TLS root. The vault processes need it
+	// too: append DevVaultCallsArgs.
+	CallsURL string
 	// TimeScale, if above 1, is the development time scale (0.43.0,
 	// STAGING-TIME-SCALE §5.1; DEVELOPMENT ONLY, devstack -time-scale):
 	// 1 to vault.MaxTimeScale. The vault processes need it too: append
@@ -79,13 +83,13 @@ func DevSupervisor(o DevOptions) (supervisor.Config, error) {
 	if err != nil || u.Scheme != "https" || u.Port() != "" || u.Path != "" || u.Hostname() == "" {
 		return supervisor.Config{}, errors.New("enclavetest: relay URL must be https://host")
 	}
-	var pushHost string
-	if o.PushURL != "" {
-		pu, err := url.Parse(o.PushURL)
-		if err != nil || pu.Scheme != "https" || pu.Port() != "" || pu.Path != "" || pu.Hostname() == "" {
-			return supervisor.Config{}, errors.New("enclavetest: push URL must be https://host")
-		}
-		pushHost = pu.Hostname()
+	pushHost, err := devHost(o.PushURL)
+	if err != nil {
+		return supervisor.Config{}, errors.New("enclavetest: push URL must be https://host")
+	}
+	callsHost, err := devHost(o.CallsURL)
+	if err != nil {
+		return supervisor.Config{}, errors.New("enclavetest: calls URL must be https://host")
 	}
 	spec := Spec(o.Release, "")
 	roots := TLSRoots()
@@ -111,6 +115,9 @@ func DevSupervisor(o DevOptions) (supervisor.Config, error) {
 		if pushHost != "" {
 			h = append(h, egress.Host{Name: pushHost, Roots: roots, HTTP2: true})
 		}
+		if callsHost != "" {
+			h = append(h, egress.Host{Name: callsHost, Roots: roots, HTTP2: true})
+		}
 		return h
 	}
 	tr, err := egress.New(egress.Config{Conns: 2, Hosts: hosts(KMSRegion), Dialer: dialer})
@@ -122,6 +129,7 @@ func DevSupervisor(o DevOptions) (supervisor.Config, error) {
 		Enclave: func(id string) enclave.Config {
 			c := devConfig(id, o.Release, o.RelayURL, o.DevicePolicy)
 			c.PushURL = o.PushURL
+			c.CallsURL = o.CallsURL
 			c.TimeScale = o.TimeScale
 			if o.RecoveryClock != "" {
 				c.RecoveryNow = DevRecoveryClock(o.RecoveryClock)
@@ -148,6 +156,18 @@ func DevSupervisor(o DevOptions) (supervisor.Config, error) {
 		// bucket (development only; its clock runs with the real time).
 		Counter: countertest.NewLive(),
 	}, nil
+}
+
+// devHost returns the host of a stand-in's URL, which must be https://host ("" for "").
+func devHost(s string) (string, error) {
+	if s == "" {
+		return "", nil
+	}
+	u, err := url.Parse(s)
+	if err != nil || u.Scheme != "https" || u.Port() != "" || u.Path != "" || u.Hostname() == "" {
+		return "", errors.New("enclavetest: not https://host")
+	}
+	return u.Hostname(), nil
 }
 
 // DevConfig is the TEST-ONLY instance configuration of test release n:
@@ -199,6 +219,14 @@ func DevVaultPushArgs(pushURL string) []string {
 		return nil
 	}
 	return []string{"-push-url", pushURL}
+}
+
+// DevVaultCallsArgs pass the calling service's issuer stand-in's URL on to a dev vault process (none for "").
+func DevVaultCallsArgs(callsURL string) []string {
+	if callsURL == "" {
+		return nil
+	}
+	return []string{"-calls-url", callsURL}
 }
 
 // DevVaultTimeScaleArgs pass a development time scale on to a dev vault
@@ -283,6 +311,7 @@ func DevVaultPlatform(args []string) (vaultproc.Platform, error) {
 	policy := fs.String("device-policy", "", "dev device policy (base64)")
 	clock := fs.String("recovery-clock", "", "recovery clock file (DevRecoveryClock)")
 	push := fs.String("push-url", "", "push gateway stand-in URL (DevVaultPushArgs)")
+	calls := fs.String("calls-url", "", "calling service's issuer stand-in URL (DevVaultCallsArgs)")
 	feats := fs.String("features", "all", "optional features (DevVaultFeatureArgs)")
 	scale := fs.Uint64("time-scale", 1, "development time scale (DevVaultTimeScaleArgs)")
 	if err := fs.Parse(args); err != nil || *n == 0 || *n > 15 || *relay == "" || fs.NArg() != 0 || *scale == 0 || *scale > vault.MaxTimeScale {
@@ -306,6 +335,9 @@ func DevVaultPlatform(args []string) (vaultproc.Platform, error) {
 		Config: func(id string) enclave.Config {
 			c := devConfig(id, *n, *relay, dp)
 			c.PushURL = *push
+			// Set whatever the dev features (as PushURL): a release refuses calls_url without calls, but here, with
+			// calls off, there is no pool and nothing asks the stand-in.
+			c.CallsURL = *calls
 			c.TimeScale = *scale
 			if *clock != "" {
 				c.RecoveryNow = DevRecoveryClock(*clock)

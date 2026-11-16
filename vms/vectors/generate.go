@@ -373,6 +373,15 @@ func Generate() (map[string][]byte, error) {
 		return nil, err
 	}
 
+	// connauth_document.json (0.89.0, §10.4, §16)
+	cdv, err := genConnAuthDocument()
+	if err != nil {
+		return nil, err
+	}
+	if err := put("connauth_document.json", cdv); err != nil {
+		return nil, err
+	}
+
 	// wallet_caps.json (0.56.0, §10.18, §16)
 	wcv, err := genWalletCaps()
 	if err != nil {

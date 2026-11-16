@@ -47,6 +47,7 @@ func TestDocumentChecks(t *testing.T) {
 	if r, req := check(t, docChallenge(ref(good), q(good), `,"document_required":true`)); r != "" || !req {
 		t.Fatalf("required: %q %v", r, req)
 	}
+	deep33 := `{"action":"a","payload":{` + strings.Repeat(`"x":{`, 31) + strings.Repeat(`}`, 31) + `},"summary":""}`
 	// The document is level 1 and payload level 2: 15 more objects make 17 levels, 14 make 16.
 	deep := `{"action":"a","payload":{` + strings.Repeat(`"x":{`, 15) + strings.Repeat(`}`, 15) + `},"summary":""}`
 	deepOK := `{"action":"a","payload":{` + strings.Repeat(`"x":{`, 14) + strings.Repeat(`}`, 14) + `},"summary":""}`
@@ -81,6 +82,12 @@ func TestDocumentChecks(t *testing.T) {
 		"not canonical spaces": {docChallenge(ref(`{"action": "a","payload":{},"summary":""}`), q(`{"action": "a","payload":{},"summary":""}`), ""), DocCanonical},
 		"not canonical escape": {docChallenge(ref(`{"action":"a","payload":{},"summary":"\u0041"}`), q(`{"action":"a","payload":{},"summary":"\u0041"}`), ""), DocCanonical},
 		"no ref":               {docChallenge("Approve", q(good), ""), DocRef},
+		"ref not at the end":   {docChallenge(ref(good)+" more", q(good), ""), DocRef},
+		"action with a dash":   {docChallenge(ref(`{"action":"a-b","payload":{},"summary":""}`), q(`{"action":"a-b","payload":{},"summary":""}`), ""), DocShape},
+		"action with a slash":  {docChallenge(ref(`{"action":"a/b","payload":{},"summary":""}`), q(`{"action":"a/b","payload":{},"summary":""}`), ""), DocShape},
+		"action non-ASCII":     {docChallenge(ref(`{"action":"é","payload":{},"summary":""}`), q(`{"action":"é","payload":{},"summary":""}`), ""), DocShape},
+		"null document":        {docChallenge(ref(good), `null`, ""), DocEncoding},
+		"33 levels":            {docChallenge(ref(deep33), q(deep33), ""), DocDepth},
 		"upper-case ref":       {docChallenge(strings.ToUpper(ref(good)), q(good), ""), DocRef},
 		"another document's":   {docChallenge(ref(deepOK), q(good), ""), DocRef},
 	} {
@@ -159,6 +166,18 @@ func TestDocumentFormVerify(t *testing.T) {
 	if _, err := SignConnAuthDocument(cred, ci, ri, &signin, d, time.Now(), nil); err == nil {
 		t.Fatal("signed the document form for a sign-in challenge")
 	}
+	// A response whose document_sha256 is not the d it was signed over: refused.
+	swapped := *pr
+	swapped.DocumentSHA256 = bytesOf(0x5a, 32)
+	if VerifyConnAuthResponse(&swapped, ci, ri, c) == nil {
+		t.Fatal("a response naming another d verified")
+	}
+	// A document_sha256 of the wrong length is a malformed response.
+	short := strings.Replace(string(r.Marshal()), `"document_sha256":"`+base64.StdEncoding.EncodeToString(d[:])+`"`,
+		`"document_sha256":"`+base64.StdEncoding.EncodeToString(d[:31])+`"`, 1)
+	if _, err := ParseConnAuthResponse([]byte(short)); err == nil {
+		t.Fatal("a 31-byte document_sha256 parsed")
+	}
 	// A malformed document_sha256 is a malformed response.
 	bad := strings.Replace(string(r.Marshal()), `"document_sha256":"`, `"document_sha256":"AA`, 1)
 	if _, err := ParseConnAuthResponse([]byte(bad)); err == nil {
@@ -189,4 +208,12 @@ func FuzzCheckDocument(f *testing.F) {
 			t.Fatalf("accepted %q", doc)
 		}
 	})
+}
+
+func bytesOf(b byte, n int) []byte {
+	out := make([]byte, n)
+	for i := range out {
+		out[i] = b
+	}
+	return out
 }

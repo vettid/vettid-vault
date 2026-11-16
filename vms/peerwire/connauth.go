@@ -2,8 +2,11 @@ package peerwire
 
 import (
 	"crypto/ed25519"
+	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/vettid/vettid-vault/vms/credwire"
@@ -88,7 +91,8 @@ func ConnAuthPurposeMessage(purpose string, m []byte) []byte {
 }
 
 // ConnAuthChallenge is a connection.authenticate.challenge body:
-// {request_id, nonce, context?, purpose?, match_code?}.
+// {request_id, nonce, context?, purpose?, match_code?, document?, document_required?} (document and
+// document_required: 0.89.0, an approval's).
 type ConnAuthChallenge struct {
 	RequestID string // a ULID
 	Nonce     []byte // ConnAuthNonceSize bytes
@@ -100,6 +104,14 @@ type ConnAuthChallenge struct {
 	// ASCII digits, and only with PurposeSignIn. A parsed challenge holds
 	// "" for anything else (malformed, or no sign-in purpose).
 	MatchCode string
+	// Document is the document a challenger sent with this challenge, by its own record (0.89.0; nil: none, as
+	// for every challenge this vault sends): a response in the document form verifies only over its hash.
+	Document []byte
+	// DocumentRequired is sent with Document (document_required: true), by the challenger's own predicate.
+	DocumentRequired bool
+	// docRaw and reqRaw are the challenge's `document` and `document_required` members as sent (0.89.0), nil when
+	// absent: checked only on an approval challenge from a service (CheckDocument), ignored on any other.
+	docRaw, reqRaw json.RawMessage
 }
 
 // ValidMatchCode reports whether s is a match code: [0-9]{2,3}.
@@ -152,6 +164,12 @@ func (c *ConnAuthChallenge) Marshal() []byte {
 	}
 	if c.Purpose == PurposeSignIn && ValidMatchCode(c.MatchCode) {
 		b.String("match_code", c.MatchCode)
+	}
+	if c.Purpose == PurposeApproval && c.Document != nil {
+		b.Base64("document", c.Document)
+		if c.DocumentRequired {
+			b.Raw("document_required", json.RawMessage("true"))
+		}
 	}
 	return b.Bytes()
 }
@@ -211,6 +229,7 @@ func ParseConnAuthChallenge(body []byte) (*ConnAuthChallenge, error) {
 	}
 	c.Purpose = challengePurpose(o)
 	c.MatchCode = OptMatchCode(o, c.Purpose)
+	c.docRaw, c.reqRaw = o["document"], o["document_required"]
 	return c, nil
 }
 
@@ -237,7 +256,8 @@ func ConnAuthWithdrawBody(requestID string) []byte {
 }
 
 // ConnAuthResponse is a connection.authenticate.response body:
-// {request_id, status: "signed", key, sig, signed_at, purpose?, rotations?}
+// {request_id, status: "signed", key, sig, signed_at, purpose?, document_sha256?, rotations?} (document_sha256:
+// 0.89.0, the document form)
 // or {request_id, status: "denied"}.
 type ConnAuthResponse struct {
 	RequestID string
@@ -254,6 +274,8 @@ type ConnAuthResponse struct {
 	// not the challenge's known purpose fails VerifyConnAuthResponse.
 	Purpose    string
 	HasPurpose bool
+	// DocumentSHA256 (0.89.0) is the d of the document the signature commits to (the document form), or nil.
+	DocumentSHA256 []byte
 }
 
 // SignConnAuth answers challenge c, sent by the vault whose identity key is
@@ -277,6 +299,25 @@ func SignConnAuth(key ed25519.PrivateKey, challengerIK, responderIK []byte, c *C
 	return r, nil
 }
 
+// SignConnAuthDocument answers the approval challenge c in the document form (0.89.0): over the hash d of doc, a
+// document checked for c's context (CheckDocument, CheckDocumentBytes), which the response carries as
+// document_sha256. c must be an approval challenge; that it came from a service connection is the caller's to
+// check.
+func SignConnAuthDocument(key ed25519.PrivateKey, challengerIK, responderIK []byte, c *ConnAuthChallenge, doc *CheckedDocument,
+	signedAt time.Time, rotations []*credwire.KeyRotation) (*ConnAuthResponse, error) {
+	// A checked document is never empty (it is a JSON object): an empty one is a zero value no check made.
+	if c.Purpose != PurposeApproval || doc == nil || len(doc.doc) == 0 || !strings.HasSuffix(c.Context, DocumentRef(doc.d)) {
+		return nil, ErrBody
+	}
+	d := doc.d
+	sig, err := suite.Sign(key, ConnAuthDocumentLabel, ConnAuthDocumentMessage(PurposeApproval, d, c.Message(challengerIK, responderIK)))
+	if err != nil {
+		return nil, err
+	}
+	return &ConnAuthResponse{RequestID: c.RequestID, Status: ConnAuthSigned, Key: key.Public().(ed25519.PublicKey), Sig: sig,
+		SignedAt: signedAt, Rotations: rotations, Purpose: PurposeApproval, DocumentSHA256: append([]byte(nil), d[:]...)}, nil
+}
+
 // DeniedConnAuth is the refusal of the challenge requestID.
 func DeniedConnAuth(requestID string) *ConnAuthResponse {
 	return &ConnAuthResponse{RequestID: requestID, Status: ConnAuthDenied}
@@ -291,6 +332,9 @@ func (r *ConnAuthResponse) Marshal() []byte {
 	b.Base64("key", r.Key).Base64("sig", r.Sig).String("signed_at", envelope.FormatTS(r.SignedAt))
 	if r.Purpose != "" {
 		b.String("purpose", r.Purpose)
+	}
+	if r.DocumentSHA256 != nil {
+		b.Base64("document_sha256", r.DocumentSHA256)
 	}
 	if len(r.Rotations) > 0 {
 		b.Raw("rotations", MarshalRotations(r.Rotations))
@@ -331,6 +375,11 @@ func ParseConnAuthResponse(body []byte) (*ConnAuthResponse, error) {
 		if _, r.HasPurpose = o["purpose"]; r.HasPurpose {
 			r.Purpose, _, _ = o.OptString("purpose")
 		}
+		if _, ok := o["document_sha256"]; ok {
+			if r.DocumentSHA256, err = o.Base64("document_sha256", sha256.Size); err != nil {
+				return nil, ErrBody
+			}
+		}
 		if raw, ok := o["rotations"]; ok {
 			if r.Rotations, err = ParseRotations(raw); err != nil {
 				return nil, err
@@ -361,6 +410,21 @@ func VerifyConnAuthResponse(r *ConnAuthResponse, challengerIK, responderIK []byt
 		return ErrSignature
 	}
 	label, m := ConnAuthLabel, c.Message(challengerIK, responderIK)
+	if r.DocumentSHA256 != nil {
+		// The document form (0.89.0): only for a challenge sent with a document, with purpose approval, over that
+		// document's d.
+		if c.Document == nil || r.Purpose != PurposeApproval || c.Purpose != PurposeApproval {
+			return ErrSignature
+		}
+		d := sha256.Sum256(c.Document)
+		if subtle.ConstantTimeCompare(r.DocumentSHA256, d[:]) != 1 {
+			return ErrSignature
+		}
+		if suite.Verify(r.Key, ConnAuthDocumentLabel, ConnAuthDocumentMessage(PurposeApproval, d, m), r.Sig) != nil {
+			return ErrSignature
+		}
+		return nil
+	}
 	if r.Purpose != "" || r.HasPurpose {
 		if !KnownPurpose(c.Purpose) || r.Purpose != c.Purpose {
 			return ErrSignature

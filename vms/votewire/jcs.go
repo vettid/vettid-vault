@@ -4,11 +4,11 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
-	"sort"
 	"strconv"
 	"strings"
-	"unicode/utf16"
 	"unicode/utf8"
+
+	"github.com/vettid/vettid-vault/vms/jcs"
 )
 
 // JCS (RFC 8785) for the documents (BALLOT-PROTOCOL §2). The documents hold
@@ -108,95 +108,10 @@ func parseValue(dec *json.Decoder, depth int) (any, error) {
 }
 
 func canonical(buf *bytes.Buffer, v any) error {
-	switch x := v.(type) {
-	case nil:
-		buf.WriteString("null")
-	case bool:
-		buf.WriteString(strconv.FormatBool(x))
-	case int64:
-		buf.WriteString(strconv.FormatInt(x, 10))
-	case string:
-		writeString(buf, x)
-	case []any:
-		buf.WriteByte('[')
-		for i, e := range x {
-			if i > 0 {
-				buf.WriteByte(',')
-			}
-			if err := canonical(buf, e); err != nil {
-				return err
-			}
-		}
-		buf.WriteByte(']')
-	case map[string]any:
-		keys := make([]string, 0, len(x))
-		for k := range x {
-			keys = append(keys, k)
-		}
-		// RFC 8785 §3.2.3: sort by UTF-16 code units.
-		sort.Slice(keys, func(i, j int) bool { return lessUTF16(keys[i], keys[j]) })
-		buf.WriteByte('{')
-		for i, k := range keys {
-			if i > 0 {
-				buf.WriteByte(',')
-			}
-			writeString(buf, k)
-			buf.WriteByte(':')
-			if err := canonical(buf, x[k]); err != nil {
-				return err
-			}
-		}
-		buf.WriteByte('}')
-	default:
+	if err := jcs.Append(buf, v); err != nil {
 		return ErrDocument
 	}
 	return nil
-}
-
-func lessUTF16(a, b string) bool {
-	ua, ub := utf16.Encode([]rune(a)), utf16.Encode([]rune(b))
-	for i := 0; i < len(ua) && i < len(ub); i++ {
-		if ua[i] != ub[i] {
-			return ua[i] < ub[i]
-		}
-	}
-	return len(ua) < len(ub)
-}
-
-const hexDigits = "0123456789abcdef"
-
-// writeString escapes as RFC 8785 §3.2.2.2 (ECMAScript JSON.stringify): the
-// two-character escapes, \u00xx (lower-case hex) for other control
-// characters, and everything else as itself.
-func writeString(buf *bytes.Buffer, s string) {
-	buf.WriteByte('"')
-	for _, r := range s {
-		switch r {
-		case '"':
-			buf.WriteString(`\"`)
-		case '\\':
-			buf.WriteString(`\\`)
-		case '\b':
-			buf.WriteString(`\b`)
-		case '\f':
-			buf.WriteString(`\f`)
-		case '\n':
-			buf.WriteString(`\n`)
-		case '\r':
-			buf.WriteString(`\r`)
-		case '\t':
-			buf.WriteString(`\t`)
-		default:
-			if r < 0x20 {
-				buf.WriteString(`\u00`)
-				buf.WriteByte(hexDigits[r>>4])
-				buf.WriteByte(hexDigits[r&15])
-			} else {
-				buf.WriteRune(r)
-			}
-		}
-	}
-	buf.WriteByte('"')
 }
 
 // Canonicalize parses data strictly and returns its JCS form.

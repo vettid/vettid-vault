@@ -125,6 +125,13 @@ func (c *Config) QueueName() string { return c.QueuePrefix + c.InstanceID }
 // firewall answers only its stage's name.
 var PushHosts = []string{"push.vettid.org", "push.staging.vettid.org"}
 
+// CallsHosts are the calling-service issuers the parent forwards to (VAULT-MESSAGING §10.10, CALLING-SERVICE §5.5):
+// staging's only. calls.vettid.org serves nothing yet, and allowing a production name before a production service
+// exists would widen the enclave's egress for no gain; it is added at the production promotion. Each enclave image
+// reaches only its own channel's (its egress allowlist and pinned URL), and the host's DNS firewall answers only its
+// stage's name.
+var CallsHosts = []string{"calls.staging.vettid.org"}
+
 // CounterHosts are the recovery attempt counter buckets of the release
 // channels (VAULT-MESSAGING 0.33.0 §11.14.4, VAULT-HOST-PROTOCOL 0.1.10
 // §8.1), by their virtual-hosted names: like the push gateways, the
@@ -137,8 +144,10 @@ var CounterHosts = []string{
 
 // DefaultAllow returns the release allowlist for a region (§12.2): the
 // relay, the regional KMS endpoint, Google's attestation status list, the
-// push gateways (0.24.0) and (release R) the recovery counter buckets.
+// push gateways (0.24.0), (release R) the recovery counter buckets and
+// (C2) the calling-service issuers.
 func DefaultAllow(relayHost, region string) []string {
 	out := append([]string{strings.ToLower(relayHost), "kms." + region + ".amazonaws.com", "android.googleapis.com"}, PushHosts...)
-	return append(out, CounterHosts...)
+	out = append(out, CounterHosts...)
+	return append(out, CallsHosts...)
 }

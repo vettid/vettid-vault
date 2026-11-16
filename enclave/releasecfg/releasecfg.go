@@ -36,6 +36,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
 
@@ -63,6 +64,11 @@ var windowDays = map[string]uint64{ChannelProd: 30, ChannelStaging: 7}
 // staging image can never wake through the production gateway or the
 // reverse. The hosts are the ones vettid.org's DNS firewall allows.
 var PushURLs = map[string]string{ChannelProd: "https://push.vettid.org", ChannelStaging: "https://push.staging.vettid.org"}
+
+// CallsURLs are the channels' calling-service issuers (VAULT-MESSAGING 0.28.0 §10.10, §11.10.8; CALLING-SERVICE
+// §5.4): optional. A channel file that names one must name its own, so a staging image can never get credentials
+// from a production issuer nor the reverse; production has none until it has a calling service.
+var CallsURLs = map[string]string{ChannelStaging: "https://calls.staging.vettid.org"}
 
 // AndroidPackages are the channels' Android packages (VAULT-MESSAGING
 // 0.26.0 §11.10.8, "Android package"): a channel file must name its own,
@@ -124,6 +130,9 @@ type Config struct {
 	RelayURL       string
 	// PushURL is the channel's push gateway (0.24.0, §11.10.8).
 	PushURL string
+	// CallsURL is the channel's calling-service issuer (§10.10, §11.10.8): optional, "" without one, and then
+	// every call's ICE configuration has an empty server list.
+	CallsURL string
 	// AndroidPackage is the Android package accepted in key attestation
 	// (0.26.0, §11.7, §11.10.8): the channel's own.
 	AndroidPackage string
@@ -287,10 +296,12 @@ func Parse(b []byte) (*File, error) {
 		"retirement_principal", "retirement_window_days", "android_signers", "relay_url", "push_url", "android_package", "ios_app_id", "features",
 		"recovery_counter", "recovery_request_keys", "recovery_wait_unit_seconds", "recovery_quiet_seconds", "recovery_offered",
 		"android_min_version_code", "time_scale"}
-	// Optional members: automation_attestation (staging only).
+	// Optional members: automation_attestation (staging only) and calls_url (a channel with a calling service).
 	optional := 0
-	if o.Has("automation_attestation") {
-		optional++
+	for _, m := range []string{"automation_attestation", "calls_url"} {
+		if o.Has(m) {
+			optional++
+		}
 	}
 	for _, m := range []string{"vote_site_key", "vote_trust_roots"} {
 		if o.Has(m) {
@@ -365,6 +376,13 @@ func Parse(b []byte) (*File, error) {
 	if c.PushURL, err = value(o, "push_url", func(s string) bool { return s == PushURLs[c.Channel] }, missing); err != nil {
 		return nil, err
 	}
+	if o.Has("calls_url") {
+		u, err := o.String("calls_url")
+		if err != nil || CallsURLs[c.Channel] == "" || u != CallsURLs[c.Channel] {
+			return nil, ErrFormat
+		}
+		c.CallsURL = u
+	}
 	if c.AndroidPackage, err = value(o, "android_package", func(s string) bool { return s == AndroidPackages[c.Channel] }, missing); err != nil {
 		return nil, err
 	}
@@ -380,6 +398,11 @@ func Parse(b []byte) (*File, error) {
 	}
 	if err := parseVote(o, c, missing); err != nil {
 		return nil, err
+	}
+	// §11.10.8: calls_url may be present only when features lists calls (calls without one stays legal: its calls
+	// carry no ICE servers).
+	if c.CallsURL != "" && !slices.Contains(c.Features, "calls") {
+		return nil, ErrFormat
 	}
 	if c.FileTimeScale, err = parseTimeScale(o, c.Channel); err != nil {
 		return nil, err

@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/vettid/vettid-vault/vms/callswire"
 	"github.com/vettid/vettid-vault/vms/envelope"
 	"github.com/vettid/vettid-vault/vms/pushwire"
 	"github.com/vettid/vettid-vault/vms/strictjson"
@@ -34,6 +35,13 @@ type PushGateway interface {
 	Register(ctx context.Context, wakeKey ed25519.PrivateKey, r pushwire.Registration) (pending string, err error)
 	Confirm(ctx context.Context, wakeKey ed25519.PrivateKey, pending, code string) (blob string, err error)
 	Wake(ctx context.Context, wakeKey ed25519.PrivateKey, blob string) (reseal string, err error)
+}
+
+// CallsIssuer is the calling-service issuer as the vault calls it (CALLING-SERVICE §5.2): one attempt per call,
+// each signed by a key made for that one request. *callswire.Client implements it. An issuer error answer is a
+// *callswire.Error; an answer that fails the vault's checks is callswire.ErrResponse.
+type CallsIssuer interface {
+	Credentials(ctx context.Context, count int) (*callswire.Answer, error)
 }
 
 // TypePushTokenNeeded is the event that asks the app for a fresh token

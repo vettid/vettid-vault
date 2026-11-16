@@ -39,6 +39,8 @@ type Config struct {
 	// PushURL is the channel's push gateway (0.24.0, §11.10.8, §14);
 	// empty: push.register is answered unavailable.
 	PushURL string
+	// CallsURL is the channel's calling-service issuer (§10.10, §11.10.8); empty: calls carry no ICE servers.
+	CallsURL string
 	// KDF returns the KDF parameters for new vaults (default
 	// vault.DefaultKDF: Argon2id t=3, m=64 MiB, p=1).
 	KDF func() (vault.KDFParams, error)
@@ -138,6 +140,15 @@ func ReleaseRelayURL() string {
 		return c.RelayURL
 	}
 	return DefaultRelayURL
+}
+
+// ReleaseCallsURL returns the channel's calling-service issuer ("" without one, or without complete channel
+// constants); its host is on the release egress allowlist.
+func ReleaseCallsURL() string {
+	if c := release(); c != nil {
+		return c.CallsURL
+	}
+	return ""
 }
 
 // ReleasePushURL returns the channel's push gateway ("" without complete
@@ -241,6 +252,7 @@ func releaseConfigFor(c *releasecfg.Config, instanceID, relayURL string) Config 
 		// passes every other check of §11.7 unchanged.
 		cfg.DeviceAttest.AndroidAutomationRoots = c.AutomationRoots()
 		cfg.PushURL = c.PushURL
+		cfg.CallsURL = c.CallsURL
 		cfg.Recovery = RecoveryConfig{Counter: c.RecoveryCounter, RequestKeys: c.RecoveryRequestKeys,
 			WaitUnit: time.Duration(c.RecoveryWaitUnitSeconds) * time.Second, Quiet: time.Duration(c.RecoveryQuietSeconds) * time.Second,
 			CounterLock: c.CounterLock(), Offered: c.RecoveryOffered, AndroidMinVersionCode: c.AndroidMinVersionCode}

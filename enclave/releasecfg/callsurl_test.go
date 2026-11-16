@@ -23,13 +23,14 @@ func TestCallsURL(t *testing.T) {
 	}
 	for name, s := range map[string]string{
 		"without the calls feature":  withCallsURL(staging(complete(t)), `"https://calls.staging.vettid.org"`),
-		"staging names production's": withCallsURL(staging(complete(t)), `"https://calls.vettid.org"`),
-		"staging names another host": withCallsURL(staging(complete(t)), `"https://calls.example.org"`),
-		"staging, a path":            withCallsURL(staging(complete(t)), `"https://calls.staging.vettid.org/"`),
-		"staging, not a string":      withCallsURL(staging(complete(t)), `1`),
-		"staging, empty":             withCallsURL(staging(complete(t)), `""`),
-		"production names staging's": withCallsURL(complete(t), `"https://calls.staging.vettid.org"`),
-		"production names its own":   withCallsURL(complete(t), `"https://calls.vettid.org"`),
+		"staging names production's": withCallsURL(withFeatures(staging(complete(t)), `["calls"]`), `"https://calls.vettid.org"`),
+		"staging names another host": withCallsURL(withFeatures(staging(complete(t)), `["calls"]`), `"https://calls.example.org"`),
+		"staging, a path":            withCallsURL(withFeatures(staging(complete(t)), `["calls"]`), `"https://calls.staging.vettid.org/"`),
+		"staging, not a string":      withCallsURL(withFeatures(staging(complete(t)), `["calls"]`), `1`),
+		"staging, a prefix":          withCallsURL(withFeatures(staging(complete(t)), `["calls"]`), `"https://calls.staging.vettid.org.example.org"`),
+		"staging, empty":             withCallsURL(withFeatures(staging(complete(t)), `["calls"]`), `""`),
+		"production names staging's": withCallsURL(withFeatures(complete(t), `["calls"]`), `"https://calls.staging.vettid.org"`),
+		"production names its own":   withCallsURL(withFeatures(complete(t), `["calls"]`), `"https://calls.vettid.org"`),
 	} {
 		if _, err := Parse([]byte(s)); !errors.Is(err, ErrFormat) {
 			t.Errorf("%s: %v", name, err)

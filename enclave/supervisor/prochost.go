@@ -1248,6 +1248,17 @@ func (p *vproc) push(ctx context.Context, f [][]byte) [][]byte {
 // maxCallsBody bounds a calling-service request: CALLING-SERVICE §5.2 allows at most 1 KiB.
 const maxCallsBody = 1 << 10
 
+// callsBody reports whether b is exactly a credentials request's body, {"count":n} with n in 1..4: a calls request
+// carries nothing a vault process chose beyond that number.
+func callsBody(b []byte) bool {
+	for n := 1; n <= callswire.MaxCount; n++ {
+		if bytes.Equal(b, callswire.RequestBody(n)) {
+			return true
+		}
+	}
+	return false
+}
+
 // callsAttempt is how long one calling-service request may take (VAULT-MESSAGING §10.10: 10 s); tests shorten it.
 var callsAttempt = 10 * time.Second
 
@@ -1259,7 +1270,7 @@ var callsAttempt = 10 * time.Second
 func (p *vproc) calls(ctx context.Context, f [][]byte) [][]byte {
 	s := p.h.s
 	base := s.encCfg.CallsURL
-	if base == "" || len(f) != 3 || len(f[2]) > maxCallsBody || string(f[0]) != callswire.PathCredentials {
+	if base == "" || len(f) != 3 || len(f[2]) > maxCallsBody || string(f[0]) != callswire.PathCredentials || !callsBody(f[2]) {
 		return deny()
 	}
 	path := callswire.PathCredentials

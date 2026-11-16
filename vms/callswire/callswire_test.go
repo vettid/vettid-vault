@@ -59,31 +59,33 @@ func TestParseAnswerRefusals(t *testing.T) {
 	}
 	s, tu := `"stun:h:3478"`, `"turn:h:3478"`
 	for name, b := range map[string]string{
-		"not json":            `{`,
-		"not an object":       `[]`,
-		"no stun":             `{"turn":[],"credentials":[]}`,
-		"no turn":             `{"stun":[],"credentials":[]}`,
-		"no credentials":      `{"stun":[],"turn":[]}`,
-		"turn in stun":        body(tu, tu, ok),
-		"stun in turn":        body(s, s, ok),
-		"http url":            body(`"https://h"`, tu, ok),
-		"space in url":        body(`"stun:h 1"`, tu, ok),
-		"empty scheme rest":   body(`"stun:"`, tu, ok),
-		"long url":            body(`"stun:`+strings.Repeat("a", 512)+`"`, tu, ok),
-		"five stun":           body(strings.Repeat(s+",", 4)+s, tu, ok),
-		"five turn":           body(s, strings.Repeat(tu+",", 4)+tu, ok),
-		"five credentials":    body(s, tu, strings.Repeat(ok+",", 4)+ok),
-		"empty username":      body(s, tu, cred("", "c", exp)),
-		"empty credential":    body(s, tu, cred("u", "", exp)),
-		"long username":       body(s, tu, cred(strings.Repeat("u", 513), "c", exp)),
-		"control in username": body(s, tu, cred(`u\u0001`, "c", exp)),
-		"expired":             body(s, tu, cred("u", "c", t0.Unix())),
-		"too far ahead":       body(s, tu, cred("u", "c", t0.Add(6*time.Hour+time.Second).Unix())),
-		"exp not a number":    body(s, tu, `{"username":"u","credential":"c","exp":"1"}`),
-		"exp fraction":        body(s, tu, `{"username":"u","credential":"c","exp":1.5}`),
-		"no exp":              body(s, tu, `{"username":"u","credential":"c"}`),
-		"url not a string":    body(`1`, tu, ok),
-		"too large":           body(s, tu, ok) + strings.Repeat(" ", MaxAnswer),
+		"not json":              `{`,
+		"not an object":         `[]`,
+		"no stun":               `{"turn":[],"credentials":[]}`,
+		"no turn":               `{"stun":[],"credentials":[]}`,
+		"no credentials":        `{"stun":[],"turn":[]}`,
+		"turn in stun":          body(tu, tu, ok),
+		"stun in turn":          body(s, s, ok),
+		"http url":              body(`"https://h"`, tu, ok),
+		"space in url":          body(`"stun:h 1"`, tu, ok),
+		"empty scheme rest":     body(`"stun:"`, tu, ok),
+		"long url":              body(`"stun:`+strings.Repeat("a", 512)+`"`, tu, ok),
+		"five stun":             body(strings.Repeat(s+",", 4)+s, tu, ok),
+		"five turn":             body(s, strings.Repeat(tu+",", 4)+tu, ok),
+		"five credentials":      body(s, tu, strings.Repeat(ok+",", 4)+ok),
+		"empty username":        body(s, tu, cred("", "c", exp)),
+		"empty credential":      body(s, tu, cred("u", "", exp)),
+		"long username":         body(s, tu, cred(strings.Repeat("u", 513), "c", exp)),
+		"control in username":   body(s, tu, cred(`u\u0001`, "c", exp)),
+		"long credential":       body(s, tu, cred("u", strings.Repeat("c", 513), exp)),
+		"control in credential": body(s, tu, cred("u", `c\u007f`, exp)),
+		"expired":               body(s, tu, cred("u", "c", t0.Unix())),
+		"too far ahead":         body(s, tu, cred("u", "c", t0.Add(6*time.Hour+time.Second).Unix())),
+		"exp not a number":      body(s, tu, `{"username":"u","credential":"c","exp":"1"}`),
+		"exp fraction":          body(s, tu, `{"username":"u","credential":"c","exp":1.5}`),
+		"no exp":                body(s, tu, `{"username":"u","credential":"c"}`),
+		"url not a string":      body(`1`, tu, ok),
+		"too large":             body(s, tu, ok) + strings.Repeat(" ", MaxAnswer),
 	} {
 		if _, err := ParseAnswer([]byte(b), t0); !errors.Is(err, ErrResponse) {
 			t.Errorf("%s: %v", name, err)
@@ -188,5 +190,17 @@ func TestOversizedAnswerIsRefused(t *testing.T) {
 	c := &Client{BaseURL: is.URL, HTTP: is.Client()}
 	if _, err := c.Credentials(context.Background(), 1); !errors.Is(err, ErrOversized) || !errors.Is(err, ErrResponse) {
 		t.Fatalf("oversized: %v", err)
+	}
+}
+
+// Error codes are taken only when they read as Relay Protocol §7.1 codes: lower-case letters, digits and _, 1-64.
+func TestParseErrorCodes(t *testing.T) {
+	for _, c := range []string{"Bad", "a-b", "", strings.Repeat("a", 65), "a b"} {
+		if e := ParseError(400, []byte(`{"code":"`+c+`"}`)); e.Code != "http_400" {
+			t.Errorf("%q taken: %s", c, e.Code)
+		}
+	}
+	if e := ParseError(400, []byte(`{"code":"bad_request_2"}`)); e.Code != "bad_request_2" {
+		t.Fatal(e.Code)
 	}
 }

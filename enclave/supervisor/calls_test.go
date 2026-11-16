@@ -44,6 +44,7 @@ func TestCallsChannel(t *testing.T) {
 		h := http.Header{}
 		relayauth.SetHeaders(h, k, http.MethodPost, path, at, relayauth.BodyHash(b))
 		h.Set(callswire.HeaderAttestation, "Zm9yZ2Vk") // never passed on
+		h.Set("X-Exfil", "data")                       // nor anything else the process adds
 		return vaultipc.EncodeHeaders(h)
 	}
 	call := func(f ...[]byte) [][]byte {
@@ -53,10 +54,15 @@ func TestCallsChannel(t *testing.T) {
 	path := []byte(callswire.PathCredentials)
 	big := make([]byte, maxCallsBody+1)
 	for name, f := range map[string][][]byte{
-		"health":       {[]byte(callswire.PathHealth), signed(key, callswire.PathHealth, body, now), body},
-		"other path":   {[]byte("/v1/credentials/"), signed(key, "/v1/credentials/", body, now), body},
-		"unsigned":     {path, vaultipc.EncodeHeaders(http.Header{}), body},
-		"wrong body":   {path, signed(key, callswire.PathCredentials, body, now), []byte(`{"count":1}`)},
+		"health":     {[]byte(callswire.PathHealth), signed(key, callswire.PathHealth, body, now), body},
+		"other path": {[]byte("/v1/credentials/"), signed(key, "/v1/credentials/", body, now), body},
+		"unsigned":   {path, vaultipc.EncodeHeaders(http.Header{}), body},
+		"wrong body": {path, signed(key, callswire.PathCredentials, body, now), []byte(`{"count":1}`)},
+		// Exactly {"count":n}, n in 1..4, signed: no other body, however small.
+		"count 0":      {path, signed(key, callswire.PathCredentials, []byte(`{"count":0}`), now), []byte(`{"count":0}`)},
+		"count 5":      {path, signed(key, callswire.PathCredentials, []byte(`{"count":5}`), now), []byte(`{"count":5}`)},
+		"extra member": {path, signed(key, callswire.PathCredentials, []byte(`{"count":1,"x":"y"}`), now), []byte(`{"count":1,"x":"y"}`)},
+		"spaced":       {path, signed(key, callswire.PathCredentials, []byte(`{"count": 1}`), now), []byte(`{"count": 1}`)},
 		"stale":        {path, signed(key, callswire.PathCredentials, body, now.Add(-time.Hour)), body},
 		"relay key":    {path, signed(relay, callswire.PathCredentials, body, now), body},
 		"too large":    {path, signed(key, callswire.PathCredentials, big, now), big},
@@ -94,6 +100,9 @@ func TestCallsChannel(t *testing.T) {
 	}
 	if req.Header.Get(callswire.HeaderAttestation) != base64.StdEncoding.EncodeToString([]byte("doc")) || req.URL.Path != callswire.PathCredentials {
 		t.Fatalf("forwarded %v %s", req.Header, req.URL.Path)
+	}
+	if req.Header.Get("X-Exfil") != "" {
+		t.Fatal("a header the process added was forwarded")
 	}
 	// Without an issuer in the release, nothing.
 	s.encCfg.CallsURL = ""

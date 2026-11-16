@@ -625,6 +625,7 @@ func (m *Manager) beforeCollect(ctx context.Context) error {
 	if m.locked {
 		return ErrLocked
 	}
+	m.notifyOpened(m.now())
 	if !m.relayRotation() || m.st.Relay.Pending == nil || !m.st.Relay.Collect.Stopped.IsZero() || m.rk.noOK {
 		return nil
 	}

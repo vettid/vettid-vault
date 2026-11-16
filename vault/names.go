@@ -285,6 +285,26 @@ type UnlockObserver interface {
 	Unlocked(s *Session)
 }
 
+// OpenObserver is implemented by features that act as soon as the vault is open, before its first collect: a
+// collect may wait for the relay's long poll (20-25 s), and the calls feature's pool asks for its credentials within
+// 5 s of the unlock (VAULT-MESSAGING §10.10). Called with the vault's lock held, once per opening.
+type OpenObserver interface {
+	Opened(s *Session)
+}
+
+// notifyOpened tells OpenObserver features, once per opening.
+func (m *Manager) notifyOpened(now time.Time) {
+	if m.openSeen {
+		return
+	}
+	m.openSeen = true
+	for _, f := range m.features {
+		if o, ok := f.(OpenObserver); ok {
+			o.Opened(m.session(now))
+		}
+	}
+}
+
 // notifyUnlocked tells UnlockObserver features, once per opening.
 func (m *Manager) notifyUnlocked(now time.Time) {
 	if m.unlockSeen {

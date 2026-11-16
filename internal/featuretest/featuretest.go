@@ -686,6 +686,8 @@ type Result struct {
 	Code string // "" for success
 	// Message is the error's message (0.56.0: the reason of cap_exceeded, pin_required).
 	Message string
+	// Cached is the body the vault would cache for retransmissions (Session.CacheResponseAs); nil: Body.
+	Cached json.RawMessage
 }
 
 // OK reports success.
@@ -774,7 +776,7 @@ func CallInner(f vault.Feature, h *Host, now time.Time, kind string, in *envelop
 		}
 		return Result{Code: "internal"}
 	}
-	return Result{Body: out}
+	return Result{Body: out, Cached: s.CachedResponseBody()}
 }
 
 // RoundTrip saves f's state and loads it into g (a fresh instance), as a

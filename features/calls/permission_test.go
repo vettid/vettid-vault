@@ -288,9 +288,12 @@ func TestCallPermissionFromDesktop(t *testing.T) {
 
 type failingICE struct{}
 
-func (failingICE) Issue(context.Context, string, time.Duration) ([]callwire.ICEServer, error) {
-	return nil, context.DeadlineExceeded
+func (failingICE) Servers(*vault.Session, string, time.Time) ([]callwire.ICEServer, time.Time, error) {
+	return nil, time.Time{}, context.DeadlineExceeded
 }
+func (failingICE) Retire(string)                   {}
+func (failingICE) Drop(string)                     {}
+func (failingICE) Prime(*vault.Session, time.Time) {}
 
 // Calls off is checked before glare. Turning calls off ends the member's
 // own ringing call to the connection (owner decision 2026-11-11), so an

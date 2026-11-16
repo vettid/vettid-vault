@@ -9,13 +9,23 @@ import (
 	"github.com/vettid/vettid-vault/vms/envelope"
 )
 
-type appFeaturesStub struct{ told int }
+type appFeaturesStub struct {
+	told int
+	fail int // the next fail calls report a connection not told
+}
 
 func (o *appFeaturesStub) Name() string                   { return "appfeatstub" }
 func (o *appFeaturesStub) Types() []TypeSpec              { return nil }
 func (o *appFeaturesStub) Load(json.RawMessage) error     { return nil }
 func (o *appFeaturesStub) Save() (json.RawMessage, error) { return nil, nil }
-func (o *appFeaturesStub) AppFeaturesChanged(*Session)    { o.told++ }
+func (o *appFeaturesStub) AppFeaturesChanged(*Session) bool {
+	o.told++
+	if o.fail > 0 {
+		o.fail--
+		return false
+	}
+	return true
+}
 func (o *appFeaturesStub) Handle(context.Context, *Session, *envelope.Inner) (json.RawMessage, error) {
 	return nil, nil
 }
@@ -72,3 +82,26 @@ func TestAppFeaturesLastList(t *testing.T) {
 		t.Fatalf("removed: told %d; desktop or inactive app counted: %v; activated: told %d", told, got, o.told)
 	}
 }
+
+// A connection not told (a failed send, a pending rotation) is told again at the next batch's end, until every one
+// is; then nothing more. And Session.AppFeature answers from the real manager.
+func TestAppFeaturesToldAgainUntilEveryoneIs(t *testing.T) {
+	d := newDevFixture(t)
+	o := &appFeaturesStub{fail: 2}
+	d.m.addFeature(o)
+	p := d.m.st.Devices[d.devPeer.ID]
+	d.m.mu.Lock()
+	defer d.m.mu.Unlock()
+	d.m.noteFeatures(p, []string{"approval_document", "hs_confirm"})
+	if !d.m.session(d.m.now()).AppFeature(FeatureApprovalDocument) {
+		t.Fatal("the session does not see the app's list")
+	}
+	for i := 0; i < 4; i++ {
+		d.m.syncAppFeatures(d.m.now())
+	}
+	if o.told != 3 || d.m.st.AppDocumentPending || !d.m.st.AppDocumentTold {
+		t.Fatalf("told %d, pending %v", o.told, d.m.st.AppDocumentPending)
+	}
+}
+
+var _ AppFeaturesObserver = (*appFeaturesStub)(nil) // a drifted signature would silently tell nothing

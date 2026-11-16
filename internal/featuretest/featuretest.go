@@ -41,16 +41,18 @@ type Host struct {
 	Activities []vault.Activity
 	// AppFeatures is the member's app's last features list (Session.AppFeature).
 	AppFeatures []string
-	Profiles    map[string]json.RawMessage
-	Rotations   int
-	RotateErr   error
-	Set         vault.Settings
-	Sinks       []vault.ActivitySink
-	ids         int
-	DownConns   map[string]bool // SendToConnection fails for these
-	Completed   []string        // CompleteRecovery calls
-	Devices     map[string]vault.PeerInfo
-	IK          ed25519.PublicKey
+	// Changed counts Session.StateChanged.
+	Changed   int
+	Profiles  map[string]json.RawMessage
+	Rotations int
+	RotateErr error
+	Set       vault.Settings
+	Sinks     []vault.ActivitySink
+	ids       int
+	DownConns map[string]bool // SendToConnection fails for these
+	Completed []string        // CompleteRecovery calls
+	Devices   map[string]vault.PeerInfo
+	IK        ed25519.PublicKey
 	// Identity is the fake vault's identity key (IK is its public half).
 	Identity ed25519.PrivateKey
 	// Introductions' invitations (§10.15).
@@ -164,6 +166,9 @@ func (h *Host) askState(conn string) *vault.AskState {
 	}
 	return st
 }
+
+// StateChanged implements Session.StateChanged.
+func (h *Host) StateChanged() { h.Changed++ }
 
 // AppFeature implements Session.AppFeature from AppFeatures.
 func (h *Host) AppFeature(name string) bool { return slices.Contains(h.AppFeatures, name) }

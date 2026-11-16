@@ -220,7 +220,9 @@ func (c *Challenge) wire() *peerwire.ConnAuthChallenge {
 func (f *Feature) BatchEnd(s *vault.Session) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.expire(s.Now())
+	if f.expire(s.Now()) {
+		s.StateChanged() // written at the next flush, also on a vault with nothing else to write
+	}
 }
 
 // Handle implements vault.Handler.
@@ -252,17 +254,22 @@ func (f *Feature) Handle(_ context.Context, s *vault.Session, in *envelope.Inner
 	return nil, vault.NewError("unsupported_type", "")
 }
 
-func (f *Feature) expire(now time.Time) {
+// expire drops the closed challenges; it reports whether it dropped any.
+func (f *Feature) expire(now time.Time) bool {
+	dropped := false
 	for id, c := range f.d.Out {
 		if !now.Before(c.Exp) {
 			delete(f.d.Out, id)
+			dropped = true
 		}
 	}
 	for id, c := range f.d.In {
 		if !now.Before(c.Exp) {
 			delete(f.d.In, id)
+			dropped = true
 		}
 	}
+	return dropped
 }
 
 func count(m map[string]*Challenge, conn string) int {

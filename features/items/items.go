@@ -256,13 +256,15 @@ func (f *Feature) SetAppGatedFeatures(names []string) {
 }
 
 // AppFeaturesChanged implements vault.AppFeaturesObserver: an app-gated name came or went, so the services whose
-// last update does not carry this set get one (§10.8; not sticky).
-func (f *Feature) AppFeaturesChanged(s *vault.Session) {
+// last update does not carry this set get one (§10.8; not sticky). It reports whether every service connection now
+// carries it (a failed send, or a connection whose rotation is pending, is tried again).
+func (f *Feature) AppFeaturesChanged(s *vault.Session) bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.advertise(s)
+	return f.advertise(s)
 }
 
+// SetPeerFeatures names the optional features this image registers that a service connection can use (§10.8).
 func (f *Feature) SetPeerFeatures(names []string) {
 	f.peerFeatures = append([]string(nil), names...)
 	sort.Strings(f.peerFeatures)

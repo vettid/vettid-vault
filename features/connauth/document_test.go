@@ -290,8 +290,54 @@ func TestApprovalDocumentExpiresAtBatchEnd(t *testing.T) {
 	if raw, _ := m.f.Save(); !strings.Contains(string(raw), `"document"`) {
 		t.Fatalf("not kept to begin with: %s", raw)
 	}
+	m.f.BatchEnd(vault.NewSession(context.Background(), m.h, vault.PeerInfo{}, t0.Add(30*time.Minute), nil))
+	if m.h.Changed != 0 {
+		t.Fatal("a batch end that dropped nothing marked the state changed")
+	}
 	m.f.BatchEnd(vault.NewSession(context.Background(), m.h, vault.PeerInfo{}, t0.Add(2*time.Hour), nil))
 	if raw, _ := m.f.Save(); strings.Contains(string(raw), `"document"`) {
 		t.Fatalf("an expired ask's document kept: %s", raw)
+	}
+	if m.h.Changed != 1 {
+		t.Fatal("dropping it did not mark the state changed: it would wait for another write")
+	}
+}
+
+// More of the receiving rules: a challenge without document_required has none in .pending; document_signed is an
+// audit entry; a dropped document takes no rate bucket; a suppressed challenge keeps no document.
+func TestApprovalDocumentReceivingDetails(t *testing.T) {
+	m, _ := member()
+	c := docChallenge(t, m, "cS", goodDoc, false, peerwire.PurposeApproval)
+	if b := last(t, m.h, "connection.authenticate.pending").Body; strings.Contains(string(b), "document_required") ||
+		!strings.Contains(string(b), "document_sha256") {
+		t.Fatalf("pending: %s", b)
+	}
+	d := sha256.Sum256([]byte(goodDoc))
+	call(m, "app", "connection.authenticate.document", `{"request_id":"`+c.RequestID+`"}`)
+	call(m, "app", "connection.authenticate.approve", `{"request_id":"`+c.RequestID+`","document_sha256":"`+base64.StdEncoding.EncodeToString(d[:])+`"}`)
+	var audited bool
+	for _, a := range m.h.Activities {
+		if a.Kind == "connection.authenticate.document_signed" {
+			audited = a.Audit
+		}
+	}
+	if !audited {
+		t.Fatal("document_signed is not an audit entry")
+	}
+
+	// With the vault's ask rules on: a bad document takes no bucket.
+	r, _ := member()
+	r.h.AsksOn = true
+	docChallenge(t, r, "cS", `{"action":"A","payload":{},"summary":""}`, false, peerwire.PurposeApproval)
+	if st := r.h.Asks["cS"]; st != nil && (st.WindowN != 0 || len(st.Windows) != 0) {
+		t.Fatalf("a dropped document took a bucket: %+v", st)
+	}
+	// A muted connection's challenge is suppressed: its document is not kept.
+	q, _ := member()
+	q.h.AsksOn = true
+	q.h.Asks = map[string]*vault.AskState{"cS": {Muted: true}}
+	docChallenge(t, q, "cS", goodDoc, false, peerwire.PurposeApproval)
+	if raw, _ := q.f.Save(); strings.Contains(string(raw), `"document"`) || len(q.f.OpenAsks(t0)) != 0 {
+		t.Fatalf("a suppressed challenge kept its document: %s", raw)
 	}
 }

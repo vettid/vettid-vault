@@ -149,3 +149,24 @@ func TestApprovalDocumentAdvertisedWhileTheAppListsIt(t *testing.T) {
 		t.Fatalf("dropped: %v", svc)
 	}
 }
+
+// A service that could not be told keeps the change pending: AppFeaturesChanged reports it, and tells it when it
+// can.
+func TestApprovalDocumentToldAgainAfterAFailedSend(t *testing.T) {
+	e := newEnv(t)
+	c := e.h.Conns["cB"]
+	c.PeerKind = "service"
+	e.h.Conns["cB"] = c
+	e.ok(e.call("app", "profile.set", `{"version":0,"name":"Al"}`))
+	e.h.AppFeatures = []string{"approval_document"}
+	s := vault.NewSession(context.Background(), e.h, vault.PeerInfo{}, e.clk.T, nil)
+	e.h.DownConns["cB"] = true
+	if e.set.Items.AppFeaturesChanged(s) {
+		t.Fatal("reported told after a failed send")
+	}
+	e.h.DownConns["cB"] = false
+	e.h.Reset()
+	if !e.set.Items.AppFeaturesChanged(s) || len(e.sentTo("cB", "profile.update")) != 1 {
+		t.Fatalf("not told when it could be: %v", e.h.Sent)
+	}
+}

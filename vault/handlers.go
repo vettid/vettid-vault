@@ -59,7 +59,9 @@ type TypeSpec struct {
 	// answer to such a request is cached, errors included. A request held
 	// for an approval is kept (a retransmission while it waits is a
 	// duplicate), and its answer is volatile too. Only for types whose sole
-	// side effects are audit and feed entries.
+	// side effects are audit and feed entries, and (0.89.0) the fetch record
+	// of connection.authenticate.document, a set to which running it again
+	// adds nothing.
 	Volatile bool
 	// DesktopApproval requests from a desktop are held until an owner app
 	// approves them (§6.8 step-up). Apps are never held.
@@ -772,6 +774,16 @@ type AccessEndedObserver interface {
 // name (§6.4).
 type HandshakeProfiler interface {
 	DisplayName() string
+}
+
+// StateChanged marks the vault's state as changed outside a handler (a feature's clock work at a batch's end,
+// BatchEndObserver), so that it is written at the next flush.
+func (s *Session) StateChanged() {
+	if s.m != nil {
+		s.m.dirty = true
+	} else if h, ok := s.host.(interface{ StateChanged() }); ok {
+		h.StateChanged()
+	}
 }
 
 // AppFeature reports whether the last features list of the member's app carries name (0.89.0; false on a host

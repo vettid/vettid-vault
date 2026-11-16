@@ -215,6 +215,7 @@ var (
 	_ credential.DeleteObserver           = (*vote.Feature)(nil)
 	_ credential.KeyRotationBatchObserver = (*connauth.Feature)(nil)
 	_ vote.Auth                           = (*connauth.Feature)(nil)
+	_ vault.AppFeaturesObserver           = (*items.Feature)(nil) // approval_document (0.89.0)
 	_ vault.KeyRotationSender             = (*credential.Feature)(nil)
 )
 

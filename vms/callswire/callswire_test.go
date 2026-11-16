@@ -6,6 +6,7 @@ import (
 	"crypto/ed25519"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -80,20 +81,22 @@ func TestParseAnswerRefusals(t *testing.T) {
 		"long credential":       body(s, tu, cred("u", strings.Repeat("c", 513), exp)),
 		"control in credential": body(s, tu, cred("u", `c\u007f`, exp)),
 		"expired":               body(s, tu, cred("u", "c", t0.Unix())),
-		"too far ahead":         body(s, tu, cred("u", "c", t0.Add(6*time.Hour+time.Second).Unix())),
-		"exp not a number":      body(s, tu, `{"username":"u","credential":"c","exp":"1"}`),
-		"exp fraction":          body(s, tu, `{"username":"u","credential":"c","exp":1.5}`),
-		"no exp":                body(s, tu, `{"username":"u","credential":"c"}`),
-		"url not a string":      body(`1`, tu, ok),
-		"too large":             body(s, tu, ok) + strings.Repeat(" ", MaxAnswer),
+		// §10.10 (0.90.14): 6 h + 5 min is the furthest; a second more is refused.
+		"too far ahead":    body(s, tu, cred("u", "c", t0.Add(6*time.Hour+5*time.Minute+time.Second).Unix())),
+		"exp not a number": body(s, tu, `{"username":"u","credential":"c","exp":"1"}`),
+		"exp fraction":     body(s, tu, `{"username":"u","credential":"c","exp":1.5}`),
+		"no exp":           body(s, tu, `{"username":"u","credential":"c"}`),
+		"url not a string": body(`1`, tu, ok),
+		"too large":        body(s, tu, ok) + strings.Repeat(" ", MaxAnswer),
 	} {
 		if _, err := ParseAnswer([]byte(b), t0); !errors.Is(err, ErrResponse) {
 			t.Errorf("%s: %v", name, err)
 		}
 	}
-	// The bounds themselves pass: 4 of each kind, 512-byte fields, exp exactly 6 h ahead.
+	// The bounds themselves pass: 4 of each kind, 512-byte fields, an exp exactly 6 h + 5 min ahead (a vault clock 5
+	// minutes behind the issuer's, §10.10 0.90.14).
 	long := strings.Repeat("u", 512)
-	b := body(strings.Repeat(s+",", 3)+s, strings.Repeat(tu+",", 3)+tu, strings.Repeat(cred(long, long, t0.Add(6*time.Hour).Unix())+",", 3)+ok)
+	b := body(strings.Repeat(s+",", 3)+s, strings.Repeat(tu+",", 3)+tu, strings.Repeat(cred(long, long, t0.Add(6*time.Hour+5*time.Minute).Unix())+",", 3)+ok)
 	if _, err := ParseAnswer([]byte(b), t0); err != nil {
 		t.Fatalf("bounds: %v", err)
 	}
@@ -202,5 +205,17 @@ func TestParseErrorCodes(t *testing.T) {
 	}
 	if e := ParseError(400, []byte(`{"code":"bad_request_2"}`)); e.Code != "bad_request_2" {
 		t.Fatal(e.Code)
+	}
+}
+
+// Neither an answer nor a credential prints a username or credential, however it is formatted.
+func TestAnswerPrintsNoSecret(t *testing.T) {
+	a := Answer{STUN: []string{"stun:h"}, Credentials: []Credential{{Username: "user-x", Credential: "secret-y", Exp: time.Unix(1, 0)}}}
+	for _, f := range []string{"%v", "%+v", "%#v", "%s"} {
+		for _, v := range []any{a, &a, a.Credentials[0], a.Credentials} {
+			if s := fmt.Sprintf(f, v); strings.Contains(s, "user-x") || strings.Contains(s, "secret-y") {
+				t.Fatalf("%s: %s", f, s)
+			}
+		}
 	}
 }

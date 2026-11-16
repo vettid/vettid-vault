@@ -42,8 +42,13 @@ const (
 	MaxURLs = 4
 	// MaxField bounds a username and a credential (1-512 bytes, no control characters).
 	MaxField = 512
-	// MaxAhead is the furthest a credential's exp may lie ahead of the vault's clock.
+	// MaxAhead is a credential's lifetime as the issuer stamps it: exp 6 h after the issuer's clock (CALLING-SERVICE
+	// §5.3, D14).
 	MaxAhead = 6 * time.Hour
+	// ExpAllowance is how far the vault's clock may be behind the issuer's: an exp is accepted up to MaxAhead +
+	// ExpAllowance ahead of the vault's clock (VAULT-MESSAGING §10.10, 0.90.14). A clock allowance, not a longer
+	// lifetime: without it a vault clock behind by a second would discard every answer.
+	ExpAllowance = 5 * time.Minute
 	// MaxAnswer bounds an answer's body. The enclave's supervisor passes at most MaxAnswer+1 bytes on, so an
 	// oversized answer is still recognised behind it.
 	MaxAnswer = 16 << 10
@@ -52,19 +57,36 @@ const (
 // ErrResponse is an answer that does not pass the vault's checks: it is discarded as a failed attempt.
 var ErrResponse = errors.New("callswire: issuer answer refused")
 
-// Credential is one TURN credential: opaque to the vault.
+// Credential is one TURN credential: opaque to the vault. It prints no username or credential.
 type Credential struct {
 	Username   string
 	Credential string
 	Exp        time.Time // whole seconds
 }
 
-// Answer is a checked issuer answer.
+// String keeps the credential out of logs and errors: only its expiry.
+func (c Credential) String() string {
+	return "callswire.Credential{exp: " + c.Exp.UTC().Format(time.RFC3339) + "}"
+}
+
+// GoString is String, for %#v.
+func (c Credential) GoString() string { return c.String() }
+
+// Answer is a checked issuer answer. It prints no credential.
 type Answer struct {
 	STUN        []string
 	TURN        []string
 	Credentials []Credential
 }
+
+// String keeps the credentials out of logs and errors: only how many there are.
+func (a Answer) String() string {
+	return "callswire.Answer{stun: " + strconv.Itoa(len(a.STUN)) + ", turn: " + strconv.Itoa(len(a.TURN)) +
+		", credentials: " + strconv.Itoa(len(a.Credentials)) + "}"
+}
+
+// GoString is String, for %#v.
+func (a Answer) GoString() string { return a.String() }
 
 // RequestBody is the request's body, {"count":n}, n in 1..MaxCount.
 func RequestBody(count int) []byte {
@@ -74,7 +96,7 @@ func RequestBody(count int) []byte {
 // ParseAnswer reads a 200 answer and holds it to VAULT-MESSAGING §10.10: every URL a stun:/stuns: (in stun) or
 // turn:/turns: (in turn) URL that passes the ICE configuration's own rule, at most MaxURLs of each kind, at most
 // MaxCount credentials, each username and credential 1-MaxField bytes without control characters, and each exp in
-// the future and at most MaxAhead ahead of now. Anything else is ErrResponse: the whole answer is discarded.
+// the future and at most MaxAhead + ExpAllowance ahead of now. Anything else is ErrResponse: the whole answer is discarded.
 // Members the vault does not know are ignored.
 func ParseAnswer(body []byte, now time.Time) (*Answer, error) {
 	if len(body) > MaxAnswer {
@@ -145,7 +167,7 @@ func credential(raw json.RawMessage, now time.Time) (Credential, error) {
 		return Credential{}, ErrResponse
 	}
 	t := time.Unix(int64(exp), 0).UTC()
-	if !t.After(now) || t.Sub(now) > MaxAhead {
+	if !t.After(now) || t.Sub(now) > MaxAhead+ExpAllowance {
 		return Credential{}, ErrResponse
 	}
 	return Credential{Username: user, Credential: cred, Exp: t}, nil

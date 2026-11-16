@@ -139,9 +139,10 @@ Follows VAULT-MESSAGING 0.5.0 (§6.8, §10.3, §10.4, §10.10).
   (`vault.AgentPolicy`).
 - `vault/connections.go`: `connection.update`, the block list, the
   listing fields, `ConnectionRemovedObserver`.
-- `features/calls` + `vms/callwire`: call signalling, the ICE issuer
-  interface (`calls.ICEIssuer`; `NoServers` default, `Coturn` HMAC
-  implementation), the signed ICE configuration and the device-side call
+- `features/calls` + `vms/callwire`: call signalling, the ICE source
+  (`calls.ICESource`; the `Pool` of credentials from the calling service's
+  issuer, `vms/callswire`, since C2; the in-vault coturn issuer was
+  removed), the signed ICE configuration and the device-side call
   key. `Host.SignICEConfig` lets the feature get a configuration signed
   by the vault's `ik` without holding it; the runtime signs only bytes
   that parse as an ICE configuration.
@@ -163,7 +164,7 @@ Follows VAULT-MESSAGING 0.5.0 (§6.8, §10.3, §10.4, §10.10).
 | `connection.rotate` (new X25519 pair) | Dropped | Rekeys (§6.5) and `identity.rotate` replace it |
 | Per-call X25519 pair in the vault; `shared_secret` sent to the app in `call.accepted` | The calling device generates an MLKEM768X25519 key; the answering device encapsulates; vaults relay `ek`/`enc` and never hold `k_call` | PQC Phase 1; no media key in vault state or the response cache. OWNER DECISION 3 |
 | `call.initiate/accept/reject/cancel/offer/answer/candidate/busy/blocked` peer events; `call.start/accept/reject/end/signal` app ops | `call.start` (req), `call.offer`, `call.answer`, `call.ice`, `call.ringing`, `call.end{reason}`, `call.list` | One message per signalling step; rejection, cancel, busy and blocked are `call.end` reasons (blocked peers are removed, so they cannot call) |
-| `call.turn-credentials` (Cloudflare via the parent) | `ICEIssuer` in the vault, the configuration signed by the vault and delivered inside `call.start`/`call.offer` | CALLING-SERVICE §5–§6; the parent holds no TURN secret. No calling service exists yet: the default issues no servers |
+| `call.turn-credentials` (Cloudflare via the parent) | `ICESource` in the vault (C2: a pool of credentials from the calling service's issuer), the configuration signed by the vault and delivered inside `call.start`/`call.offer` | CALLING-SERVICE §5–§6; neither the parent nor the vault holds a TURN secret. Without `calls_url` the list is empty |
 | `call.history`, `call.mark-seen` | `call.list`; missed calls are feed items (read state in the feed) | |
 | Caller display name resolved from the profile | Devices show the connection's `name`/`profile` | The callee already holds it |
 | Event replay protection by event id and a 5-minute freshness window | Inner-id dedupe (§8.2), `exp`, `ts` window (§8.4) | Runtime rules |
@@ -199,9 +200,9 @@ Follows VAULT-MESSAGING 0.5.0 (§6.8, §10.3, §10.4, §10.10).
 
 ### Not in batch 2
 
-- TURN credential issuance in production: the `ICEIssuer` interface and a
-  coturn HMAC issuer exist, but no calling service or shared-secret
-  delivery does; release builds issue no servers.
+- TURN credential issuance in production: since C2 the vault asks the
+  calling service's issuer (`calls_url`, staging only); production has no
+  calling service yet, so its releases issue no servers.
 - LEASH (grants, `agent.request`, the agent's grant-scoped fan-out):
   batch 3, through `vault.AgentPolicy`.
 - Push wakes for incoming calls (§14).

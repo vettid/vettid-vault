@@ -415,7 +415,7 @@ func (m *Manager) runHeld(ctx context.Context, h *HeldRequest, now time.Time) st
 	var he *HandlerError
 	switch {
 	case herr == nil:
-		m.respond(p, in, key, body, now)
+		m.respondCached(p, in, key, body, s.cacheBody, now) // the handler's cached form too (CacheResponseAs)
 		return "ok"
 	case errors.As(herr, &he):
 		m.respondErrorBody(p, in, key, he.Code, he.Message, he.Body, now)

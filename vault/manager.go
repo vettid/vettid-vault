@@ -318,6 +318,8 @@ type Manager struct {
 	featureReqs map[string]featureReq
 	// unlockSeen: UnlockObserver features were told of this opening.
 	unlockSeen bool
+	// openSeen: OpenObserver features were told of this opening.
+	openSeen bool
 	// restoring is set while a reconnect that named an older epoch of a
 	// service activates (§6.6, 0.72.0): it is told as
 	// connection.restored_reconnect, not connection.reconnected.

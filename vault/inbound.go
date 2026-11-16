@@ -812,7 +812,7 @@ func (m *Manager) dispatch(ctx context.Context, p *Peer, in *envelope.Inner, ep 
 			// (message.attachment.get, §10.5.1), or when a blob call has run
 			// (BlobHost, vote.site.sync).
 		case herr == nil:
-			m.respond(p, in, rkey, body, now)
+			m.respondCached(p, in, rkey, body, s.cacheBody, now)
 		case errors.As(herr, &he):
 			m.respondErrorBody(p, in, rkey, he.Code, he.Message, he.Body, now)
 		default:
@@ -833,10 +833,15 @@ func disp(eph bool) disposition {
 // respond deposits a response to the requester only (§9.1), and caches it
 // for 24 h (§8.2).
 func (m *Manager) respond(p *Peer, req *envelope.Inner, key string, body json.RawMessage, now time.Time) {
+	m.respondCached(p, req, key, body, nil, now)
+}
+
+// respondCached is respond with cached, if not nil, as the body of the cached copy (Session.CacheResponseAs).
+func (m *Manager) respondCached(p *Peer, req *envelope.Inner, key string, body, cached json.RawMessage, now time.Time) {
 	if body == nil {
 		body = json.RawMessage(`{}`)
 	}
-	m.sendResponse(p, req, key, &envelope.Inner{Type: req.Type, Re: req.ID, Status: envelope.StatusOK, Body: body}, now)
+	m.sendResponseCached(p, req, key, &envelope.Inner{Type: req.Type, Re: req.ID, Status: envelope.StatusOK, Body: body}, cached, now)
 }
 
 // volatileKey is the response key of an answer to a volatile request
@@ -866,6 +871,13 @@ func (m *Manager) respondErrorBody(p *Peer, req *envelope.Inner, key, code, msg 
 }
 
 func (m *Manager) sendResponse(p *Peer, req *envelope.Inner, key string, out *envelope.Inner, now time.Time) {
+	m.sendResponseCached(p, req, key, out, nil, now)
+}
+
+// sendResponseCached is sendResponse with cached, if not nil, as the body of the copy kept for retransmissions:
+// the same id, time, type and re (a retransmission is the same answer), another body.
+func (m *Manager) sendResponseCached(p *Peer, req *envelope.Inner, key string, out *envelope.Inner, cached json.RawMessage,
+	now time.Time) {
 	if !envelope.ValidType(out.Type) {
 		out.Type = "error"
 	}
@@ -894,7 +906,13 @@ func (m *Manager) sendResponse(p *Peer, req *envelope.Inner, key string, out *en
 			Mailbox: p.Relay.Mailbox, Payload: raw, BestEffort: true, Created: now})
 		return
 	}
-	if j, err := out.Marshal(envelope.ModeSealed); err == nil { // cached without seq
+	keep := out
+	if cached != nil && out.Status == envelope.StatusOK {
+		c := *out
+		c.Body = cached
+		keep = &c
+	}
+	if j, err := keep.Marshal(envelope.ModeSealed); err == nil { // cached without seq
 		m.st.Responses[key] = CachedResponse{Inner: j, Expires: now.Add(ResponseRetention)}
 	}
 	m.sealAndQueue(p, out)

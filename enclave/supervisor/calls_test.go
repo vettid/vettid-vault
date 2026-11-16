@@ -63,6 +63,8 @@ func TestCallsChannel(t *testing.T) {
 		"count 5":      {path, signed(key, callswire.PathCredentials, []byte(`{"count":5}`), now), []byte(`{"count":5}`)},
 		"extra member": {path, signed(key, callswire.PathCredentials, []byte(`{"count":1,"x":"y"}`), now), []byte(`{"count":1,"x":"y"}`)},
 		"spaced":       {path, signed(key, callswire.PathCredentials, []byte(`{"count": 1}`), now), []byte(`{"count": 1}`)},
+		"newline":      {path, signed(key, callswire.PathCredentials, []byte("{\"count\":1}\n"), now), []byte("{\"count\":1}\n")},
+		"leading zero": {path, signed(key, callswire.PathCredentials, []byte(`{"count":01}`), now), []byte(`{"count":01}`)},
 		"stale":        {path, signed(key, callswire.PathCredentials, body, now.Add(-time.Hour)), body},
 		"relay key":    {path, signed(relay, callswire.PathCredentials, body, now), body},
 		"too large":    {path, signed(key, callswire.PathCredentials, big, now), big},
@@ -80,6 +82,14 @@ func TestCallsChannel(t *testing.T) {
 		t.Fatalf("%d denied requests reached the issuer", len(got))
 	}
 	mu.Unlock()
+	// Refused before anything was spent on them: no attestation asked of the NSM, no egress place taken (the places
+	// are made at the first one taken).
+	if nsm.ud != nil || nsm.pk != nil {
+		t.Fatal("a denied request was attested")
+	}
+	if p.egress != nil {
+		t.Fatal("a denied request took an egress place")
+	}
 	r := call(path, signed(key, callswire.PathCredentials, body, now), body)
 	if cap(p.egress) != maxVaultEgress || len(p.egress) != 0 {
 		t.Errorf("calls request and the vault's limit: %d of %d places taken", len(p.egress), cap(p.egress))

@@ -332,12 +332,12 @@ func (f *Feature) challenge(s *vault.Session, in *envelope.Inner) error {
 	// a service connection, and are ignored on any other. A document that fails the checks drops the challenge,
 	// audited, before anything else: no answer, no bucket, no place.
 	if wc.HasDocument() && c.Purpose == peerwire.PurposeApproval && s.From().IsService() {
-		doc, _, required, reason := wc.CheckDocument()
+		doc, reason := wc.CheckDocument()
 		if reason != "" {
 			s.Record(vault.Activity{Kind: "drop.approval_document", ConnectionID: conn, Ref: conn + " " + reason, Audit: true})
 			return nil
 		}
-		c.Document, c.DocumentRequired = doc, required
+		c.Document, c.DocumentRequired = doc.Bytes(), doc.Required()
 	}
 	if _, dup := f.d.In[c.ID]; dup {
 		return nil
@@ -603,7 +603,14 @@ func (f *Feature) approve(s *vault.Session, body []byte) (json.RawMessage, error
 	}
 	var r *peerwire.ConnAuthResponse
 	if docForm {
-		r, err = peerwire.SignConnAuthDocument(key, peer.IK, s.IdentityKey(), c.wire(), c.docHash(), s.Now(), seg)
+		// The kept document is checked again for this challenge before anything is signed over it: only a
+		// checked document can be (it was checked at arrival; state could have been tampered with since only by
+		// whoever can write it, but the signature must never rest on that).
+		checked, reason := peerwire.CheckDocumentBytes(c.Document, c.Context, c.DocumentRequired)
+		if reason != "" {
+			return nil, vault.NewError("internal", "")
+		}
+		r, err = peerwire.SignConnAuthDocument(key, peer.IK, s.IdentityKey(), c.wire(), checked, s.Now(), seg)
 	} else {
 		r, err = peerwire.SignConnAuth(key, peer.IK, s.IdentityKey(), c.wire(), s.Now(), seg)
 	}

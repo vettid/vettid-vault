@@ -335,6 +335,8 @@ func DevVaultPlatform(args []string) (vaultproc.Platform, error) {
 		Config: func(id string) enclave.Config {
 			c := devConfig(id, *n, *relay, dp)
 			c.PushURL = *push
+			// Set whatever the dev features (as PushURL): a release refuses calls_url without calls, but here, with
+			// calls off, there is no pool and nothing asks the stand-in.
 			c.CallsURL = *calls
 			c.TimeScale = *scale
 			if *clock != "" {

@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/x509"
 	"encoding/base64"
 	"errors"
 	"net/http"
@@ -87,6 +88,8 @@ func TestRefusals(t *testing.T) {
 	other := enclavetest.Spec(4, "")
 	otherNSM := enclavetest.NewFakeNSM(other.PCR0, other.PCR1, other.PCR2, time.Now)
 	_, otherKey, _ := ed25519.GenerateKey(rand.Reader)
+	spec := enclavetest.Spec(3, "")
+	staleNSM := enclavetest.NewFakeNSM(spec.PCR0, spec.PCR1, spec.PCR2, func() time.Time { return time.Now().Add(-6 * time.Minute) })
 	for name, tc := range map[string]struct {
 		attest attestFn
 		code   string
@@ -102,6 +105,9 @@ func TestRefusals(t *testing.T) {
 		"another release": {func(pub ed25519.PublicKey, d [32]byte) ([]byte, error) { return otherNSM.Attest(d[:], nil, pub) },
 			callswire.CodeAttestationInvalid},
 		"not a document": {func(ed25519.PublicKey, [32]byte) ([]byte, error) { return []byte("x"), nil }, callswire.CodeAttestationInvalid},
+		// A document made 6 minutes ago: past the issuer's 5 minutes.
+		"stale document": {func(pub ed25519.PublicKey, d [32]byte) ([]byte, error) { return staleNSM.Attest(d[:], nil, pub) },
+			callswire.CodeAttestationInvalid},
 	} {
 		if _, err := client(srv, tc.attest).Credentials(context.Background(), 1); code(err) != tc.code {
 			t.Errorf("%s: %v", name, err)
@@ -146,10 +152,10 @@ func TestRefusals(t *testing.T) {
 		t.Errorf("the same request, well formed: %d %s", st, c)
 	}
 	rs := s.Requests()
-	if len(rs) != 5+2+7+1 {
+	if len(rs) != 6+2+7+1 {
 		t.Fatalf("%d requests", len(rs))
 	}
-	for _, r := range rs[:5] {
+	for _, r := range rs[:6] {
 		if r.Attested || r.Status != 403 || r.Usernames != nil {
 			t.Fatalf("%+v", r)
 		}
@@ -184,4 +190,16 @@ func TestFailNextAndReset(t *testing.T) {
 		t.Fatal(err)
 	}
 	r.Body.Close()
+}
+
+// A document that does not chain to the issuer's roots is refused, however well it is made.
+func TestAnotherRoot(t *testing.T) {
+	spec := enclavetest.Spec(3, "")
+	nsm := enclavetest.NewFakeNSM(spec.PCR0, spec.PCR1, spec.PCR2, time.Now)
+	srv := httptest.NewServer(New(Config{Roots: x509.NewCertPool(), PCR0s: []string{spec.PCR0Hex()}}))
+	defer srv.Close()
+	c := client(srv, func(pub ed25519.PublicKey, d [32]byte) ([]byte, error) { return nsm.Attest(d[:], nil, pub) })
+	if _, err := c.Credentials(context.Background(), 1); code(err) != callswire.CodeAttestationInvalid {
+		t.Fatal(err)
+	}
 }

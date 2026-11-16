@@ -481,8 +481,8 @@ func testCalls(t *testing.T, o *options, info map[string]any) {
 	if code, m := postJSON(t, ctl+"/dev/calls/reset", `{}`); code != 200 {
 		t.Fatalf("reset: %d %v", code, m)
 	}
+	unlocked := time.Now() // before the unlock is sent: the 5 s count from it, round trip included
 	vaultctl("api-unlock", "-api", api, "-guid", guid, "-pin", pin)
-	unlocked := time.Now()
 	var rs []request
 	for {
 		if rs = requests(); len(rs) > 0 || time.Since(unlocked) > 5*time.Second {
@@ -494,13 +494,16 @@ func testCalls(t *testing.T, o *options, info map[string]any) {
 		t.Fatalf("issuer requests within 5 s of the unlock: %+v", rs)
 	}
 	r := rs[0]
-	if r.Status != 200 || !r.Attested || r.Count < 1 || r.Count > 4 || len(r.Usernames) != r.Count || r.Key == "" {
+	// §10.10: it asks for 4 (an empty pool) in one request.
+	if r.Status != 200 || !r.Attested || r.Count != 4 || len(r.Usernames) != r.Count || r.Key == "" {
 		t.Fatalf("issuer request %+v", r)
 	}
+	// A cross-check: the supervisor already denies a request signed with the relay key before it leaves (prochost.go,
+	// TestCallsChannel's "relay key"), which would show here as no request at all.
 	if r.Key == relayKey {
 		t.Fatal("the issuer request is signed with the vault's relay key")
 	}
-	t.Logf("issuer request %v after the unlock returned, %d credentials", r.At.Sub(unlocked).Round(time.Millisecond), r.Count)
+	t.Logf("issuer request %v after the unlock was sent, %d credentials", r.At.Sub(unlocked).Round(time.Millisecond), r.Count)
 }
 
 func postJSON(t *testing.T, url, body string) (int, map[string]any) {

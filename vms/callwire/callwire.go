@@ -186,6 +186,8 @@ func validURL(u string) bool {
 	return false
 }
 
+// validField refuses C0 controls and DEL only; C1 controls (U+0080-U+009F, as UTF-8) pass, as they always have for
+// ICE fields: the field is opaque to the vault and to the device.
 func validField(s string) bool {
 	if len(s) > MaxICEField {
 		return false

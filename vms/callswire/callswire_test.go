@@ -6,6 +6,7 @@ import (
 	"crypto/ed25519"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -202,5 +203,17 @@ func TestParseErrorCodes(t *testing.T) {
 	}
 	if e := ParseError(400, []byte(`{"code":"bad_request_2"}`)); e.Code != "bad_request_2" {
 		t.Fatal(e.Code)
+	}
+}
+
+// Neither an answer nor a credential prints a username or credential, however it is formatted.
+func TestAnswerPrintsNoSecret(t *testing.T) {
+	a := Answer{STUN: []string{"stun:h"}, Credentials: []Credential{{Username: "user-x", Credential: "secret-y", Exp: time.Unix(1, 0)}}}
+	for _, f := range []string{"%v", "%+v", "%#v", "%s"} {
+		for _, v := range []any{a, &a, a.Credentials[0], a.Credentials} {
+			if s := fmt.Sprintf(f, v); strings.Contains(s, "user-x") || strings.Contains(s, "secret-y") {
+				t.Fatalf("%s: %s", f, s)
+			}
+		}
 	}
 }

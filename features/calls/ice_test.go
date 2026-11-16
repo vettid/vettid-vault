@@ -3,6 +3,7 @@ package calls
 import (
 	"context"
 	"errors"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -438,4 +439,33 @@ func TestJitterRange(t *testing.T) {
 	if d := jittered(w, func() float64 { return 0.9 }); d != 12*time.Minute {
 		t.Fatalf("clamp: %v", d)
 	}
+}
+
+// An answer is taken up to the count asked for, and a username already held (or repeated in the answer) is not
+// taken twice.
+func TestPoolTakesCountAndNoUsernameTwice(t *testing.T) {
+	p := poolWith(&repeatIssuer{})
+	p.creds = []callswire.Credential{{Username: "held", Credential: "c", Exp: t0.Add(6 * time.Hour)}}
+	prime(p, t0)
+	var names []string
+	for _, c := range p.creds {
+		names = append(names, c.Username)
+	}
+	if want := []string{"held", "a", "b", "c"}; !slices.Equal(names, want) {
+		t.Fatalf("%v, want %v", names, want)
+	}
+}
+
+type repeatIssuer struct{}
+
+func (repeatIssuer) Credentials(_ context.Context, count int) (*callswire.Answer, error) {
+	e := t0.Add(6 * time.Hour)
+	a := &callswire.Answer{STUN: []string{"stun:h:3478"}, TURN: []string{"turn:h:3478"}}
+	for _, u := range []string{"held", "a", "a", "b", "c", "d"} {
+		a.Credentials = append(a.Credentials, callswire.Credential{Username: u, Credential: "c", Exp: e})
+	}
+	if count != 3 {
+		panic(count)
+	}
+	return a, nil
 }

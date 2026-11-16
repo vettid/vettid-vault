@@ -52,19 +52,36 @@ const (
 // ErrResponse is an answer that does not pass the vault's checks: it is discarded as a failed attempt.
 var ErrResponse = errors.New("callswire: issuer answer refused")
 
-// Credential is one TURN credential: opaque to the vault.
+// Credential is one TURN credential: opaque to the vault. It prints no username or credential.
 type Credential struct {
 	Username   string
 	Credential string
 	Exp        time.Time // whole seconds
 }
 
-// Answer is a checked issuer answer.
+// String keeps the credential out of logs and errors: only its expiry.
+func (c Credential) String() string {
+	return "callswire.Credential{exp: " + c.Exp.UTC().Format(time.RFC3339) + "}"
+}
+
+// GoString is String, for %#v.
+func (c Credential) GoString() string { return c.String() }
+
+// Answer is a checked issuer answer. It prints no credential.
 type Answer struct {
 	STUN        []string
 	TURN        []string
 	Credentials []Credential
 }
+
+// String keeps the credentials out of logs and errors: only how many there are.
+func (a Answer) String() string {
+	return "callswire.Answer{stun: " + strconv.Itoa(len(a.STUN)) + ", turn: " + strconv.Itoa(len(a.TURN)) +
+		", credentials: " + strconv.Itoa(len(a.Credentials)) + "}"
+}
+
+// GoString is String, for %#v.
+func (a Answer) GoString() string { return a.String() }
 
 // RequestBody is the request's body, {"count":n}, n in 1..MaxCount.
 func RequestBody(count int) []byte {

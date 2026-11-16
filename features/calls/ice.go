@@ -38,8 +38,9 @@ const (
 	// RequestsPerHour and RequestsPerDay are the vault's own limits, in memory, reset at unlock.
 	RequestsPerHour = 4
 	RequestsPerDay  = 24
-	// RequestTime bounds one attempt from the vault process's side (the supervisor's own is 10 s).
-	RequestTime = 15 * time.Second
+	// RequestTime bounds each attempt, in its own context, from the vault process's side: the 10 s of §10.10, as the
+	// supervisor's own bound.
+	RequestTime = 10 * time.Second
 	// MaxGiven bounds the calls whose credential the pool remembers (to retire it when the call is placed or
 	// answered); an older call's credential simply stays in use.
 	MaxGiven = 16
@@ -147,10 +148,18 @@ func (p *Pool) fetch(is vault.CallsIssuer, count int, at time.Time, done chan st
 	p.failures, p.next = 0, time.Time{}
 	// The STUN URLs last learned stay when the issuer cannot be reached; an answer replaces them.
 	p.stun, p.turn = a.STUN, a.TURN
+	// At most the count asked for, and no username twice (in the answer or the pool): a retire takes out the
+	// credential its call went out with by username.
+	took := 0
 	for _, c := range a.Credentials {
-		if len(p.creds) < PoolSize {
-			p.creds = append(p.creds, c)
+		if took == count || len(p.creds) >= PoolSize {
+			break
 		}
+		if slices.ContainsFunc(p.creds, func(h callswire.Credential) bool { return h.Username == c.Username }) {
+			continue
+		}
+		p.creds = append(p.creds, c)
+		took++
 	}
 }
 

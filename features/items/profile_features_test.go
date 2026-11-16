@@ -30,7 +30,7 @@ func TestProfileFeaturesToService(t *testing.T) {
 		t.Fatalf("%v", e.h.Sent)
 	}
 	// 0.86.0: hs_confirm goes to every connection, after items (§10.8).
-	if !strings.HasSuffix(string(svc[0].Body), `"items":[],"features":["hs_confirm","vote"]}`) {
+	if !strings.HasSuffix(string(svc[0].Body), `"items":[],"features":["hs_confirm","vote"],"contract":"1.0"}`) {
 		t.Errorf("service: %s", svc[0].Body)
 	}
 	if !strings.HasSuffix(string(per[0].Body), `,"features":["hs_confirm"]}`) {

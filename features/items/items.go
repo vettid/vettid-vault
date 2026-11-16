@@ -176,6 +176,14 @@ type Profile struct {
 	// connection in its profile.update (0.81.0, §10.8 `features`): vault
 	// state, so that a name added by a release is sent once.
 	Advertised map[string][]string `json:"advertised,omitempty"`
+	// Contract is the `contract` last sent to each service connection
+	// (0.90.10, §10.8): vault state, so that an image with another value
+	// sends it once. Additive: a reader that does not know it ignores it.
+	Contract map[string]string `json:"contract,omitempty"`
+	// Claimed is each service connection's last claimed `contract`, from
+	// the last profile.update applied (0.90.10, §10.8 "Receiving"):
+	// informational only.
+	Claimed map[string]string `json:"claimed,omitempty"`
 }
 
 type state struct {
@@ -218,12 +226,15 @@ type Feature struct {
 	st     state
 	// peerFeatures are the names advertised to service connections.
 	peerFeatures []string
+	// contract is the image's `contract` (vault.ServiceContract; tests
+	// set another to stand for another image).
+	contract string
 }
 
 // New returns the feature. cred performs critical items' operations;
 // SetGrants and SetAgents connect the grants and leash features.
 func New(cred Credential) *Feature {
-	f := &Feature{cred: cred}
+	f := &Feature{cred: cred, contract: vault.ServiceContract}
 	f.st.init()
 	return f
 }

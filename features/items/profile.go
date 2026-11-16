@@ -121,6 +121,10 @@ func (f *Feature) sendService(s *vault.Session, id string, body []byte) {
 		return
 	}
 	f.setAdvertised(id)
+	if f.st.Profile.Contract == nil {
+		f.st.Profile.Contract = map[string]string{}
+	}
+	f.st.Profile.Contract[id] = f.contract
 }
 
 func (f *Feature) setAdvertised(id string) {
@@ -186,8 +190,9 @@ func sameNames(a, b []string) bool {
 
 // Unlocked implements vault.UnlockObserver: at the first unlock under a
 // release whose image advertises a name the vault has not advertised to a
-// service connection, that connection gets one profile.update with the next
-// version (§10.8 `features`; a feature is only ever added, §11.10.8).
+// service connection, or (0.90.10) whose `contract` differs from the one last
+// sent to it, that connection gets one profile.update with the next version
+// (§10.8 `features`, `contract`; a feature is only ever added, §11.10.8).
 func (f *Feature) Unlocked(s *vault.Session) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -197,14 +202,16 @@ func (f *Feature) Unlocked(s *vault.Session) {
 // advertise sends the active connections whose last advertised set
 // differs from this image's their update, once, with the next version
 // (§10.8 (b): to every connection for hs_confirm, 0.86.0; to a service
-// for its features too).
+// for its features too), and (0.90.10, trigger 5) each service connection
+// whose last sent `contract` differs from this image's, a value never sent
+// included. Both at one unlock go in one update.
 func (f *Feature) advertise(s *vault.Session) {
 	bumped := false
 	for _, c := range s.Connections() {
 		if c.State != vault.PeerActive || c.RotationPending {
 			continue
 		}
-		if sameNames(f.st.Profile.Advertised[c.ID], f.namesFor(c)) {
+		if sameNames(f.st.Profile.Advertised[c.ID], f.namesFor(c)) && !f.contractDue(c) {
 			continue
 		}
 		if f.st.Profile.Core == nil {
@@ -234,6 +241,16 @@ func (f *Feature) advertise(s *vault.Session) {
 	}
 }
 
+// contractDue reports whether c is a service connection whose last sent
+// `contract` is not this image's (§10.8, trigger 5; never sent counts).
+func (f *Feature) contractDue(c vault.PeerInfo) bool {
+	if !c.IsService() {
+		return false
+	}
+	v, ok := f.st.Profile.Contract[c.ID]
+	return !ok || v != f.contract
+}
+
 // serviceBody is the profile.update a service connection gets (§10.8, 0.69.0):
 // the core and name? only, photo absent and items [], with the shared
 // profile's version.
@@ -250,6 +267,8 @@ func (f *Feature) serviceBody(s *vault.Session, v uint64) ([]byte, bool) {
 	// §10.8 (0.81.0): the names of the optional features a service can
 	// use and (0.86.0) hs_confirm, sorted, each once.
 	b.Raw("features", featuresJSON(f.serviceNames()))
+	// §10.8 (0.90.10): the contract this image implements, to a service only.
+	b.String("contract", f.contract)
 	return peerwire.ProfileUpdateBody(v, c.FirstName, c.LastName, c.IK, b.Bytes()), true
 }
 
@@ -570,6 +589,22 @@ func (u *Update) Marshal() []byte {
 	return peerwire.ProfileUpdateBody(u.Version, u.FirstName, u.LastName, u.IK, b.Raw("items", append(arr, ']')).Bytes())
 }
 
+// keepClaimed keeps a service's `contract` from the update just applied as
+// its last claimed (0.90.10, §10.8 "Receiving"): a JSON string of the §10.8
+// form; any other type or form counts as absent, and absent clears it.
+func (f *Feature) keepClaimed(conn string, raw json.RawMessage) {
+	if raw != nil {
+		if v, err := strictjson.AsString(raw); err == nil && peerwire.ValidContract(v) {
+			if f.st.Profile.Claimed == nil {
+				f.st.Profile.Claimed = map[string]string{}
+			}
+			f.st.Profile.Claimed[conn] = v
+			return
+		}
+	}
+	delete(f.st.Profile.Claimed, conn)
+}
+
 // profileUpdate keeps a peer's profile.update (§10.8 "Receiving"): after
 // the strict parse it ignores an update that is not newer, drops one
 // without a complete core (drop.profile_malformed), ignores one with an
@@ -615,6 +650,13 @@ func (f *Feature) profileUpdate(s *vault.Session, body []byte) error {
 		return err
 	}
 	f.st.Profile.Peers[conn] = u.Version
+	if from.IsService() {
+		var claimed json.RawMessage
+		if o, err := strictjson.ParseObject(body); err == nil {
+			claimed = o["contract"]
+		}
+		f.keepClaimed(conn, claimed)
+	}
 	for id := range f.st.Profile.Peers {
 		if _, ok := s.Connection(id); !ok {
 			delete(f.st.Profile.Peers, id)

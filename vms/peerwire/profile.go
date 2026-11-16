@@ -66,6 +66,28 @@ func ValidHandshakeProfile(raw json.RawMessage) bool {
 	return true
 }
 
+// ValidContract reports whether s has the form of §10.8's `contract`
+// (0.90.10): two decimal numbers without leading zeros, each of at most four
+// digits, joined by ".", as "1.0" or "1.10".
+func ValidContract(s string) bool {
+	dot := -1
+	for i := 0; i < len(s); i++ {
+		if s[i] == '.' {
+			if dot >= 0 {
+				return false
+			}
+			dot = i
+		} else if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return dot > 0 && contractNumber(s[:dot]) && contractNumber(s[dot+1:])
+}
+
+func contractNumber(s string) bool {
+	return s == "0" || len(s) >= 1 && len(s) <= 4 && s[0] != '0'
+}
+
 // ProfileUpdateBody returns a profile.update body (§10.8): {version,
 // first_name, last_name, ik, name?, photo?, items}. extras is the JSON
 // object of the members after the core, at least {"items": [...]}, in

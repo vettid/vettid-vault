@@ -124,6 +124,17 @@ func TestDocumentChecks(t *testing.T) {
 	if r, _ := check(t, docChallenge(ref(good), `"`+strings.Repeat("%", 90000)+`"`, "")); r != DocSize {
 		t.Fatalf("an over-long non-base64 string: %q", r)
 	}
+	// The size is still check 1: a 65,537-byte document with a bad document_required is "size", not "shape".
+	if r, _ := check(t, docChallenge(ref(pad(65537)), q(pad(65537)), `,"document_required":false`)); r != DocSize {
+		t.Fatalf("65,537 with document_required false: %q", r)
+	}
+	// CheckDocumentBytes keeps its own copy: changing the caller's slice changes nothing.
+	mine := []byte(good)
+	kept, _ := CheckDocumentBytes(mine, "x "+ref(good), false)
+	mine[0] = '['
+	if string(kept.Bytes()) != good {
+		t.Fatal("the checked document shares the caller's bytes")
+	}
 	// CheckDocumentBytes: the same checks on kept bytes.
 	if d, r := CheckDocumentBytes([]byte(good), "x "+ref(good), true); r != "" || !d.Required() || string(d.Bytes()) != good {
 		t.Fatalf("kept bytes: %q", r)
@@ -175,7 +186,10 @@ func TestDocumentFormVerify(t *testing.T) {
 	// A challenge sent without a document refuses a document-form answer, even one over the empty document's d.
 	empty := sha256.Sum256(nil)
 	noDoc.Context = "x " + DocumentRef(empty)
-	re, _ := SignConnAuthDocument(cred, ci, ri, &noDoc, &CheckedDocument{d: empty}, time.Now(), nil)
+	// Signed by hand (SignConnAuthDocument signs only a checked document).
+	re := &ConnAuthResponse{RequestID: noDoc.RequestID, Status: ConnAuthSigned, Key: cred.Public().(ed25519.PublicKey),
+		Sig:      ed25519.Sign(cred, append([]byte(ConnAuthDocumentLabel), ConnAuthDocumentMessage(PurposeApproval, empty, noDoc.Message(ci, ri))...)),
+		SignedAt: time.Now(), Purpose: PurposeApproval, DocumentSHA256: empty[:]}
 	if VerifyConnAuthResponse(re, ci, ri, &noDoc) == nil {
 		t.Fatal("a document-form answer verified for a challenge without a document")
 	}

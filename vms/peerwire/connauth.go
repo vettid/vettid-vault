@@ -305,7 +305,8 @@ func SignConnAuth(key ed25519.PrivateKey, challengerIK, responderIK []byte, c *C
 // check.
 func SignConnAuthDocument(key ed25519.PrivateKey, challengerIK, responderIK []byte, c *ConnAuthChallenge, doc *CheckedDocument,
 	signedAt time.Time, rotations []*credwire.KeyRotation) (*ConnAuthResponse, error) {
-	if c.Purpose != PurposeApproval || doc == nil || !strings.HasSuffix(c.Context, DocumentRef(doc.d)) {
+	// A checked document is never empty (it is a JSON object): an empty one is a zero value no check made.
+	if c.Purpose != PurposeApproval || doc == nil || len(doc.doc) == 0 || !strings.HasSuffix(c.Context, DocumentRef(doc.d)) {
 		return nil, ErrBody
 	}
 	d := doc.d

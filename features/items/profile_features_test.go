@@ -112,3 +112,40 @@ func toConn(h *featuretest.Host, id string) []featuretest.Sent {
 	}
 	return out
 }
+
+// §10.4 "Approval documents" (0.89.0): approval_document goes to a service in profile.update's features only while
+// the member's app lists it in its last device.features, and is not sticky: it comes and goes with the app's
+// list, each change sent once with the next version.
+func TestApprovalDocumentAdvertisedWhileTheAppListsIt(t *testing.T) {
+	e := newEnv(t)
+	c := e.h.Conns["cB"]
+	c.PeerKind = "service"
+	e.h.Conns["cB"] = c
+	e.ok(e.call("app", "profile.set", `{"version":0,"name":"Al"}`))
+	if svc := e.sentTo("cB", "profile.update"); len(svc) != 1 || strings.Contains(string(svc[0].Body), "approval_document") {
+		t.Fatalf("before the app lists it: %v", svc)
+	}
+	changed := func() []featuretest.Sent {
+		e.h.Reset()
+		e.set.Items.AppFeaturesChanged(vault.NewSession(context.Background(), e.h, vault.PeerInfo{}, e.clk.T, nil))
+		return e.sentTo("cB", "profile.update")
+	}
+	e.h.AppFeatures = []string{"approval_document", "hs_confirm"}
+	if svc := changed(); len(svc) != 1 || !strings.Contains(string(svc[0].Body), `"features":["approval_document","hs_confirm","vote"]`) ||
+		!strings.Contains(string(svc[0].Body), `"version":2`) {
+		t.Fatalf("listed: %v", svc)
+	}
+	// A person is never told.
+	if per := e.sentTo("cA", "profile.update"); len(per) != 0 {
+		t.Fatalf("a person was told: %v", per)
+	}
+	// Once only.
+	if svc := changed(); len(svc) != 0 {
+		t.Fatalf("again: %v", svc)
+	}
+	// Not sticky: the app's list no longer carries it.
+	e.h.AppFeatures = []string{"hs_confirm"}
+	if svc := changed(); len(svc) != 1 || strings.Contains(string(svc[0].Body), "approval_document") || !strings.Contains(string(svc[0].Body), `"version":3`) {
+		t.Fatalf("dropped: %v", svc)
+	}
+}

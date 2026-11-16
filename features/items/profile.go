@@ -120,15 +120,15 @@ func (f *Feature) sendService(s *vault.Session, id string, body []byte) {
 	if s.SendToConnection(id, "profile.update", body) != nil {
 		return
 	}
-	f.setAdvertised(id)
+	f.setAdvertised(s, id)
 	if f.st.Profile.Contract == nil {
 		f.st.Profile.Contract = map[string]string{}
 	}
 	f.st.Profile.Contract[id] = f.contract
 }
 
-func (f *Feature) setAdvertised(id string) {
-	f.setAdvertisedNames(id, f.serviceNames())
+func (f *Feature) setAdvertised(s *vault.Session, id string) {
+	f.setAdvertisedNames(id, f.serviceNames(s))
 }
 
 func (f *Feature) setAdvertisedNames(id string, names []string) {
@@ -143,9 +143,15 @@ func (f *Feature) setAdvertisedNames(id string, names []string) {
 }
 
 // serviceNames are the names a service connection is told (§10.8): the
-// optional features it can use and the runtime's own (hs_confirm, 0.86.0).
-func (f *Feature) serviceNames() []string {
+// optional features it can use, the runtime's own (hs_confirm, 0.86.0), and
+// (0.89.0) each app-gated name the member's app lists now.
+func (f *Feature) serviceNames(s *vault.Session) []string {
 	names := append(append([]string(nil), f.peerFeatures...), vault.CoreFeatures()...)
+	for _, n := range f.appGated {
+		if s.AppFeature(n) {
+			names = append(names, n)
+		}
+	}
 	sort.Strings(names)
 	out := names[:0]
 	for i, n := range names {
@@ -157,9 +163,9 @@ func (f *Feature) serviceNames() []string {
 }
 
 // namesFor are the names connection c is told (§10.8).
-func (f *Feature) namesFor(c vault.PeerInfo) []string {
+func (f *Feature) namesFor(s *vault.Session, c vault.PeerInfo) []string {
 	if c.IsService() {
-		return f.serviceNames()
+		return f.serviceNames(s)
 	}
 	return vault.CoreFeatures()
 }
@@ -211,7 +217,7 @@ func (f *Feature) advertise(s *vault.Session) {
 		if c.State != vault.PeerActive || c.RotationPending {
 			continue
 		}
-		if sameNames(f.st.Profile.Advertised[c.ID], f.namesFor(c)) && !f.contractDue(c) {
+		if sameNames(f.st.Profile.Advertised[c.ID], f.namesFor(s, c)) && !f.contractDue(c) {
 			continue
 		}
 		if f.st.Profile.Core == nil {
@@ -266,7 +272,7 @@ func (f *Feature) serviceBody(s *vault.Session, v uint64) ([]byte, bool) {
 	b.Raw("items", []byte("[]"))
 	// §10.8 (0.81.0): the names of the optional features a service can
 	// use and (0.86.0) hs_confirm, sorted, each once.
-	b.Raw("features", featuresJSON(f.serviceNames()))
+	b.Raw("features", featuresJSON(f.serviceNames(s)))
 	// §10.8 (0.90.10): the contract this image implements, to a service only.
 	b.String("contract", f.contract)
 	return peerwire.ProfileUpdateBody(v, c.FirstName, c.LastName, c.IK, b.Bytes()), true

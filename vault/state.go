@@ -464,6 +464,10 @@ type Peer struct {
 	// PeerFeatures are the capability names the peer advertised (0.86.0,
 	// §10.8, §5.3), sorted; a name is only ever added. Nil: none seen yet.
 	PeerFeatures []string `json:"peer_features,omitempty"`
+	// LastFeatures (0.89.0) is a device's last list of names as sent (device.features or the inner features),
+	// not merged: a name that is not sticky (approval_document, §10.4 "Approval documents") counts only while
+	// the last list carries it.
+	LastFeatures []string `json:"last_features,omitempty"`
 
 	// Epochs are what §3.4.1 and §6.3.1 (0.86.0) need to know about each
 	// epoch with the peer, in activation (or establishment) order: who

@@ -32,6 +32,35 @@ func CoreFeatures() []string { return []string{handshake.CapConfirm} }
 // (§10.8, §10.19.1).
 const featureVote = "vote"
 
+// FeatureApprovalDocument (0.89.0, §10.4 "Approval documents") is advertised to a service connection in
+// profile.update's features while this image implements approval documents and the last list of the member's app
+// carries the name (not sticky).
+const FeatureApprovalDocument = "approval_document"
+
+// appFeature reports whether the last list of the vault's active app carries name.
+func (m *Manager) appFeature(name string) bool {
+	for _, p := range m.st.Devices {
+		if p.Kind == KindApp && p.State == PeerActive && slices.Contains(p.LastFeatures, name) {
+			return true
+		}
+	}
+	return false
+}
+
+// AppFeaturesObserver is implemented by features that act when the names the member's app lists change in a way
+// that matters (approval_document, 0.89.0): the items feature sends the services a profile.update.
+type AppFeaturesObserver interface {
+	AppFeaturesChanged(s *Session)
+}
+
+func (m *Manager) notifyAppFeatures(now time.Time) {
+	for _, f := range m.features {
+		if o, ok := f.(AppFeaturesObserver); ok {
+			o.AppFeaturesChanged(m.session(now))
+		}
+	}
+}
+
 // TypeDeviceFeatures is a device's receiving-side capabilities (§10.2).
 const TypeDeviceFeatures = "device.features"
 
@@ -109,6 +138,14 @@ func (m *Manager) noteFeatures(p *Peer, names []string) {
 	}
 	if p == nil || names == nil || !envelope.ValidFeatures(names) {
 		return
+	}
+	if p.Kind != KindConnection && !slices.Equal(p.LastFeatures, names) {
+		was := m.appFeature(FeatureApprovalDocument)
+		p.LastFeatures = slices.Clone(names)
+		m.dirty = true
+		if m.appFeature(FeatureApprovalDocument) != was {
+			m.notifyAppFeatures(m.now())
+		}
 	}
 	if p.PeerFeatures == nil {
 		p.PeerFeatures = []string{}

@@ -226,6 +226,9 @@ type Feature struct {
 	st     state
 	// peerFeatures are the names advertised to service connections.
 	peerFeatures []string
+	// appGated are names advertised to service connections only while the member's app lists them in its last
+	// features (approval_document, 0.89.0, §10.4 "Approval documents"): not sticky.
+	appGated []string
 	// contract is the image's `contract` (vault.ServiceContract; tests
 	// set another to stand for another image).
 	contract string
@@ -246,6 +249,20 @@ func (f *Feature) SetGrants(g RuleGrants) { f.grants = g }
 // service can use (0.81.0, §10.8 `features`): the profile.update to a
 // service connection carries them, sorted, and is never sent to a person
 // connection. Empty: the member is absent. At construction.
+// SetAppGatedFeatures names the features this image implements that are advertised to a service only while the
+// member's app lists them (§10.8, §10.4 "Approval documents").
+func (f *Feature) SetAppGatedFeatures(names []string) {
+	f.appGated = append([]string(nil), names...)
+}
+
+// AppFeaturesChanged implements vault.AppFeaturesObserver: an app-gated name came or went, so the services whose
+// last update does not carry this set get one (§10.8; not sticky).
+func (f *Feature) AppFeaturesChanged(s *vault.Session) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.advertise(s)
+}
+
 func (f *Feature) SetPeerFeatures(names []string) {
 	f.peerFeatures = append([]string(nil), names...)
 	sort.Strings(f.peerFeatures)

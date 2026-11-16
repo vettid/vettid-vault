@@ -12,6 +12,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"slices"
 	"sort"
 	"testing"
 	"time"
@@ -38,16 +39,18 @@ type Host struct {
 	Conns      map[string]vault.PeerInfo
 	Sent       []Sent
 	Activities []vault.Activity
-	Profiles   map[string]json.RawMessage
-	Rotations  int
-	RotateErr  error
-	Set        vault.Settings
-	Sinks      []vault.ActivitySink
-	ids        int
-	DownConns  map[string]bool // SendToConnection fails for these
-	Completed  []string        // CompleteRecovery calls
-	Devices    map[string]vault.PeerInfo
-	IK         ed25519.PublicKey
+	// AppFeatures is the member's app's last features list (Session.AppFeature).
+	AppFeatures []string
+	Profiles    map[string]json.RawMessage
+	Rotations   int
+	RotateErr   error
+	Set         vault.Settings
+	Sinks       []vault.ActivitySink
+	ids         int
+	DownConns   map[string]bool // SendToConnection fails for these
+	Completed   []string        // CompleteRecovery calls
+	Devices     map[string]vault.PeerInfo
+	IK          ed25519.PublicKey
 	// Identity is the fake vault's identity key (IK is its public half).
 	Identity ed25519.PrivateKey
 	// Introductions' invitations (§10.15).
@@ -161,6 +164,9 @@ func (h *Host) askState(conn string) *vault.AskState {
 	}
 	return st
 }
+
+// AppFeature implements Session.AppFeature from AppFeatures.
+func (h *Host) AppFeature(name string) bool { return slices.Contains(h.AppFeatures, name) }
 
 // Ask implements vault.AskHost.
 func (h *Host) Ask(conn string, a vault.Ask, now time.Time) vault.AskVerdict {

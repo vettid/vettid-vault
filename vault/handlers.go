@@ -774,6 +774,15 @@ type HandshakeProfiler interface {
 	DisplayName() string
 }
 
+// AppFeature reports whether the last features list of the member's app carries name (0.89.0; false on a host
+// that does not know).
+func (s *Session) AppFeature(name string) bool {
+	if h, ok := s.host.(interface{ AppFeature(string) bool }); ok {
+		return h.AppFeature(name)
+	}
+	return false
+}
+
 // Zeroizer is implemented by features that hold secrets in memory outside
 // their saved state (the credential unlock window, §3.5.3); the vault calls
 // it when it locks or zeroizes.

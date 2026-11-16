@@ -22,6 +22,9 @@ type managerHost struct{ m *Manager }
 
 func (h managerHost) VaultID() string { return h.m.st.VaultID }
 
+// AppFeature implements Session.AppFeature.
+func (h managerHost) AppFeature(name string) bool { return h.m.appFeature(name) }
+
 func (h managerHost) Connection(id string) (PeerInfo, bool) {
 	p, ok := h.m.st.Connections[id]
 	if !ok {

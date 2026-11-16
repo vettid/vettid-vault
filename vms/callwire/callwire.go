@@ -160,6 +160,15 @@ type ICEConfig struct {
 	Servers []ICEServer
 }
 
+// ValidURL reports whether u may stand in an ICE configuration: a stun:, stuns:, turn: or turns: URL of at most
+// MaxURL bytes with no spaces or control characters (VAULT-MESSAGING §10.10). The calling service's answer is held
+// to the same rule (vms/callswire).
+func ValidURL(u string) bool { return validURL(u) }
+
+// ValidField reports whether s may be an ICE server's username or credential: at most MaxICEField bytes, no
+// control characters (an empty one is absent).
+func ValidField(s string) bool { return validField(s) }
+
 func validURL(u string) bool {
 	if u == "" || len(u) > MaxURL {
 		return false

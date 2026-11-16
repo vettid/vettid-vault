@@ -11,6 +11,7 @@ import (
 	"github.com/vettid/vettid-vault/vault"
 	"github.com/vettid/vettid-vault/vault/store"
 	"github.com/vettid/vettid-vault/vms/altchan"
+	"github.com/vettid/vettid-vault/vms/callswire"
 	"github.com/vettid/vettid-vault/vms/devattest"
 	"github.com/vettid/vettid-vault/vms/envelope"
 	"github.com/vettid/vettid-vault/vms/manifest"
@@ -135,6 +136,11 @@ func New(opt Options) (*Instance, error) {
 		if opt.Vault.Push == nil && opt.Config.PushURL != "" {
 			// In process (tests, development): the client attests itself.
 			opt.Vault.Push = &pushwire.Client{BaseURL: opt.Config.PushURL, HTTP: opt.Vault.HTTP,
+				Attest: func(pub ed25519.PublicKey, d [32]byte) ([]byte, error) { return nsm.Attest(d[:], nil, pub) }}
+		}
+		if opt.Vault.Calls == nil && opt.Config.CallsURL != "" {
+			// In process (tests, development): the client attests each request's key itself.
+			opt.Vault.Calls = &callswire.Client{BaseURL: opt.Config.CallsURL, HTTP: opt.Vault.HTTP,
 				Attest: func(pub ed25519.PublicKey, d [32]byte) ([]byte, error) { return nsm.Attest(d[:], nil, pub) }}
 		}
 		core, err := NewCore(CoreDeps{Config: opt.Config, Meas: m, Store: opt.Store, KMS: opt.KMS,

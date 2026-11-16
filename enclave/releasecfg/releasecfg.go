@@ -36,6 +36,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
 
@@ -397,6 +398,11 @@ func Parse(b []byte) (*File, error) {
 	}
 	if err := parseVote(o, c, missing); err != nil {
 		return nil, err
+	}
+	// §11.10.8: calls_url may be present only when features lists calls (calls without one stays legal: its calls
+	// carry no ICE servers).
+	if c.CallsURL != "" && !slices.Contains(c.Features, "calls") {
+		return nil, ErrFormat
 	}
 	if c.FileTimeScale, err = parseTimeScale(o, c.Channel); err != nil {
 		return nil, err

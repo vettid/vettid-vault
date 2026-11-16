@@ -32,8 +32,14 @@ type Client struct {
 // ErrTransport is an issuer that could not be reached or did not answer in time.
 var ErrTransport = errors.New("callswire: issuer unreachable")
 
-// ErrOversized is an answer longer than MaxAnswer.
-var ErrOversized = errors.New("callswire: issuer answer too large")
+// ErrOversized is an answer longer than MaxAnswer: an answer the vault refuses, so errors.Is(ErrOversized,
+// ErrResponse) (a failed attempt like any other refused answer).
+var ErrOversized error = oversized{}
+
+type oversized struct{}
+
+func (oversized) Error() string        { return "callswire: issuer answer too large" }
+func (oversized) Is(target error) bool { return target == ErrResponse }
 
 // Credentials asks for count credentials (1..MaxCount) and returns the checked answer (ParseAnswer, against the
 // client's clock). An issuer error is an *Error; an answer that fails the checks is ErrResponse; anything else

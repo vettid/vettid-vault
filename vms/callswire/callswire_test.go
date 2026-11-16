@@ -178,3 +178,15 @@ func TestClient(t *testing.T) {
 		t.Fatalf("closed: %v", err)
 	}
 }
+
+// An answer longer than MaxAnswer is refused like any other answer that fails the checks (a failed attempt).
+func TestOversizedAnswerIsRefused(t *testing.T) {
+	is := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write(bytes.Repeat([]byte(" "), MaxAnswer+1))
+	}))
+	defer is.Close()
+	c := &Client{BaseURL: is.URL, HTTP: is.Client()}
+	if _, err := c.Credentials(context.Background(), 1); !errors.Is(err, ErrOversized) || !errors.Is(err, ErrResponse) {
+		t.Fatalf("oversized: %v", err)
+	}
+}

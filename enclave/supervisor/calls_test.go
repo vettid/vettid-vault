@@ -101,3 +101,55 @@ func TestCallsChannel(t *testing.T) {
 		t.Fatal("no issuer: not denied")
 	}
 }
+
+// An issuer that does not answer within the attempt's time is an error to the vault process, and an answer longer
+// than callswire.MaxAnswer is passed on cut to MaxAnswer+1 bytes (the process refuses it as oversized).
+func TestCallsTimeoutAndCap(t *testing.T) {
+	slow := make(chan struct{})
+	is := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-Test") == "" {
+			select {
+			case <-slow:
+			case <-r.Context().Done():
+			case <-time.After(3 * time.Second): // an answer after the attempt's time must not be taken
+				_, _ = w.Write([]byte(`{"stun":[],"turn":[],"credentials":[]}`))
+			}
+			return
+		}
+		_, _ = w.Write(bytes.Repeat([]byte("a"), callswire.MaxAnswer+100))
+	}))
+	defer is.Close()
+	defer close(slow)
+	old := callsAttempt
+	callsAttempt = 200 * time.Millisecond
+	defer func() { callsAttempt = old }()
+	s := &Supervisor{encCfg: enclave.Config{CallsURL: is.URL}, cfg: Config{NSM: &recNSM{}}, relayHTTP: is.Client(), activity: map[string]time.Time{}}
+	p := &vproc{h: &procHost{s: s}, vaultID: "aaaa"}
+	_, key, _ := ed25519.GenerateKey(nil)
+	body := callswire.RequestBody(1)
+	h := http.Header{}
+	relayauth.SetHeaders(h, key, http.MethodPost, callswire.PathCredentials, time.Now(), relayauth.BodyHash(body))
+	call := func() [][]byte {
+		return p.handle(context.Background(), &hostproto.Frame{Kind: vaultipc.KindCalls, ID: 1,
+			Fields: [][]byte{[]byte(callswire.PathCredentials), vaultipc.EncodeHeaders(h), body}})
+	}
+	start := time.Now()
+	if r := call(); string(r[0]) != hostproto.StatusError || time.Since(start) > 5*time.Second {
+		t.Fatalf("slow issuer: %q after %v", r[0], time.Since(start))
+	}
+	// The test header is not one the supervisor forwards: send it through a client that adds it.
+	is.Client().Transport.(*http.Transport).Proxy = nil
+	s.relayHTTP = &http.Client{Transport: addHeader{is.Client().Transport}}
+	r := call()
+	if string(r[0]) != hostproto.StatusOK || len(r[3]) != callswire.MaxAnswer+1 {
+		t.Fatalf("oversized answer: %q, %d bytes", r[0], len(r[3]))
+	}
+}
+
+type addHeader struct{ rt http.RoundTripper }
+
+func (a addHeader) RoundTrip(r *http.Request) (*http.Response, error) {
+	r = r.Clone(r.Context())
+	r.Header.Set("X-Test", "1")
+	return a.rt.RoundTrip(r)
+}

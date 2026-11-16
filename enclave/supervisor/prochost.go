@@ -1248,6 +1248,9 @@ func (p *vproc) push(ctx context.Context, f [][]byte) [][]byte {
 // maxCallsBody bounds a calling-service request: CALLING-SERVICE §5.2 allows at most 1 KiB.
 const maxCallsBody = 1 << 10
 
+// callsAttempt is how long one calling-service request may take (VAULT-MESSAGING §10.10: 10 s); tests shorten it.
+var callsAttempt = 10 * time.Second
+
 // calls passes a vault process's request for TURN credentials to the channel's calling-service issuer
 // (vaultipc.KindCalls; VAULT-MESSAGING §10.10 "Servers and credentials", CALLING-SERVICE §5.2): only POST
 // /v1/credentials, signed (Relay Protocol §4.1) by a key that is not this process's relay key. The supervisor
@@ -1280,25 +1283,26 @@ func (p *vproc) calls(ctx context.Context, f [][]byte) [][]byte {
 		hdr.Set(k, in.Get(k))
 	}
 	hdr.Set("Content-Type", "application/json")
+	// VAULT-MESSAGING §10.10: an attempt waits at most 10 s.
+	rctx, cancel := context.WithTimeout(ctx, callsAttempt)
+	defer cancel()
+	// The slot first: a process gets no more attestations at once than it has requests in flight.
+	release, ok := p.egressSlot(rctx)
+	if !ok {
+		return hostproto.Strings(hostproto.StatusError)
+	}
+	defer release()
 	d := relayauth.Digest(http.MethodPost, path, sr.Timestamp, bh)
 	doc, err := s.cfg.NSM.Attest(d[:], nil, sr.Key)
 	if err != nil {
 		return hostproto.Strings(hostproto.StatusError)
 	}
 	hdr.Set(callswire.HeaderAttestation, base64.StdEncoding.EncodeToString(doc))
-	// VAULT-MESSAGING §10.10: an attempt waits at most 10 s.
-	rctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
 	req, err := http.NewRequestWithContext(rctx, http.MethodPost, strings.TrimSuffix(base, "/")+path, bytes.NewReader(f[2]))
 	if err != nil {
 		return deny()
 	}
 	req.Header = hdr
-	release, ok := p.egressSlot(rctx)
-	if !ok {
-		return hostproto.Strings(hostproto.StatusError)
-	}
-	defer release()
 	resp, err := s.relayHTTP.Do(req)
 	if err != nil {
 		return hostproto.Strings(hostproto.StatusError)

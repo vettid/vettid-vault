@@ -17,11 +17,12 @@ func TestCallsURL(t *testing.T) {
 	if f, err := Check(ChannelStaging, []byte(staging(complete(t)))); err != nil || f.CallsURL != "" {
 		t.Fatalf("absent: %q %v", f.CallsURL, err)
 	}
-	f, err := Check(ChannelStaging, []byte(withCallsURL(staging(complete(t)), `"https://calls.staging.vettid.org"`)))
+	f, err := Check(ChannelStaging, []byte(withCallsURL(withFeatures(staging(complete(t)), `["calls"]`), `"https://calls.staging.vettid.org"`)))
 	if err != nil || f.CallsURL != "https://calls.staging.vettid.org" {
 		t.Fatalf("staging: %v", err)
 	}
 	for name, s := range map[string]string{
+		"without the calls feature":  withCallsURL(staging(complete(t)), `"https://calls.staging.vettid.org"`),
 		"staging names production's": withCallsURL(staging(complete(t)), `"https://calls.vettid.org"`),
 		"staging names another host": withCallsURL(staging(complete(t)), `"https://calls.example.org"`),
 		"staging, a path":            withCallsURL(staging(complete(t)), `"https://calls.staging.vettid.org/"`),

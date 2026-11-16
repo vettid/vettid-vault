@@ -50,59 +50,85 @@ const (
 // without it is ignored (§10.4).
 func (c *ConnAuthChallenge) HasDocument() bool { return c.docRaw != nil }
 
+// CheckedDocument is a document that passed the receiver's four checks for its challenge's context (CheckDocument,
+// CheckDocumentBytes): the only thing the document form can be signed over (SignConnAuthDocument), so that no
+// unchecked or app-supplied hash is ever signed. Whether the challenge is an approval from a service connection is
+// still the caller's to check.
+type CheckedDocument struct {
+	doc      []byte
+	d        [32]byte
+	required bool
+}
+
+// Bytes are the document's bytes (not to be modified).
+func (c *CheckedDocument) Bytes() []byte { return c.doc }
+
+// Hash is the document's d, SHA-256 of its bytes.
+func (c *CheckedDocument) Hash() [32]byte { return c.d }
+
+// Required reports whether its challenge was document_required.
+func (c *CheckedDocument) Required() bool { return c.required }
+
 // CheckDocument makes the four receiver checks on the challenge's document, in their order, and returns the
-// document's bytes, its hash d, whether the challenge is document_required, and "" — or the reason of the first
-// check that fails. Only for an approval challenge from a service connection that carries a document (the
-// caller's to decide: on any other challenge the members are ignored).
-func (c *ConnAuthChallenge) CheckDocument() (doc []byte, d [32]byte, required bool, reason string) {
+// checked document and "", or nil and the reason of the first check that fails. Only for an approval challenge
+// from a service connection that carries a document (the caller's to decide: on any other challenge the members
+// are ignored).
+func (c *ConnAuthChallenge) CheckDocument() (*CheckedDocument, string) {
 	// 1. A string of standard base64 with padding, decoding to at most MaxDocument bytes.
 	var s string
 	if json.Unmarshal(c.docRaw, &s) != nil || !strings.HasPrefix(string(bytes.TrimSpace(c.docRaw)), `"`) {
-		return nil, d, false, DocEncoding
+		return nil, DocEncoding
 	}
 	if len(s) > maxDocumentB64 {
-		return nil, d, false, DocSize
+		return nil, DocSize
 	}
 	doc, err := strictjson.DecodeStd(s, -1)
 	if err != nil {
-		return nil, d, false, DocEncoding
+		return nil, DocEncoding
 	}
-	if len(doc) > MaxDocument {
-		return nil, d, false, DocSize
-	}
-	// 2. Strict (§5.3), at most MaxDocumentDepth levels, exactly action, payload and summary within their bounds;
-	// document_required, when present, is true.
+	// document_required, when present, is true (check 2).
+	required := false
 	if c.reqRaw != nil {
 		if string(c.reqRaw) != "true" {
-			return nil, d, false, DocShape
+			return nil, DocShape
 		}
 		required = true
 	}
+	return CheckDocumentBytes(doc, c.Context, required)
+}
+
+// CheckDocumentBytes makes the checks on a document's decoded bytes (check 1's size, then 2 to 4) for a challenge
+// whose context is context: for a vault that checks again the document it kept with an ask before it signs.
+func CheckDocumentBytes(doc []byte, context string, required bool) (*CheckedDocument, string) {
+	if len(doc) > MaxDocument {
+		return nil, DocSize
+	}
+	// 2. Strict (§5.3), at most MaxDocumentDepth levels, exactly action, payload and summary within their bounds.
 	v, reason := parseDocument(doc)
 	if reason != "" {
-		return nil, d, false, reason
+		return nil, reason
 	}
 	m, ok := v.(map[string]any)
 	if !ok || len(m) != 3 {
-		return nil, d, false, DocShape
+		return nil, DocShape
 	}
 	action, ok1 := m["action"].(string)
 	summary, ok2 := m["summary"].(string)
 	_, ok3 := m["payload"].(map[string]any)
 	if !ok1 || !ok2 || !ok3 || !validAction(action) || len(summary) > MaxDocumentSummary {
-		return nil, d, false, DocShape
+		return nil, DocShape
 	}
 	// 3. Canonical: its own RFC 8785 form, byte for byte.
 	var buf bytes.Buffer
 	if jcs.Append(&buf, v) != nil || subtle.ConstantTimeCompare(buf.Bytes(), doc) != 1 {
-		return nil, d, false, DocCanonical
+		return nil, DocCanonical
 	}
-	// 4. The context ends with the first 16 lower-case hex digits of d.
-	d = sha256.Sum256(doc)
-	if !strings.HasSuffix(c.Context, DocumentRef(d)) {
-		return nil, [32]byte{}, false, DocRef
+	// 4. The context ends with the first 16 lower-case hex digits of d (public values: a plain comparison).
+	d := sha256.Sum256(doc)
+	if !strings.HasSuffix(context, DocumentRef(d)) {
+		return nil, DocRef
 	}
-	return doc, d, required, ""
+	return &CheckedDocument{doc: doc, d: d, required: required}, ""
 }
 
 // DocumentRef is the 16 lower-case hex digits of d[0:8] a document's challenge's context ends with.
@@ -173,8 +199,6 @@ func nesting(doc []byte) (int, bool) {
 	}
 }
 
-const maxSafeInt = 1<<53 - 1
-
 func docValue(dec *json.Decoder) (any, error) {
 	tok, err := dec.Token()
 	if err != nil {
@@ -223,7 +247,7 @@ func docValue(dec *json.Decoder) (any, error) {
 			return nil, ErrBody
 		}
 		n, err := strconv.ParseInt(s, 10, 64)
-		if err != nil || n > maxSafeInt {
+		if err != nil || n > strictjson.MaxSafeInteger {
 			return nil, ErrBody
 		}
 		return n, nil

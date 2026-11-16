@@ -34,8 +34,11 @@ func check(t *testing.T, body []byte) (string, bool) {
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
-	_, _, req, reason := c.CheckDocument()
-	return reason, req
+	doc, reason := c.CheckDocument()
+	if (doc == nil) != (reason != "") {
+		t.Fatalf("a document and a reason: %v %q", doc != nil, reason)
+	}
+	return reason, doc != nil && doc.Required()
 }
 
 // §10.4 "Approval documents": the receiver's four checks, in order, each with its reason.
@@ -106,6 +109,28 @@ func TestDocumentChecks(t *testing.T) {
 	if r, _ := check(t, docChallenge(ref(pad(MaxDocument)), q(pad(MaxDocument)), "")); r != "" {
 		t.Fatalf("65,536 bytes: %q", r)
 	}
+	// The bounds' edges, as literals: a 64-byte action and a 1,024-byte summary pass; 65,536 bytes pass and
+	// 65,537 are "size"; an over-long string that is not even base64 is "size" too (judged by its length first).
+	edge := `{"action":"` + strings.Repeat("a", 64) + `","payload":{},"summary":"` + strings.Repeat("s", 1024) + `"}`
+	if r, _ := check(t, docChallenge(ref(edge), q(edge), "")); r != "" {
+		t.Fatalf("64-byte action, 1,024-byte summary: %q", r)
+	}
+	if len(pad(65536)) != 65536 || len(pad(65537)) != 65537 {
+		t.Fatal("pad")
+	}
+	if r, _ := check(t, docChallenge(ref(pad(65537)), q(pad(65537)), "")); r != DocSize {
+		t.Fatalf("65,537: %q", r)
+	}
+	if r, _ := check(t, docChallenge(ref(good), `"`+strings.Repeat("%", 90000)+`"`, "")); r != DocSize {
+		t.Fatalf("an over-long non-base64 string: %q", r)
+	}
+	// CheckDocumentBytes: the same checks on kept bytes.
+	if d, r := CheckDocumentBytes([]byte(good), "x "+ref(good), true); r != "" || !d.Required() || string(d.Bytes()) != good {
+		t.Fatalf("kept bytes: %q", r)
+	}
+	if _, r := CheckDocumentBytes([]byte(good), "x", false); r != DocRef {
+		t.Fatalf("kept bytes, another context: %q", r)
+	}
 	// Exactly 16 levels pass.
 	if r, _ := check(t, docChallenge(ref(deepOK), q(deepOK), "")); r != "" {
 		t.Fatalf("16 levels: %q", r)
@@ -127,7 +152,8 @@ func TestDocumentFormVerify(t *testing.T) {
 	d := sha256.Sum256(doc)
 	c := &ConnAuthChallenge{RequestID: docRID, Nonce: make([]byte, ConnAuthNonceSize), Context: "x " + DocumentRef(d),
 		Purpose: PurposeApproval, Document: doc}
-	r, err := SignConnAuthDocument(cred, ci, ri, c, d, time.Now(), nil)
+	checked := &CheckedDocument{doc: doc, d: d}
+	r, err := SignConnAuthDocument(cred, ci, ri, c, checked, time.Now(), nil)
 	if err != nil || VerifyConnAuthResponse(r, ci, ri, c) != nil {
 		t.Fatalf("%v", err)
 	}
@@ -148,7 +174,8 @@ func TestDocumentFormVerify(t *testing.T) {
 	}
 	// A challenge sent without a document refuses a document-form answer, even one over the empty document's d.
 	empty := sha256.Sum256(nil)
-	re, _ := SignConnAuthDocument(cred, ci, ri, &noDoc, empty, time.Now(), nil)
+	noDoc.Context = "x " + DocumentRef(empty)
+	re, _ := SignConnAuthDocument(cred, ci, ri, &noDoc, &CheckedDocument{d: empty}, time.Now(), nil)
 	if VerifyConnAuthResponse(re, ci, ri, &noDoc) == nil {
 		t.Fatal("a document-form answer verified for a challenge without a document")
 	}
@@ -163,8 +190,17 @@ func TestDocumentFormVerify(t *testing.T) {
 	if VerifyConnAuthResponse(pf, ci, ri, c) == nil {
 		t.Fatal("a purpose-form signature verified as the document form")
 	}
-	if _, err := SignConnAuthDocument(cred, ci, ri, &signin, d, time.Now(), nil); err == nil {
+	if _, err := SignConnAuthDocument(cred, ci, ri, &signin, checked, time.Now(), nil); err == nil {
 		t.Fatal("signed the document form for a sign-in challenge")
+	}
+	// Only a document checked for this challenge's context, and only a checked one, is signed.
+	if _, err := SignConnAuthDocument(cred, ci, ri, c, nil, time.Now(), nil); err == nil {
+		t.Fatal("signed without a checked document")
+	}
+	elsewhere := *c
+	elsewhere.Context = "another ref 0000000000000000"
+	if _, err := SignConnAuthDocument(cred, ci, ri, &elsewhere, checked, time.Now(), nil); err == nil {
+		t.Fatal("signed a document checked for another context")
 	}
 	// A response whose document_sha256 is not the d it was signed over: refused.
 	swapped := *pr
@@ -185,8 +221,8 @@ func TestDocumentFormVerify(t *testing.T) {
 	}
 }
 
-// FuzzCheckDocument: the checks never panic, and a document they accept is canonical, within its bounds, and has
-// the hash its context names.
+// FuzzCheckDocument: the checks never panic, and a document they accept is returned as it was sent, with its hash
+// and document_required, and within the size bound.
 func FuzzCheckDocument(f *testing.F) {
 	f.Add([]byte(`{"action":"admin_set.add","payload":{"n":1},"summary":"Add Ann"}`), true)
 	f.Add([]byte(`{"action":"a","payload":{"x":[1,{"y":"é"}]},"summary":""}`), false)
@@ -200,11 +236,14 @@ func FuzzCheckDocument(f *testing.F) {
 		if err != nil {
 			return
 		}
-		got, gd, req, reason := c.CheckDocument()
+		got, reason := c.CheckDocument()
 		if reason != "" {
+			if got != nil {
+				t.Fatal("a document with a reason")
+			}
 			return
 		}
-		if string(got) != string(doc) || gd != d || req != required || len(got) > MaxDocument {
+		if string(got.Bytes()) != string(doc) || got.Hash() != d || got.Required() != required || len(got.Bytes()) > MaxDocument {
 			t.Fatalf("accepted %q", doc)
 		}
 	})

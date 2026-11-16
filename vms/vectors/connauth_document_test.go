@@ -71,8 +71,8 @@ func checkConnAuthDocumentVectors(t *testing.T, dir string) {
 	if err != nil || c.Purpose != peerwire.PurposeApproval || c.Context != ctxt || !c.HasDocument() {
 		t.Fatalf("challenge: %v", err)
 	}
-	got, gd, req, reason := c.CheckDocument()
-	if reason != "" || gd != d || !req || string(got) != string(doc) {
+	checked, reason := c.CheckDocument()
+	if reason != "" || checked.Hash() != d || !checked.Required() || string(checked.Bytes()) != string(doc) {
 		t.Fatalf("checks: %q", reason)
 	}
 	r, err := peerwire.ParseConnAuthResponse([]byte(v.str("response_body")))
@@ -85,7 +85,7 @@ func checkConnAuthDocumentVectors(t *testing.T, dir string) {
 	if err := peerwire.VerifyConnAuthResponse(r, challenger, responder, c); err != nil {
 		t.Fatal(err)
 	}
-	resigned, err := peerwire.SignConnAuthDocument(cred, challenger, responder, c, d, r.SignedAt, nil)
+	resigned, err := peerwire.SignConnAuthDocument(cred, challenger, responder, c, checked, r.SignedAt, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

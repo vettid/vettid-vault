@@ -6,6 +6,7 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/vettid/vettid-vault/vms/credwire"
@@ -90,7 +91,8 @@ func ConnAuthPurposeMessage(purpose string, m []byte) []byte {
 }
 
 // ConnAuthChallenge is a connection.authenticate.challenge body:
-// {request_id, nonce, context?, purpose?, match_code?}.
+// {request_id, nonce, context?, purpose?, match_code?, document?, document_required?} (document and
+// document_required: 0.89.0, an approval's).
 type ConnAuthChallenge struct {
 	RequestID string // a ULID
 	Nonce     []byte // ConnAuthNonceSize bytes
@@ -254,7 +256,8 @@ func ConnAuthWithdrawBody(requestID string) []byte {
 }
 
 // ConnAuthResponse is a connection.authenticate.response body:
-// {request_id, status: "signed", key, sig, signed_at, purpose?, rotations?}
+// {request_id, status: "signed", key, sig, signed_at, purpose?, document_sha256?, rotations?} (document_sha256:
+// 0.89.0, the document form)
 // or {request_id, status: "denied"}.
 type ConnAuthResponse struct {
 	RequestID string
@@ -296,13 +299,16 @@ func SignConnAuth(key ed25519.PrivateKey, challengerIK, responderIK []byte, c *C
 	return r, nil
 }
 
-// SignConnAuthDocument answers the approval challenge c in the document form (0.89.0): over its document's hash
-// d, which the response carries as document_sha256. c must be an approval challenge.
-func SignConnAuthDocument(key ed25519.PrivateKey, challengerIK, responderIK []byte, c *ConnAuthChallenge, d [32]byte,
+// SignConnAuthDocument answers the approval challenge c in the document form (0.89.0): over the hash d of doc, a
+// document checked for c's context (CheckDocument, CheckDocumentBytes), which the response carries as
+// document_sha256. c must be an approval challenge; that it came from a service connection is the caller's to
+// check.
+func SignConnAuthDocument(key ed25519.PrivateKey, challengerIK, responderIK []byte, c *ConnAuthChallenge, doc *CheckedDocument,
 	signedAt time.Time, rotations []*credwire.KeyRotation) (*ConnAuthResponse, error) {
-	if c.Purpose != PurposeApproval {
+	if c.Purpose != PurposeApproval || doc == nil || !strings.HasSuffix(c.Context, DocumentRef(doc.d)) {
 		return nil, ErrBody
 	}
+	d := doc.d
 	sig, err := suite.Sign(key, ConnAuthDocumentLabel, ConnAuthDocumentMessage(PurposeApproval, d, c.Message(challengerIK, responderIK)))
 	if err != nil {
 		return nil, err

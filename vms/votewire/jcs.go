@@ -3,11 +3,12 @@ package votewire
 import (
 	"bytes"
 	"encoding/json"
-	"github.com/vettid/vettid-vault/vms/jcs"
 	"io"
 	"strconv"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/vettid/vettid-vault/vms/jcs"
 )
 
 // JCS (RFC 8785) for the documents (BALLOT-PROTOCOL §2). The documents hold

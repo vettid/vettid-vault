@@ -42,10 +42,11 @@ func genConnAuthDocument() (obj, error) {
 	if err != nil {
 		return nil, err
 	}
-	if _, pd, req, reason := parsed.CheckDocument(); reason != "" || pd != d || !req {
+	checked, reason := parsed.CheckDocument()
+	if reason != "" || checked.Hash() != d || !checked.Required() {
 		return nil, errors.New("vectors: the approval document fails the receiver's checks: " + reason)
 	}
-	r, err := peerwire.SignConnAuthDocument(cred, challenger, responder, c, d, signedAt, nil)
+	r, err := peerwire.SignConnAuthDocument(cred, challenger, responder, c, checked, signedAt, nil)
 	if err != nil {
 		return nil, err
 	}

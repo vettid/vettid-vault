@@ -83,9 +83,10 @@ type Options struct {
 	// CredentialKDF is the Protean Credential's password KDF; zero means
 	// credential.DefaultKDF (tests and development use credential.MinKDF).
 	CredentialKDF credential.KDF
-	// ICE issues call ICE servers and credentials (CALLING-SERVICE §5);
-	// nil means none (no calling service yet).
-	ICE calls.ICESource
+	// ICE, if set, makes the calls feature's ICE source for each opening (tests); nil: a pool of credentials from
+	// the session's calling-service issuer (VAULT-MESSAGING §10.10), an empty server list without one. A factory, so
+	// that no pool outlives the opening it belongs to.
+	ICE func() calls.ICESource
 	// WalletNetworks are the Bitcoin networks new wallets may use; nil
 	// means mainnet, testnet, testnet4 and signet (§10.18, 0.35.0).
 	WalletNetworks []string
@@ -179,7 +180,11 @@ func NewSet(o Options) *Set {
 		s.Actions = actions.New(deps)
 	}
 	if on[Calls] {
-		s.Calls = calls.New(calls.Options{ICE: o.ICE})
+		var ice calls.ICESource
+		if o.ICE != nil {
+			ice = o.ICE()
+		}
+		s.Calls = calls.New(calls.Options{ICE: ice})
 	}
 	if on[Intro] {
 		s.Intro = intro.New()

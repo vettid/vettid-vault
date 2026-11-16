@@ -302,7 +302,7 @@ func TestFeatureRetiresTheAnsweredCallsCredential(t *testing.T) {
 	}
 }
 
-// The feature primes the pool at the opening (UnlockObserver) and at each tick (TickObserver).
+// The feature primes the pool at the opening (OpenObserver) and at each tick (TickObserver).
 func TestFeaturePrimesAtUnlockAndTick(t *testing.T) {
 	is := &fakeIssuer{exp: t0.Add(6 * time.Hour)}
 	p := poolWith(is)
@@ -319,7 +319,7 @@ func TestFeaturePrimesAtUnlockAndTick(t *testing.T) {
 			<-d
 		}
 	}
-	f.Unlocked(sess(t0))
+	f.Opened(sess(t0))
 	wait()
 	if got := is.asked(); len(got) != 1 || got[0] != PoolSize {
 		t.Fatalf("unlock asked %v", got)
@@ -331,5 +331,111 @@ func TestFeaturePrimesAtUnlockAndTick(t *testing.T) {
 	wait()
 	if got := is.asked(); len(got) != 2 {
 		t.Fatalf("tick asked %v", got)
+	}
+}
+
+// A start whose offer could not be sent placed nothing: its credential stays in use. An answer that could not be
+// delivered answered nothing either.
+func TestFailedSendsKeepTheCredential(t *testing.T) {
+	is := &fakeIssuer{exp: t0.Add(6 * time.Hour)}
+	p := poolWith(is)
+	prime(p, t0)
+	f := New(Options{ICE: p})
+	h := featuretest.NewHost()
+	h.AddConnection("c1")
+	h.AddDevice("dev-app", "app")
+	h.DownConns["c1"] = true
+	sk, _ := suite.GeneratePrivateKey()
+	if r := featuretest.Call(f, h, t0, "app", "call.start", startBody("c1", sk.Public().Bytes())); r.OK() {
+		t.Fatal("a start to a connection that is down succeeded")
+	}
+	if len(p.creds) != PoolSize {
+		t.Fatalf("a start that sent nothing retired a credential: %d left", len(p.creds))
+	}
+	b := newSide("cA")
+	b.f = New(Options{ICE: p})
+	ok, _ := callwire.NewOfferKey()
+	ek := ok.Public().Bytes()
+	id := newCallID("cA")
+	featuretest.CallExp(b.f, b.h, t0, t0.Add(OfferTTL), "connection:cA", "call.offer", peerOffer("cA", id, "audio", ek))
+	b.h.DownConns["cA"] = true
+	enc, _, _ := callwire.Answer(ek, id)
+	featuretest.Call(b.f, b.h, t0.Add(time.Second), "app", "call.answer", answerBody("dev-app", id, enc))
+	if len(p.creds) != PoolSize {
+		t.Fatalf("an answer that was not delivered retired a credential: %d left", len(p.creds))
+	}
+}
+
+// The day's window: a request exactly 24 h old no longer counts.
+func TestPoolDayWindowEdge(t *testing.T) {
+	is := &fakeIssuer{}
+	p := poolWith(&emptyIssuer{is})
+	for h := range 6 {
+		for range 10 {
+			prime(p, t0.Add(time.Duration(h)*time.Hour))
+		}
+	}
+	if n := len(is.asked()); n != RequestsPerDay {
+		t.Fatalf("%d requests", n)
+	}
+	prime(p, t0.Add(24*time.Hour-time.Second))
+	if n := len(is.asked()); n != RequestsPerDay {
+		t.Fatal("asked before the first request was a day old")
+	}
+	prime(p, t0.Add(24*time.Hour))
+	if n := len(is.asked()); n != RequestsPerDay+1 {
+		t.Fatalf("at exactly a day: %d", n)
+	}
+}
+
+// An answer with no TURN URLs gives no TURN entry, whatever credentials it carries.
+func TestPoolWithoutTURNURLs(t *testing.T) {
+	p := poolWith(&noTurnIssuer{})
+	prime(p, t0)
+	servers, exp, _ := p.Servers(nil, "x", t0)
+	if len(servers) != 1 || servers[0].Username != "" || !exp.Equal(t0.Add(ICETTL)) {
+		t.Fatalf("%+v %v", servers, exp)
+	}
+}
+
+type noTurnIssuer struct{}
+
+func (noTurnIssuer) Credentials(context.Context, int) (*callswire.Answer, error) {
+	return &callswire.Answer{STUN: []string{"stun:h:3478"},
+		Credentials: []callswire.Credential{{Username: "u", Credential: "c", Exp: t0.Add(6 * time.Hour)}}}, nil
+}
+
+// The calls whose credential is remembered are bounded (MaxGiven): the oldest is forgotten (its retire then does
+// nothing), and a retire still finds the newest.
+func TestPoolGivenIsBounded(t *testing.T) {
+	is := &fakeIssuer{exp: t0.Add(6 * time.Hour)}
+	p := poolWith(is)
+	prime(p, t0)
+	for i := range MaxGiven + 1 {
+		_, _, _ = p.Servers(nil, "call-"+strconv.Itoa(i), t0)
+	}
+	if len(p.given) != MaxGiven || len(p.givenOrder) != MaxGiven {
+		t.Fatalf("%d given, %d in order", len(p.given), len(p.givenOrder))
+	}
+	p.Retire("call-0")
+	if len(p.creds) != PoolSize {
+		t.Fatal("a forgotten call retired a credential")
+	}
+	p.Retire("call-" + strconv.Itoa(MaxGiven))
+	if len(p.creds) != PoolSize-1 || len(p.givenOrder) != MaxGiven-1 {
+		t.Fatalf("the newest call's retire: %d credentials, %d in order", len(p.creds), len(p.givenOrder))
+	}
+}
+
+// The default jitter stays within ±20 %, and an injected one is held to it.
+func TestJitterRange(t *testing.T) {
+	w := 10 * time.Minute
+	for range 1000 {
+		if d := jittered(w, nil); d < 8*time.Minute || d > 12*time.Minute {
+			t.Fatalf("%v", d)
+		}
+	}
+	if d := jittered(w, func() float64 { return 0.9 }); d != 12*time.Minute {
+		t.Fatalf("clamp: %v", d)
 	}
 }

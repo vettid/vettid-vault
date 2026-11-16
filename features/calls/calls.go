@@ -137,9 +137,9 @@ var (
 	conns  = []string{vault.KindConnection}
 )
 
-// Unlocked implements vault.UnlockObserver: the pool asks for its credentials at the opening (§10.10: within 5 s
-// of unlock).
-func (f *Feature) Unlocked(s *vault.Session) { f.iceSrc.Prime(s, s.Now()) }
+// Opened implements vault.OpenObserver: the pool asks for its credentials at the opening, before the first collect
+// (§10.10: within 5 s of unlock).
+func (f *Feature) Opened(s *vault.Session) { f.iceSrc.Prime(s, s.Now()) }
 
 // Name implements vault.Feature.
 func (f *Feature) Name() string { return "calls" }
@@ -631,7 +631,9 @@ func (f *Feature) start(ctx context.Context, s *vault.Session, body []byte) (jso
 	}
 	f.calls[id] = &Call{ID: id, Conn: st.ConnectionID, Dir: DirOut, Media: st.Media, State: StateRinging, Device: s.From().ID,
 		Created: now, Exp: exp, Watched: st.Keepalive}
-	f.iceSrc.Retire(id) // placed: its credential serves this call alone
+	// Placed: its credential serves this call alone. A pool left short asks again at the next tick or configuration
+	// (at most a collect's wait later).
+	f.iceSrc.Retire(id)
 	f.prune(now)
 	s.Record(vault.Activity{Kind: "call.outgoing", ConnectionID: st.ConnectionID, Ref: id, Direction: DirOut, Audit: true})
 	f.clearUnanswered(s, st.ConnectionID, now) // a call the member places clears the counts
@@ -970,7 +972,9 @@ func (f *Feature) answerFromDevice(s *vault.Session, body []byte) error {
 		return unavailable(s, a.CallID)
 	}
 	c.State, c.Device, c.Answered, c.Watched = StateActive, s.From().ID, now, a.Keepalive
-	f.iceSrc.Retire(c.ID) // answered on this side: its credential serves this call alone
+	// Answered on this side (the answer was delivered: one that could not be sent ended the call unanswered, and its
+	// credential stays in use): it serves this call alone.
+	f.iceSrc.Retire(c.ID)
 	f.notRinging(c.ID)
 	f.clearUnanswered(s, c.Conn, now) // an answered call from the connection clears the counts
 	f.alive[c.ID] = now               // the 90 s count from the answer until the first keep-alive

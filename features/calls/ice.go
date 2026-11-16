@@ -45,7 +45,8 @@ const (
 	MaxGiven = 16
 )
 
-// backoff is the wait after the nth failed attempt in a row (each ±20 %), then 30 minutes between attempts.
+// backoff is the wait after the nth failed attempt in a row (each ±20 %), then 30 minutes between attempts (not
+// jittered: §10.10 jitters the first three only).
 var backoff = []time.Duration{time.Minute, 5 * time.Minute, 15 * time.Minute}
 
 const backoffAfter = 30 * time.Minute
@@ -137,16 +138,10 @@ func (p *Pool) fetch(is vault.CallsIssuer, count int, at time.Time, done chan st
 	if err != nil {
 		w := backoffAfter
 		if p.failures < len(backoff) {
-			w = backoff[p.failures]
+			w = jittered(backoff[p.failures], p.Jitter)
 		}
 		p.failures++
-		j := 0.0
-		if p.Jitter != nil {
-			j = p.Jitter()
-		} else {
-			j = rand.Float64()*0.4 - 0.2
-		}
-		p.next = at.Add(time.Duration(float64(w) * (1 + j)))
+		p.next = at.Add(w)
 		return
 	}
 	p.failures, p.next = 0, time.Time{}
@@ -157,6 +152,16 @@ func (p *Pool) fetch(is vault.CallsIssuer, count int, at time.Time, done chan st
 			p.creds = append(p.creds, c)
 		}
 	}
+}
+
+// jittered is w stretched or shortened by jitter() (default: random), a factor kept within [-0.2, 0.2].
+func jittered(w time.Duration, jitter func() float64) time.Duration {
+	j := rand.Float64()*0.4 - 0.2
+	if jitter != nil {
+		j = jitter()
+	}
+	j = max(-0.2, min(0.2, j))
+	return time.Duration(float64(w) * (1 + j))
 }
 
 // Servers implements ICESource: one entry with the STUN URLs and, if the pool has a usable credential and TURN

@@ -86,6 +86,9 @@ func (c *ConnAuthChallenge) CheckDocument() (*CheckedDocument, string) {
 	if err != nil {
 		return nil, DocEncoding
 	}
+	if len(doc) > MaxDocument {
+		return nil, DocSize // still check 1: before document_required, which is check 2
+	}
 	// document_required, when present, is true (check 2).
 	required := false
 	if c.reqRaw != nil {
@@ -128,7 +131,7 @@ func CheckDocumentBytes(doc []byte, context string, required bool) (*CheckedDocu
 	if !strings.HasSuffix(context, DocumentRef(d)) {
 		return nil, DocRef
 	}
-	return &CheckedDocument{doc: doc, d: d, required: required}, ""
+	return &CheckedDocument{doc: append([]byte(nil), doc...), d: d, required: required}, ""
 }
 
 // DocumentRef is the 16 lower-case hex digits of d[0:8] a document's challenge's context ends with.

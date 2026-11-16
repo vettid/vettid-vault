@@ -105,3 +105,57 @@ func TestAppFeaturesToldAgainUntilEveryoneIs(t *testing.T) {
 }
 
 var _ AppFeaturesObserver = (*appFeaturesStub)(nil) // a drifted signature would silently tell nothing
+
+// batchChanger marks the state changed at a batch's end once, when armed.
+type batchChanger struct{ armed bool }
+
+func (b *batchChanger) Name() string                   { return "batchchanger" }
+func (b *batchChanger) Types() []TypeSpec              { return nil }
+func (b *batchChanger) Load(json.RawMessage) error     { return nil }
+func (b *batchChanger) Save() (json.RawMessage, error) { return nil, nil }
+func (b *batchChanger) Handle(context.Context, *Session, *envelope.Inner) (json.RawMessage, error) {
+	return nil, nil
+}
+func (b *batchChanger) BatchEnd(s *Session) {
+	if b.armed {
+		b.armed = false
+		s.StateChanged()
+	}
+}
+
+// A feature's change at a batch's end (Session.StateChanged) is written by that batch, an empty one included; an
+// idle batch with nothing changed writes nothing. And a retry that reaches nobody writes nothing.
+func TestBatchEndChangesAreWrittenAndIdleBatchesAreNot(t *testing.T) {
+	d := newDevFixture(t)
+	b := &batchChanger{}
+	d.m.addFeature(b)
+	o := &appFeaturesStub{fail: 1000}
+	d.m.addFeature(o)
+	empty := func() { _ = d.m.ProcessBatch(context.Background(), &fakeCollector{}, nil) }
+	empty()
+	seq := d.m.st.StateSeq
+	empty()
+	if d.m.st.StateSeq != seq {
+		t.Fatalf("an idle batch wrote the state: %d -> %d", seq, d.m.st.StateSeq)
+	}
+	b.armed = true
+	empty()
+	if d.m.st.StateSeq == seq {
+		t.Fatal("a batch-end change was not written")
+	}
+	// The app lists the name; the observer never reaches anyone: the first batch records it pending, and the
+	// retries after it write nothing.
+	p := d.m.st.Devices[d.devPeer.ID]
+	d.m.mu.Lock()
+	d.m.noteFeatures(p, []string{"approval_document", "hs_confirm"})
+	d.m.mu.Unlock()
+	empty()
+	seq = d.m.st.StateSeq
+	told := o.told
+	for range 5 {
+		empty()
+	}
+	if d.m.st.StateSeq != seq || o.told != told+5 || !d.m.st.AppDocumentPending {
+		t.Fatalf("retries wrote the state: %d -> %d, told %d", seq, d.m.st.StateSeq, o.told-told)
+	}
+}

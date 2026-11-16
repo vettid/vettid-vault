@@ -170,3 +170,39 @@ func TestApprovalDocumentToldAgainAfterAFailedSend(t *testing.T) {
 		t.Fatalf("not told when it could be: %v", e.h.Sent)
 	}
 }
+
+// Retries against a service that cannot be reached change nothing: no version taken, no state changed. A service
+// whose rotation is pending is not one to retry: the rotation sends it the update.
+func TestApprovalDocumentRetriesChangeNothing(t *testing.T) {
+	e := newEnv(t)
+	c := e.h.Conns["cB"]
+	c.PeerKind = "service"
+	e.h.Conns["cB"] = c
+	e.ok(e.call("app", "profile.set", `{"version":0,"name":"Al"}`))
+	shared := func() string {
+		raw, _ := e.set.Items.Save()
+		i := strings.Index(string(raw), `"shared":`)
+		return string(raw)[i : i+12]
+	}
+	before, changed := shared(), e.h.Changed
+	e.h.AppFeatures = []string{"approval_document"}
+	e.h.DownConns["cB"] = true
+	s := vault.NewSession(context.Background(), e.h, vault.PeerInfo{}, e.clk.T, nil)
+	for range 5 {
+		if e.set.Items.AppFeaturesChanged(s) {
+			t.Fatal("reported told")
+		}
+	}
+	if shared() != before || e.h.Changed != changed {
+		t.Fatalf("retries changed the state: %s -> %s, changed %d", before, shared(), e.h.Changed-changed)
+	}
+	// Rotation pending: not counted as not told, and nothing is sent to it now.
+	e.h.DownConns["cB"] = false
+	c = e.h.Conns["cB"]
+	c.RotationPending = true
+	e.h.Conns["cB"] = c
+	e.h.Reset()
+	if !e.set.Items.AppFeaturesChanged(s) || len(e.sentTo("cB", "profile.update")) != 0 {
+		t.Fatalf("rotation pending: %v", e.h.Sent)
+	}
+}

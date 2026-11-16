@@ -65,8 +65,12 @@ func (m *Manager) syncAppFeatures(now time.Time) {
 		return
 	}
 	all := m.notifyAppFeatures(now)
-	m.st.AppDocumentTold, m.st.AppDocumentPending = cur, !all
-	m.dirty = true
+	// Written only when what is recorded changes (a feature that sent something marks its own change): a retry
+	// that reached nobody writes nothing.
+	if m.st.AppDocumentTold != cur || m.st.AppDocumentPending == all {
+		m.st.AppDocumentTold, m.st.AppDocumentPending = cur, !all
+		m.dirty = true
+	}
 }
 
 func (m *Manager) notifyAppFeatures(now time.Time) bool {

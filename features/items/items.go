@@ -226,6 +226,8 @@ type Feature struct {
 	st     state
 	// peerFeatures are the names advertised to service connections.
 	peerFeatures []string
+	// coreMissingNoted: profile.core_missing was audited for the core now missing (once, not at every retry).
+	coreMissingNoted bool
 	// appGated are names advertised to service connections only while the member's app lists them in its last
 	// features (approval_document, 0.89.0, §10.4 "Approval documents"): not sticky.
 	appGated []string

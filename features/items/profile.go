@@ -213,48 +213,55 @@ func (f *Feature) Unlocked(s *vault.Session) {
 // whose last sent `contract` differs from this image's, a value never sent
 // included. Both at one unlock go in one update.
 func (f *Feature) advertise(s *vault.Session) (allTold bool) {
-	bumped := false
+	// The next version is taken only by an update that went out: a pass whose sends all fail (a connection with no
+	// session or suspended on fork evidence, tried again at the next batch's end) changes nothing, the version
+	// included, so a retry writes nothing either.
+	next := f.st.Profile.Shared + 1
+	sent := false
 	allTold = true
 	for _, c := range s.Connections() {
-		if c.State != vault.PeerActive {
-			continue
-		}
-		if c.RotationPending {
-			// Told after the rotation (ConnectionRotated): until then the service may hold the old names.
-			if c.IsService() && !sameNames(f.st.Profile.Advertised[c.ID], f.namesFor(s, c)) {
-				allTold = false
-			}
+		// A connection whose rotation is pending gets the update with the new ik when its epoch is active
+		// (ConnectionRotated): not one to retry here.
+		if c.State != vault.PeerActive || c.RotationPending {
 			continue
 		}
 		if sameNames(f.st.Profile.Advertised[c.ID], f.namesFor(s, c)) && !f.contractDue(c) {
 			continue
 		}
 		if f.st.Profile.Core == nil {
-			return true // no shared profile yet: the connection's first update carries them
+			return allTold // no shared profile yet: the connection's first update carries them
 		}
-		if !bumped {
-			f.st.Profile.Shared++
-			bumped = true
+		var body []byte
+		var ok bool
+		if c.IsService() {
+			body, ok = f.serviceBody(s, next)
+		} else {
+			body, ok = f.updateBody(s, next)
 		}
-		if !c.IsService() {
-			body, ok := f.updateBody(s, f.st.Profile.Shared)
-			if !ok {
-				s.Record(vault.Activity{Kind: "profile.core_missing", Audit: true})
-				return false
-			}
-			if s.SendToConnection(c.ID, "profile.update", body) == nil {
-				f.setAdvertisedNames(c.ID, vault.CoreFeatures())
-			}
-			continue
-		}
-		body, ok := f.serviceBody(s, f.st.Profile.Shared)
 		if !ok {
-			s.Record(vault.Activity{Kind: "profile.core_missing", Audit: true})
+			if !f.coreMissingNoted { // audited once, not at every retry
+				f.coreMissingNoted = true
+				s.Record(vault.Activity{Kind: "profile.core_missing", Audit: true})
+			}
 			return false
 		}
-		if !f.sendService(s, c.ID, body) {
-			allTold = false // tried again at the next batch's end
+		f.coreMissingNoted = false
+		var done bool
+		if c.IsService() {
+			done = f.sendService(s, c.ID, body)
+		} else if done = s.SendToConnection(c.ID, "profile.update", body) == nil; done {
+			f.setAdvertisedNames(c.ID, vault.CoreFeatures())
 		}
+		if !done {
+			allTold = false // tried again at the next batch's end
+			continue
+		}
+		if !sent {
+			f.st.Profile.Shared, sent = next, true
+		}
+	}
+	if sent {
+		s.StateChanged() // the version and the names sent are the feature's state
 	}
 	return allTold
 }

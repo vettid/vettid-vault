@@ -27,7 +27,10 @@ type attestFn = func(pub ed25519.PublicKey, d [32]byte) ([]byte, error)
 func setup(t *testing.T) (*Server, *httptest.Server, *enclavetest.FakeNSM) {
 	spec := enclavetest.Spec(3, "")
 	nsm := enclavetest.NewFakeNSM(spec.PCR0, spec.PCR1, spec.PCR2, time.Now)
-	s := New(Config{Roots: enclavetest.TestNitroCA().Roots(), PCR0s: []string{spec.PCR0Hex()}})
+	// The stand-in's clock is fixed at the start (whole seconds): what it stamps does not depend on when the test
+	// reads the wall clock, which a runner may step. Signatures and documents stay within their freshness windows.
+	at := time.Now().Truncate(time.Second)
+	s := New(Config{Roots: enclavetest.TestNitroCA().Roots(), PCR0s: []string{spec.PCR0Hex()}, Now: func() time.Time { return at }})
 	srv := httptest.NewServer(s)
 	t.Cleanup(srv.Close)
 	return s, srv, nsm
@@ -50,7 +53,6 @@ func code(err error) string {
 func TestClientGetsValidAnswer(t *testing.T) {
 	s, srv, nsm := setup(t)
 	c := client(srv, func(pub ed25519.PublicKey, d [32]byte) ([]byte, error) { return nsm.Attest(d[:], nil, pub) })
-	before := time.Now()
 	a, err := c.Credentials(context.Background(), 3)
 	if err != nil {
 		t.Fatal(err)
@@ -62,7 +64,7 @@ func TestClientGetsValidAnswer(t *testing.T) {
 	for _, cr := range a.Credentials {
 		exp, rnd, ok := strings.Cut(cr.Username, ":")
 		if !ok || exp != strconv.FormatInt(cr.Exp.Unix(), 10) || len(rnd) != 22 || seen[cr.Username] ||
-			cr.Exp.Sub(before) > Lifetime || cr.Exp.Sub(before) < Lifetime-time.Minute {
+			!cr.Exp.Equal(s.cfg.Now().Add(Lifetime)) {
 			t.Fatalf("credential %q exp %v", cr.Username, cr.Exp)
 		}
 		seen[cr.Username] = true

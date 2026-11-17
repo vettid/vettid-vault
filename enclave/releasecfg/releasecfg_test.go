@@ -106,7 +106,7 @@ func TestCommittedFiles(t *testing.T) {
 			if len(f.Config.VoteSiteKey) != 32 || len(f.Config.VoteTrustRoots) != 1 || len(f.Config.VoteTrustRoots[0].Logs) == 0 || len(f.Config.VoteTrustRoots[0].TSAs) == 0 {
 				t.Fatalf("staging vote constants: %d %d", len(f.Config.VoteSiteKey), len(f.Config.VoteTrustRoots))
 			}
-			if base64.StdEncoding.EncodeToString(f.Config.VoteSiteKey) != "c4dqg2ssGVylbO9Xnpdv4zopmzx9S++4KgxMWOyhXJQ=" {
+			if base64.StdEncoding.EncodeToString(f.Config.VoteSiteKey) != "m3x8G8MlAnzaOoHr0eg0M2j38mE4d15hkNekqdOAios=" {
 				t.Fatal("staging vote_site_key")
 			}
 		} else if f.Config.VoteSiteKey != nil || f.Config.VoteTrustRoots != nil {

@@ -1,6 +1,6 @@
 {
   "channel": "staging",
-  "release": 31,
+  "release": 32,
   "manifest_keys": [
     "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEok8gqeC5VcGx4KL+B5fL7UgENBXf+59RigkR0TZ0NqjiWM2VK6V1+paNoqRTBx7nXXN3L/2ehjsTb31GGVkEAw=="
   ],
@@ -33,7 +33,7 @@
     "vote",
     "wallet"
   ],
-  "vote_site_key": "c4dqg2ssGVylbO9Xnpdv4zopmzx9S++4KgxMWOyhXJQ=",
+  "vote_site_key": "m3x8G8MlAnzaOoHr0eg0M2j38mE4d15hkNekqdOAios=",
   "vote_trust_roots": [
     {
       "mediaType": "application/vnd.dev.sigstore.trustedroot+json;version=0.1",

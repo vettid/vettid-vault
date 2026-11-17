@@ -1,6 +1,6 @@
 {
   "channel": "staging",
-  "release": 30,
+  "release": 31,
   "manifest_keys": [
     "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEok8gqeC5VcGx4KL+B5fL7UgENBXf+59RigkR0TZ0NqjiWM2VK6V1+paNoqRTBx7nXXN3L/2ehjsTb31GGVkEAw=="
   ],
@@ -20,6 +20,7 @@
   ],
   "relay_url": "https://relay.vettid.org",
   "push_url": "https://push.staging.vettid.org",
+  "calls_url": "https://calls.staging.vettid.org",
   "android_package": "com.vettid.app.staging",
   "ios_app_id": "3X25CJ86MV.com.vettid.app.staging",
   "features": [

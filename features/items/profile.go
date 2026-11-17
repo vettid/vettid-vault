@@ -116,19 +116,20 @@ func (f *Feature) sendTo(s *vault.Session, id string) {
 
 // sendService sends a service connection its profile.update and, when it
 // is queued, records the feature names it carried (§10.8 `features`).
-func (f *Feature) sendService(s *vault.Session, id string, body []byte) {
+func (f *Feature) sendService(s *vault.Session, id string, body []byte) bool {
 	if s.SendToConnection(id, "profile.update", body) != nil {
-		return
+		return false
 	}
-	f.setAdvertised(id)
+	f.setAdvertised(s, id)
 	if f.st.Profile.Contract == nil {
 		f.st.Profile.Contract = map[string]string{}
 	}
 	f.st.Profile.Contract[id] = f.contract
+	return true
 }
 
-func (f *Feature) setAdvertised(id string) {
-	f.setAdvertisedNames(id, f.serviceNames())
+func (f *Feature) setAdvertised(s *vault.Session, id string) {
+	f.setAdvertisedNames(id, f.serviceNames(s))
 }
 
 func (f *Feature) setAdvertisedNames(id string, names []string) {
@@ -143,9 +144,15 @@ func (f *Feature) setAdvertisedNames(id string, names []string) {
 }
 
 // serviceNames are the names a service connection is told (§10.8): the
-// optional features it can use and the runtime's own (hs_confirm, 0.86.0).
-func (f *Feature) serviceNames() []string {
+// optional features it can use, the runtime's own (hs_confirm, 0.86.0), and
+// (0.89.0) each app-gated name the member's app lists now.
+func (f *Feature) serviceNames(s *vault.Session) []string {
 	names := append(append([]string(nil), f.peerFeatures...), vault.CoreFeatures()...)
+	for _, n := range f.appGated {
+		if s.AppFeature(n) {
+			names = append(names, n)
+		}
+	}
 	sort.Strings(names)
 	out := names[:0]
 	for i, n := range names {
@@ -157,9 +164,9 @@ func (f *Feature) serviceNames() []string {
 }
 
 // namesFor are the names connection c is told (§10.8).
-func (f *Feature) namesFor(c vault.PeerInfo) []string {
+func (f *Feature) namesFor(s *vault.Session, c vault.PeerInfo) []string {
 	if c.IsService() {
-		return f.serviceNames()
+		return f.serviceNames(s)
 	}
 	return vault.CoreFeatures()
 }
@@ -205,40 +212,58 @@ func (f *Feature) Unlocked(s *vault.Session) {
 // for its features too), and (0.90.10, trigger 5) each service connection
 // whose last sent `contract` differs from this image's, a value never sent
 // included. Both at one unlock go in one update.
-func (f *Feature) advertise(s *vault.Session) {
-	bumped := false
+func (f *Feature) advertise(s *vault.Session) (allTold bool) {
+	// The next version is taken only by an update that went out: a pass whose sends all fail (a connection with no
+	// session or suspended on fork evidence, tried again at the next batch's end) changes nothing, the version
+	// included, so a retry writes nothing either.
+	next := f.st.Profile.Shared + 1
+	sent := false
+	allTold = true
 	for _, c := range s.Connections() {
+		// A connection whose rotation is pending gets the update with the new ik when its epoch is active
+		// (ConnectionRotated): not one to retry here.
 		if c.State != vault.PeerActive || c.RotationPending {
 			continue
 		}
-		if sameNames(f.st.Profile.Advertised[c.ID], f.namesFor(c)) && !f.contractDue(c) {
+		if sameNames(f.st.Profile.Advertised[c.ID], f.namesFor(s, c)) && !f.contractDue(c) {
 			continue
 		}
 		if f.st.Profile.Core == nil {
-			return // no shared profile yet: the connection's first update carries them
+			return allTold // no shared profile yet: the connection's first update carries them
 		}
-		if !bumped {
-			f.st.Profile.Shared++
-			bumped = true
+		var body []byte
+		var ok bool
+		if c.IsService() {
+			body, ok = f.serviceBody(s, next)
+		} else {
+			body, ok = f.updateBody(s, next)
 		}
-		if !c.IsService() {
-			body, ok := f.updateBody(s, f.st.Profile.Shared)
-			if !ok {
+		if !ok {
+			if !f.coreMissingNoted { // audited once, not at every retry
+				f.coreMissingNoted = true
 				s.Record(vault.Activity{Kind: "profile.core_missing", Audit: true})
-				return
 			}
-			if s.SendToConnection(c.ID, "profile.update", body) == nil {
-				f.setAdvertisedNames(c.ID, vault.CoreFeatures())
-			}
+			return false
+		}
+		f.coreMissingNoted = false
+		var done bool
+		if c.IsService() {
+			done = f.sendService(s, c.ID, body)
+		} else if done = s.SendToConnection(c.ID, "profile.update", body) == nil; done {
+			f.setAdvertisedNames(c.ID, vault.CoreFeatures())
+		}
+		if !done {
+			allTold = false // tried again at the next batch's end
 			continue
 		}
-		body, ok := f.serviceBody(s, f.st.Profile.Shared)
-		if !ok {
-			s.Record(vault.Activity{Kind: "profile.core_missing", Audit: true})
-			return
+		if !sent {
+			f.st.Profile.Shared, sent = next, true
 		}
-		f.sendService(s, c.ID, body)
 	}
+	if sent {
+		s.StateChanged() // the version and the names sent are the feature's state
+	}
+	return allTold
 }
 
 // contractDue reports whether c is a service connection whose last sent
@@ -266,7 +291,7 @@ func (f *Feature) serviceBody(s *vault.Session, v uint64) ([]byte, bool) {
 	b.Raw("items", []byte("[]"))
 	// §10.8 (0.81.0): the names of the optional features a service can
 	// use and (0.86.0) hs_confirm, sorted, each once.
-	b.Raw("features", featuresJSON(f.serviceNames()))
+	b.Raw("features", featuresJSON(f.serviceNames(s)))
 	// §10.8 (0.90.10): the contract this image implements, to a service only.
 	b.String("contract", f.contract)
 	return peerwire.ProfileUpdateBody(v, c.FirstName, c.LastName, c.IK, b.Bytes()), true

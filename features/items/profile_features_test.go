@@ -112,3 +112,97 @@ func toConn(h *featuretest.Host, id string) []featuretest.Sent {
 	}
 	return out
 }
+
+// §10.4 "Approval documents" (0.89.0): approval_document goes to a service in profile.update's features only while
+// the member's app lists it in its last device.features, and is not sticky: it comes and goes with the app's
+// list, each change sent once with the next version.
+func TestApprovalDocumentAdvertisedWhileTheAppListsIt(t *testing.T) {
+	e := newEnv(t)
+	c := e.h.Conns["cB"]
+	c.PeerKind = "service"
+	e.h.Conns["cB"] = c
+	e.ok(e.call("app", "profile.set", `{"version":0,"name":"Al"}`))
+	if svc := e.sentTo("cB", "profile.update"); len(svc) != 1 || strings.Contains(string(svc[0].Body), "approval_document") {
+		t.Fatalf("before the app lists it: %v", svc)
+	}
+	changed := func() []featuretest.Sent {
+		e.h.Reset()
+		e.set.Items.AppFeaturesChanged(vault.NewSession(context.Background(), e.h, vault.PeerInfo{}, e.clk.T, nil))
+		return e.sentTo("cB", "profile.update")
+	}
+	e.h.AppFeatures = []string{"approval_document", "hs_confirm"}
+	if svc := changed(); len(svc) != 1 || !strings.Contains(string(svc[0].Body), `"features":["approval_document","hs_confirm","vote"]`) ||
+		!strings.Contains(string(svc[0].Body), `"version":2`) {
+		t.Fatalf("listed: %v", svc)
+	}
+	// A person is never told.
+	if per := e.sentTo("cA", "profile.update"); len(per) != 0 {
+		t.Fatalf("a person was told: %v", per)
+	}
+	// Once only.
+	if svc := changed(); len(svc) != 0 {
+		t.Fatalf("again: %v", svc)
+	}
+	// Not sticky: the app's list no longer carries it.
+	e.h.AppFeatures = []string{"hs_confirm"}
+	if svc := changed(); len(svc) != 1 || strings.Contains(string(svc[0].Body), "approval_document") || !strings.Contains(string(svc[0].Body), `"version":3`) {
+		t.Fatalf("dropped: %v", svc)
+	}
+}
+
+// A service that could not be told keeps the change pending: AppFeaturesChanged reports it, and tells it when it
+// can.
+func TestApprovalDocumentToldAgainAfterAFailedSend(t *testing.T) {
+	e := newEnv(t)
+	c := e.h.Conns["cB"]
+	c.PeerKind = "service"
+	e.h.Conns["cB"] = c
+	e.ok(e.call("app", "profile.set", `{"version":0,"name":"Al"}`))
+	e.h.AppFeatures = []string{"approval_document"}
+	s := vault.NewSession(context.Background(), e.h, vault.PeerInfo{}, e.clk.T, nil)
+	e.h.DownConns["cB"] = true
+	if e.set.Items.AppFeaturesChanged(s) {
+		t.Fatal("reported told after a failed send")
+	}
+	e.h.DownConns["cB"] = false
+	e.h.Reset()
+	if !e.set.Items.AppFeaturesChanged(s) || len(e.sentTo("cB", "profile.update")) != 1 {
+		t.Fatalf("not told when it could be: %v", e.h.Sent)
+	}
+}
+
+// Retries against a service that cannot be reached change nothing: no version taken, no state changed. A service
+// whose rotation is pending is not one to retry: the rotation sends it the update.
+func TestApprovalDocumentRetriesChangeNothing(t *testing.T) {
+	e := newEnv(t)
+	c := e.h.Conns["cB"]
+	c.PeerKind = "service"
+	e.h.Conns["cB"] = c
+	e.ok(e.call("app", "profile.set", `{"version":0,"name":"Al"}`))
+	shared := func() string {
+		raw, _ := e.set.Items.Save()
+		i := strings.Index(string(raw), `"shared":`)
+		return string(raw)[i : i+12]
+	}
+	before, changed := shared(), e.h.Changed
+	e.h.AppFeatures = []string{"approval_document"}
+	e.h.DownConns["cB"] = true
+	s := vault.NewSession(context.Background(), e.h, vault.PeerInfo{}, e.clk.T, nil)
+	for range 5 {
+		if e.set.Items.AppFeaturesChanged(s) {
+			t.Fatal("reported told")
+		}
+	}
+	if shared() != before || e.h.Changed != changed {
+		t.Fatalf("retries changed the state: %s -> %s, changed %d", before, shared(), e.h.Changed-changed)
+	}
+	// Rotation pending: not counted as not told, and nothing is sent to it now.
+	e.h.DownConns["cB"] = false
+	c = e.h.Conns["cB"]
+	c.RotationPending = true
+	e.h.Conns["cB"] = c
+	e.h.Reset()
+	if !e.set.Items.AppFeaturesChanged(s) || len(e.sentTo("cB", "profile.update")) != 0 {
+		t.Fatalf("rotation pending: %v", e.h.Sent)
+	}
+}

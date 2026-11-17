@@ -21,7 +21,11 @@ package connauth
 import (
 	"context"
 	"crypto/ed25519"
+	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
+	"slices"
 	"sort"
 	"sync"
 	"time"
@@ -68,7 +72,18 @@ type Challenge struct {
 	// peerwire.ConnAuthChallengeTTL after it arrived; it counts toward
 	// MaxLongLivedIn for as long as it is held.
 	Long bool `json:"long,omitempty"`
+	// Document (0.89.0, §10.4 "Approval documents") is the checked document of an approval challenge from a
+	// service, kept (sealed, as vault state) with the ask and erased when it closes; nil for none.
+	Document []byte `json:"document,omitempty"`
+	// DocumentRequired: the challenge was document_required (not signed).
+	DocumentRequired bool `json:"document_required,omitempty"`
+	// Fetched are the devices that fetched the document (connection.authenticate.document), kept with the ask:
+	// only the approving device's own fetch counts.
+	Fetched []string `json:"fetched,omitempty"`
 }
+
+// docHash is the challenge's document's d.
+func (c *Challenge) docHash() [32]byte { return sha256.Sum256(c.Document) }
 
 // State is the last outcome with one connection.
 type State struct {
@@ -125,6 +140,11 @@ func (f *Feature) Types() []vault.TypeSpec {
 	return []vault.TypeSpec{
 		{Type: "connection.authenticate.request", Request: true, From: owners},
 		{Type: "connection.authenticate.approve", Request: true, From: apps},
+		// (0.89.0) The document of an open approval: the same devices, sessions and held state as pending.list.
+		// Volatile (§8.2): the answer is never cached, so the document is not kept in the response cache after the
+		// ask closes ("erased when the ask closes"); a retransmission fetches again, and the fetch record it adds
+		// to is a set, so running it twice changes nothing.
+		{Type: "connection.authenticate.document", Request: true, Volatile: true, From: owners},
 		{Type: "connection.authenticate.deny", Request: true, From: owners},
 		{Type: "connection.authenticate.list", Request: true, From: owners},
 		{Type: peerwire.TypeConnAuthChallenge, From: conns, Connections: vault.PeersBoth}, // a service's needs a known purpose (vault.dispatch)
@@ -183,11 +203,26 @@ var (
 	// its first unlock from storage, and only then do the connections
 	// learn the new key.
 	errMoveUnfinished = vault.NewError("transfer_incomplete", "")
+	// errNotFetched (0.89.0): an approval with the document's hash from a device that has not fetched it.
+	errNotFetched = vault.NewError("document_not_fetched", "")
+	// errUpdateRequired (0.89.0): an approval without the document's hash on a document_required challenge.
+	errUpdateRequired = vault.NewError("update_required", "")
 )
 
 // wire is the challenge's body.
 func (c *Challenge) wire() *peerwire.ConnAuthChallenge {
 	return &peerwire.ConnAuthChallenge{RequestID: c.ID, Nonce: c.Nonce, Context: c.Context, Purpose: c.Purpose, MatchCode: c.MatchCode}
+}
+
+// BatchEnd implements vault.BatchEndObserver: closed asks expire at each batch's end too, not only at the next
+// connauth message, so that an expired approval's document leaves the vault's state promptly ("erased when the ask
+// closes", §10.4 "Approval documents").
+func (f *Feature) BatchEnd(s *vault.Session) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.expire(s.Now()) {
+		s.StateChanged() // written at the next flush, also on a vault with nothing else to write
+	}
 }
 
 // Handle implements vault.Handler.
@@ -202,6 +237,8 @@ func (f *Feature) Handle(_ context.Context, s *vault.Session, in *envelope.Inner
 		return nil, f.challenge(s, in)
 	case "connection.authenticate.approve":
 		return f.approve(s, in.Body)
+	case "connection.authenticate.document":
+		return f.document(s, in.Body)
 	case "connection.authenticate.deny":
 		return f.deny(s, in.Body)
 	case peerwire.TypeConnAuthResponse:
@@ -217,17 +254,22 @@ func (f *Feature) Handle(_ context.Context, s *vault.Session, in *envelope.Inner
 	return nil, vault.NewError("unsupported_type", "")
 }
 
-func (f *Feature) expire(now time.Time) {
+// expire drops the closed challenges; it reports whether it dropped any.
+func (f *Feature) expire(now time.Time) bool {
+	dropped := false
 	for id, c := range f.d.Out {
 		if !now.Before(c.Exp) {
 			delete(f.d.Out, id)
+			dropped = true
 		}
 	}
 	for id, c := range f.d.In {
 		if !now.Before(c.Exp) {
 			delete(f.d.In, id)
+			dropped = true
 		}
 	}
+	return dropped
 }
 
 func count(m map[string]*Challenge, conn string) int {
@@ -302,6 +344,17 @@ func (f *Feature) challenge(s *vault.Session, in *envelope.Inner) error {
 	c := &Challenge{ID: wc.RequestID, Nonce: wc.Nonce, Context: wc.Context, Purpose: wc.Purpose, MatchCode: wc.MatchCode}
 	conn := s.From().ID
 	now := s.Now()
+	// §10.4 "Approval documents" (0.89.0): document and document_required count only on an approval challenge from
+	// a service connection, and are ignored on any other. A document that fails the checks drops the challenge,
+	// audited, before anything else: no answer, no bucket, no place.
+	if wc.HasDocument() && c.Purpose == peerwire.PurposeApproval && s.From().IsService() {
+		doc, reason := wc.CheckDocument()
+		if reason != "" {
+			s.Record(vault.Activity{Kind: "drop.approval_document", ConnectionID: conn, Ref: conn + " " + reason, Audit: true})
+			return nil
+		}
+		c.Document, c.DocumentRequired = doc.Bytes(), doc.Required()
+	}
 	if _, dup := f.d.In[c.ID]; dup {
 		return nil
 	}
@@ -380,7 +433,34 @@ func (c *Challenge) pendingBody() []byte {
 	if c.MatchCode != "" {
 		b.String("match_code", c.MatchCode)
 	}
+	if c.Document != nil {
+		// Never the document itself (connection.authenticate.document fetches it).
+		d := c.docHash()
+		b.Base64("document_sha256", d[:]).Uint("document_size", uint64(len(c.Document)))
+		if c.DocumentRequired {
+			b.Bool("document_required", true)
+		}
+	}
 	return b.Bytes()
+}
+
+// document: an owner device fetches an open approval's document (0.89.0). The answer is the document whenever
+// pending.list lists the ask for that device; not_found for an unknown, decided, expired or withdrawn request_id,
+// and for a challenge without a document. The unlock window is not needed. The fetching device is recorded with
+// the ask.
+func (f *Feature) document(s *vault.Session, body []byte) (json.RawMessage, error) {
+	id, err := requestID(body)
+	if err != nil {
+		return nil, err
+	}
+	c := f.d.In[id]
+	if c == nil || c.Document == nil || !s.Now().Before(c.Exp) {
+		return nil, errNotFound
+	}
+	if dev := s.From().ID; !slices.Contains(c.Fetched, dev) {
+		c.Fetched = append(c.Fetched, dev)
+	}
+	return strictjson.NewBuilder().Base64("document", c.Document).Bytes(), nil
 }
 
 // OpenAsks implements vault.PendingAskSource (§10.4.2): the received
@@ -461,6 +541,23 @@ func requestID(body []byte) (string, error) {
 	return id, nil
 }
 
+// documentHash reads an approval's optional document_sha256 (0.89.0): 32 bytes of standard base64, or nil when
+// absent; malformed is bad_request.
+func documentHash(body []byte) ([]byte, error) {
+	o, err := strictjson.ParseObject(body)
+	if err != nil {
+		return nil, errBad
+	}
+	if !o.Has("document_sha256") {
+		return nil, nil
+	}
+	d, err := o.Base64("document_sha256", sha256.Size)
+	if err != nil {
+		return nil, errBad
+	}
+	return d, nil
+}
+
 // approve: the member signs the challenge with the credential key, which
 // is usable only within the unlock window (§3.5.3).
 func (f *Feature) approve(s *vault.Session, body []byte) (json.RawMessage, error) {
@@ -476,6 +573,28 @@ func (f *Feature) approve(s *vault.Session, body []byte) (json.RawMessage, error
 	if !ok || peer.State != vault.PeerActive {
 		delete(f.d.In, id)
 		return nil, errConn
+	}
+	// §10.4 "Approving" (0.89.0): after not_found, the decision table; every row that answers a code leaves the
+	// challenge open and signs nothing.
+	sent, err := documentHash(body)
+	if err != nil {
+		return nil, err
+	}
+	docForm := false
+	switch {
+	case c.Document == nil && sent != nil:
+		return nil, errBad
+	case c.Document != nil && sent != nil:
+		d := c.docHash()
+		if subtle.ConstantTimeCompare(sent, d[:]) != 1 {
+			return nil, errBad
+		}
+		if !slices.Contains(c.Fetched, s.From().ID) {
+			return nil, errNotFetched
+		}
+		docForm = true
+	case c.Document != nil && c.DocumentRequired:
+		return nil, errUpdateRequired
 	}
 	if s.KeyRotationHeld() {
 		// A transfer's statement is held until the new phone's first
@@ -498,7 +617,19 @@ func (f *Feature) approve(s *vault.Session, body []byte) (json.RawMessage, error
 	if prev := f.d.Shown[c.Conn]; len(prev) > 0 && !suite.EqualPublic(prev, pub) {
 		seg = f.segment(prev) // lets the requester follow rotations it missed
 	}
-	r, err := peerwire.SignConnAuth(key, peer.IK, s.IdentityKey(), c.wire(), s.Now(), seg)
+	var r *peerwire.ConnAuthResponse
+	if docForm {
+		// The kept document is checked again for this challenge before anything is signed over it: only a
+		// checked document can be (it was checked at arrival; state could have been tampered with since only by
+		// whoever can write it, but the signature must never rest on that).
+		checked, reason := peerwire.CheckDocumentBytes(c.Document, c.Context, c.DocumentRequired)
+		if reason != "" {
+			return nil, vault.NewError("internal", "")
+		}
+		r, err = peerwire.SignConnAuthDocument(key, peer.IK, s.IdentityKey(), c.wire(), checked, s.Now(), seg)
+	} else {
+		r, err = peerwire.SignConnAuth(key, peer.IK, s.IdentityKey(), c.wire(), s.Now(), seg)
+	}
 	if err != nil {
 		return nil, vault.NewError("internal", "")
 	}
@@ -512,6 +643,12 @@ func (f *Feature) approve(s *vault.Session, body []byte) (json.RawMessage, error
 	}
 	delete(f.d.In, id)
 	s.Record(vault.Activity{Kind: "connection.authenticate.signed", ConnectionID: c.Conn, Ref: id, Direction: "out", Audit: true})
+	if docForm {
+		// The member's record of exactly what they signed; the document itself is not kept.
+		d := c.docHash()
+		s.Record(vault.Activity{Kind: "connection.authenticate.document_signed", ConnectionID: c.Conn,
+			Ref: id + " " + hex.EncodeToString(d[:]), Direction: "out", Audit: true})
+	}
 	s.SyncEvent("connection.authenticate.decided", strictjson.NewBuilder().String("request_id", id).Bool("approved", true).Bytes())
 	return nil, nil
 }

@@ -137,6 +137,8 @@ func NewSet(o Options) *Set {
 	// inclusions are grants; agent rules are LEASH grants (§10.7, §10.11,
 	// §10.12).
 	it := items.New(cred)
+	// (0.89.0) Approval documents (connauth): told to services while the member's app lists the name.
+	it.SetAppGatedFeatures([]string{vault.FeatureApprovalDocument})
 	cred.AddDeleteObserver(it)
 	cred.SetItemRekeyer(it) // credential.rotate and .recover re-key every critical item
 	gr := grants.New(it)
@@ -218,6 +220,7 @@ var (
 	_ credential.DeleteObserver           = (*vote.Feature)(nil)
 	_ credential.KeyRotationBatchObserver = (*connauth.Feature)(nil)
 	_ vote.Auth                           = (*connauth.Feature)(nil)
+	_ vault.AppFeaturesObserver           = (*items.Feature)(nil) // approval_document (0.89.0)
 	_ vault.KeyRotationSender             = (*credential.Feature)(nil)
 )
 

@@ -32,6 +32,59 @@ func CoreFeatures() []string { return []string{handshake.CapConfirm} }
 // (§10.8, §10.19.1).
 const featureVote = "vote"
 
+// FeatureApprovalDocument (0.89.0, §10.4 "Approval documents") is advertised to a service connection in
+// profile.update's features while this image implements approval documents and the last list of the member's app
+// carries the name (not sticky). The same name as the release capability.
+const FeatureApprovalDocument = altchan.CapApprovalDocument
+
+// appFeature reports whether the last list of the vault's active app carries name.
+func (m *Manager) appFeature(name string) bool {
+	for _, p := range m.st.Devices {
+		if p.Kind == KindApp && p.State == PeerActive && slices.Contains(p.LastFeatures, name) {
+			return true
+		}
+	}
+	return false
+}
+
+// AppFeaturesObserver is implemented by features that act when the names the member's app lists change in a way
+// that matters (approval_document, 0.89.0): the items feature sends the services a profile.update.
+type AppFeaturesObserver interface {
+	// AppFeaturesChanged reports whether every connection it tells now has the current names; false: it is told
+	// again at the next batch's end.
+	AppFeaturesChanged(s *Session) bool
+}
+
+// syncAppFeatures tells AppFeaturesObserver features when whether the app lists approval_document differs from
+// what every connection was last told (State.AppDocumentTold): after any change to it, whether the app's list
+// changed or the devices did (a pairing, a transfer, a recovery, a removal). Run at each batch's end; the value is
+// recorded only once every observer has told every connection, so a send that failed is tried again.
+func (m *Manager) syncAppFeatures(now time.Time) {
+	cur := m.appFeature(FeatureApprovalDocument)
+	if cur == m.st.AppDocumentTold && !m.st.AppDocumentPending {
+		return
+	}
+	all := m.notifyAppFeatures(now)
+	// Written only when what is recorded changes (a feature that sent something marks its own change): a retry
+	// that reached nobody writes nothing.
+	if m.st.AppDocumentTold != cur || m.st.AppDocumentPending == all {
+		m.st.AppDocumentTold, m.st.AppDocumentPending = cur, !all
+		m.dirty = true
+	}
+}
+
+func (m *Manager) notifyAppFeatures(now time.Time) bool {
+	all := true
+	for _, f := range m.features {
+		if o, ok := f.(AppFeaturesObserver); ok {
+			if !o.AppFeaturesChanged(m.session(now)) {
+				all = false
+			}
+		}
+	}
+	return all
+}
+
 // TypeDeviceFeatures is a device's receiving-side capabilities (§10.2).
 const TypeDeviceFeatures = "device.features"
 
@@ -109,6 +162,10 @@ func (m *Manager) noteFeatures(p *Peer, names []string) {
 	}
 	if p == nil || names == nil || !envelope.ValidFeatures(names) {
 		return
+	}
+	if p.Kind != KindConnection && !slices.Equal(p.LastFeatures, names) {
+		p.LastFeatures = slices.Clone(names)
+		m.dirty = true // features are told at the batch's end (syncAppFeatures)
 	}
 	if p.PeerFeatures == nil {
 		p.PeerFeatures = []string{}

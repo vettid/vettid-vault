@@ -35,6 +35,10 @@ const (
 	// rekey's epoch pending until the device confirms it, toward a device
 	// that sends hs_confirm in device.features.
 	CapHSConfirm = "hs_confirm"
+	// CapApprovalDocument (0.89.0): §10.4 "Approval documents": the vault checks, keeps and serves an approval's
+	// document and signs the document form; it also advertises the name to service connections while the
+	// member's app lists it in device.features.
+	CapApprovalDocument = "approval_document"
 )
 
 // Bounds on a capability list (§11.10.9).
@@ -49,9 +53,9 @@ const (
 // recovery_offered, compiled into the image like every release constant).
 func ReleaseCapabilities(offered bool) []string {
 	if offered {
-		return []string{CapAttachments, CapHSConfirm, CapRecoveryOffered, CapRecoveryR, CapVoteRows}
+		return []string{CapApprovalDocument, CapAttachments, CapHSConfirm, CapRecoveryOffered, CapRecoveryR, CapVoteRows}
 	}
-	return []string{CapAttachments, CapHSConfirm, CapRecoveryR, CapVoteRows}
+	return []string{CapApprovalDocument, CapAttachments, CapHSConfirm, CapRecoveryR, CapVoteRows}
 }
 
 // HasCapability reports whether caps names c.

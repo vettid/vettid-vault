@@ -118,12 +118,19 @@ regexes = [
 
 # The staging vote site key (VAULT-MESSAGING 0.81.0): the PUBLIC Ed25519 key
 # that verifies votes.staging.vettid.org's service list. Public by design.
+# Since release 32 it is the KMS site key of the votes site's fresh start
+# (votes docs/STAGING-FLAG-DAY.md; owner go GC #13262). The retired key
+# (c4dqg2ss…) stays listed only because CI scans the whole history.
 [[allowlists]]
 description = "staging vote site public key"
 condition = "AND"
-paths = ['''enclave/releasecfg/staging\.json''']
+targetRules = ["generic-api-key"]
+paths = ['''^enclave/releasecfg/staging\.json$''']
 regexTarget = "match"
-regexes = ['''c4dqg2ssGVylbO9Xnpdv4zopmzx9S\+\+4KgxMWOyhXJQ=''']
+regexes = [
+  '''m3x8G8MlAnzaOoHr0eg0M2j38mE4d15hkNekqdOAios=''',
+  '''c4dqg2ssGVylbO9Xnpdv4zopmzx9S\+\+4KgxMWOyhXJQ=''',
+]
 
 # Rekey, desktop and relay vectors (vettid-vault #186): the rekey.json
 # message ids, fixed example ULIDs (not secrets) that the generic rule

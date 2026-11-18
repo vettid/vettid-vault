@@ -11,8 +11,8 @@ import (
 )
 
 // The vectors of VAULT-MESSAGING §16 "§10.19 votes", copied byte for byte
-// from vettid/service-vault vote/testdata/vectors.json at be57292
-// (BALLOT-PROTOCOL 0.14.1 §11, sha256 ff9fcf78...28c4). The file is
+// from vettid/service-vault vote/testdata/vectors.json at 1e68f04
+// (BALLOT-PROTOCOL 0.15.0 §11, sha256 8044bb07...5cdf). The file is
 // authoritative: a vector that stops matching is a stop-and-report item
 // (BALLOT-PROTOCOL §11), never a reason to edit the file here.
 const vectorsFile = "../../testdata/vote/vectors.json"
@@ -46,14 +46,15 @@ type vectors struct {
 		ReceiptSig string `json:"receipt_sig"`
 		StatusMsg  string `json:"status_msg"`
 		StatusSig  string `json:"status_sig"`
-		Refusal    struct {
-			Connection  string `json:"connection"`
-			Type        string `json:"type"`
-			Code        string `json:"code"`
-			RequestHash string `json:"request_hash"`
-			Msg         string `json:"msg"`
-			Sig         string `json:"sig"`
-		} `json:"refusal"`
+		// The status answer's connection and status_msg_ms (0.15.0).
+		Connection  string        `json:"connection"`
+		StatusMsgMS uint64        `json:"status_msg_ms"`
+		Refusal     refusalVector `json:"refusal"`
+		// A cast's refusal for a proposal not held (the zero hash and
+		// H(ballot_leaf)), and a vote.status refused unknown_proposal (the
+		// zero hash and H(proposal_id)) (0.15.0).
+		RefusalNotHeld       refusalVector `json:"refusal_not_held"`
+		RefusalStatusUnknown refusalVector `json:"refusal_status_unknown"`
 	} `json:"service"`
 	Merkle []struct {
 		Leaves []string   `json:"leaves"`
@@ -78,6 +79,18 @@ type vectors struct {
 	// A canonical proposal whose removed_may_vote is true, which every
 	// verifier refuses (0.14.1).
 	ProposalRemovedMayVote string `json:"proposal_removed_may_vote_true"`
+}
+
+// refusalVector is a refusal of §11 item 1 (0.15.0: it signs its
+// proposal_hash and the proposal_id).
+type refusalVector struct {
+	ProposalHash string `json:"proposal_hash"`
+	Connection   string `json:"connection"`
+	Type         string `json:"type"`
+	Code         string `json:"code"`
+	RequestHash  string `json:"request_hash"`
+	Msg          string `json:"msg"`
+	Sig          string `json:"sig"`
 }
 
 // docVectors is §11 item 3: a vote's documents as the service builds and
@@ -224,26 +237,34 @@ func TestBallotVectors(t *testing.T) {
 		t.Error("a receipt for another msg_ms verifies")
 	}
 
-	sm, _ := StatusMsg(v.ProposalID, tag, leaf)
+	conn := hx(t, v.Service.Connection)
+	sm, _ := StatusMsg(ph, conn, tag, leaf, v.Service.StatusMsgMS)
 	same(t, "status_msg", sm, v.Service.StatusMsg)
 	same(t, "status_sig", ed25519.Sign(ssk, append([]byte(LabelStatus), sm...)), v.Service.StatusSig)
-	if err := VerifyStatus(ik, v.ProposalID, tag, leaf, hx(t, v.Service.StatusSig)); err != nil {
+	if err := VerifyStatus(ik, ph, conn, tag, leaf, v.Service.StatusMsgMS, hx(t, v.Service.StatusSig)); err != nil {
 		t.Errorf("status: %v", err)
 	}
-	if VerifyStatus(ik, v.ProposalID, tag, nil, hx(t, v.Service.StatusSig)) == nil {
+	if VerifyStatus(ik, ph, conn, tag, nil, v.Service.StatusMsgMS, hx(t, v.Service.StatusSig)) == nil {
 		t.Error("a status answer with a ballot verifies as one without")
+	}
+	if VerifyStatus(ik, ph, conn, tag, leaf, v.Service.StatusMsgMS+1, hx(t, v.Service.StatusSig)) == nil {
+		t.Error("a status answer verifies at another status_msg_ms")
+	}
+	if VerifyStatus(ik, H([]byte("another proposal")), conn, tag, leaf, v.Service.StatusMsgMS, hx(t, v.Service.StatusSig)) == nil {
+		t.Error("a status answer verifies for another proposal")
 	}
 
 	r := v.Service.Refusal
 	rq := hx(t, r.RequestHash)
 	same(t, "refusal request_hash = H(ballot_leaf)", H(leaf), r.RequestHash)
-	rf, err := RefusalMsg(v.ProposalID, hx(t, r.Connection), tag, r.Type, r.Code, v.Service.MsgMS, rq)
+	same(t, "refusal proposal_hash", ph, r.ProposalHash)
+	rf, err := RefusalMsg(hx(t, r.ProposalHash), v.ProposalID, hx(t, r.Connection), tag, r.Type, r.Code, v.Service.MsgMS, rq)
 	if err != nil {
 		t.Fatal(err)
 	}
 	same(t, "refusal msg", rf, r.Msg)
 	same(t, "refusal sig", ed25519.Sign(ssk, append([]byte(LabelRefusal), rf...)), r.Sig)
-	ref := &Refusal{RefusalSig: hx(t, r.Sig), MsgMS: v.Service.MsgMS, Connection: hx(t, r.Connection), RecordTag: tag}
+	ref := &Refusal{RefusalSig: hx(t, r.Sig), ProposalHash: hx(t, r.ProposalHash), MsgMS: v.Service.MsgMS, Connection: hx(t, r.Connection), RecordTag: tag}
 	conns := [][]byte{bytes.Repeat([]byte{9}, 32), hx(t, r.Connection)}
 	if err := ref.Verify(ik, v.ProposalID, r.Type, r.Code, rq, conns, tag); err != nil {
 		t.Errorf("refusal: %v", err)
@@ -253,6 +274,8 @@ func TestBallotVectors(t *testing.T) {
 		"other tag":        func(x *Refusal) { x.RecordTag = bytes.Repeat([]byte{7}, 32) },
 		"other time":       func(x *Refusal) { x.MsgMS++ },
 		"unsigned":         func(x *Refusal) { x.RefusalSig = nil },
+		"other hash":       func(x *Refusal) { x.ProposalHash = H([]byte("another proposal")) },
+		"short hash":       func(x *Refusal) { x.ProposalHash = x.ProposalHash[:31] },
 	} {
 		c := *ref
 		mod(&c)
@@ -269,11 +292,32 @@ func TestBallotVectors(t *testing.T) {
 	if ref.Verify(ik, v.ProposalID, r.Type, r.Code, rq, nil, tag) == nil {
 		t.Error("a refusal for an unknown connection verifies")
 	}
-	// An empty tag in the refusal is accepted when signed as empty.
-	rf0, _ := RefusalMsg(v.ProposalID, hx(t, r.Connection), nil, "vote.status", "not_eligible", 5, H([]byte(v.ProposalID)))
-	e := &Refusal{RefusalSig: ed25519.Sign(ssk, append([]byte(LabelRefusal), rf0...)), MsgMS: 5, Connection: hx(t, r.Connection)}
-	if err := e.Verify(ik, v.ProposalID, "vote.status", "not_eligible", H([]byte(v.ProposalID)), conns, nil); err != nil {
-		t.Errorf("refusal with no tag: %v", err)
+	if ref.Verify(ik, "01JBQZ0000000000000000000B", r.Type, r.Code, rq, conns, tag) == nil {
+		t.Error("a refusal verifies for another proposal_id")
+	}
+	// The two zero-hash refusals (0.15.0): a cast's for a proposal not held,
+	// and a vote.status refused unknown_proposal, each with no tag.
+	for name, z := range map[string]refusalVector{"not held": v.Service.RefusalNotHeld, "status unknown": v.Service.RefusalStatusUnknown} {
+		same(t, name+": zero hash", NoProposal(), z.ProposalHash)
+		zq := hx(t, z.RequestHash)
+		zm, err := RefusalMsg(NoProposal(), v.ProposalID, hx(t, z.Connection), nil, z.Type, z.Code, v.Service.MsgMS, zq)
+		if err != nil {
+			t.Fatal(err)
+		}
+		same(t, name+" msg", zm, z.Msg)
+		same(t, name+" sig", ed25519.Sign(ssk, append([]byte(LabelRefusal), zm...)), z.Sig)
+		zr := &Refusal{RefusalSig: hx(t, z.Sig), ProposalHash: NoProposal(), MsgMS: v.Service.MsgMS, Connection: hx(t, z.Connection)}
+		if err := zr.Verify(ik, v.ProposalID, z.Type, z.Code, zq, conns, tag); err != nil || !zr.NoProposal() {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+	same(t, "not held: request_hash = H(ballot_leaf)", H(leaf), v.Service.RefusalNotHeld.RequestHash)
+	same(t, "status unknown: request_hash = H(proposal_id)", H([]byte(v.ProposalID)), v.Service.RefusalStatusUnknown.RequestHash)
+	// A zero hash is accepted only with unknown_proposal or not_eligible.
+	zb, _ := RefusalMsg(NoProposal(), v.ProposalID, hx(t, r.Connection), tag, r.Type, "bad_ballot", 5, rq)
+	zbr := &Refusal{RefusalSig: ed25519.Sign(ssk, append([]byte(LabelRefusal), zb...)), ProposalHash: NoProposal(), MsgMS: 5, Connection: hx(t, r.Connection), RecordTag: tag}
+	if zbr.Verify(ik, v.ProposalID, r.Type, "bad_ballot", rq, conns, tag) == nil {
+		t.Error("a zero-hash bad_ballot refusal verifies")
 	}
 }
 
@@ -282,12 +326,12 @@ func TestBallotVectors(t *testing.T) {
 func TestStatusWithoutBallotIsHashOfEmpty(t *testing.T) {
 	const emptyHash = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 	v := load(t)
-	m, err := StatusMsg(v.ProposalID, hx(t, v.RecordTag), nil)
+	m, err := StatusMsg(hx(t, v.ProposalHash), hx(t, v.Service.Connection), hx(t, v.RecordTag), nil, v.Service.StatusMsgMS)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if hex.EncodeToString(m[len(m)-32:]) != emptyHash {
-		t.Errorf("tail %x", m[len(m)-32:])
+	if hex.EncodeToString(m[len(m)-40:len(m)-8]) != emptyHash {
+		t.Errorf("leaf part %x", m[len(m)-40:len(m)-8])
 	}
 }
 

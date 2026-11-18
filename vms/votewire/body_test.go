@@ -242,6 +242,15 @@ func TestCastAnswer(t *testing.T) {
 	}
 }
 
+// statusConn and statusMS are the status answers' connection and
+// status_msg_ms here (BALLOT-PROTOCOL 0.15.0).
+var (
+	statusConn  = bytes.Repeat([]byte{6}, 32)
+	statusConns = [][]byte{bytes.Repeat([]byte{9}, 32), statusConn}
+)
+
+const statusMS = 1793606500456
+
 func statusBody(t *testing.T, v *vectors, withBallot bool, mut func(m map[string]any)) []byte {
 	t.Helper()
 	d := v.Documents
@@ -252,6 +261,7 @@ func statusBody(t *testing.T, v *vectors, withBallot bool, mut func(m map[string
 	tag, _ := RecordTag(id, secret)
 	m := map[string]any{
 		"proposal_id": id, "proposal": e64([]byte(d.Proposal)), "proposal_sig": e64(hx(t, d.ProposalSig)),
+		"connection": e64(statusConn), "status_msg_ms": statusMS,
 		"record_secret": e64(secret),
 		"record_proof":  map[string]any{"index": 0, "tree_size": 3, "path": []any{}},
 	}
@@ -265,7 +275,7 @@ func statusBody(t *testing.T, v *vectors, withBallot bool, mut func(m map[string
 		m["msg_ms"] = 1793606400123
 		m["receipt_sig"] = e64(ed25519.Sign(sk, append([]byte(LabelReceipt), rm...)))
 	}
-	sm, _ := StatusMsg(id, tag, leaf)
+	sm, _ := StatusMsg(ph, statusConn, tag, leaf, statusMS)
 	m["status_sig"] = e64(ed25519.Sign(sk, append([]byte(LabelStatus), sm...)))
 	if mut != nil {
 		mut(m)
@@ -283,7 +293,7 @@ func TestStatusAnswer(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := a.VerifySig(ik, php); err != nil {
+		if err := a.VerifySig(ik, statusConns); err != nil {
 			t.Errorf("ballot=%v: %v", withBallot, err)
 		}
 		if a.Bundle != nil {
@@ -299,18 +309,31 @@ func TestStatusAnswer(t *testing.T) {
 		} else {
 			c.Ballot = &RowBallot{VK: make([]byte, 32), ChoiceID: "yes", BallotSig: make([]byte, 64)}
 		}
-		if c.VerifySig(ik, php) == nil {
+		if c.VerifySig(ik, statusConns) == nil {
 			t.Errorf("ballot=%v: the signature verifies for the other form", withBallot)
 		}
 	}
 	a, _ := ParseStatusAnswer(statusBody(t, v, true, nil))
 	a.MsgMS++
-	if a.VerifySig(ik, php) == nil {
+	if a.VerifySig(ik, statusConns) == nil {
 		t.Error("a receipt for another msg_ms verifies")
 	}
 	a.MsgMS--
-	if a.VerifySig(ik, H([]byte("another proposal"))) == nil {
-		t.Error("verifies against another held proposal")
+	// (0.15.0) The signature binds the answer's own proposal, connection and
+	// status_msg_ms, and the connection must be one of the vault's own.
+	for name, mod := range map[string]func(x *StatusAnswer){
+		"another proposal":      func(x *StatusAnswer) { x.Proposal = append([]byte{}, append(x.Proposal, ' ')...) },
+		"another status_msg_ms": func(x *StatusAnswer) { x.StatusMsgMS++ },
+		"another connection":    func(x *StatusAnswer) { x.Connection = bytes.Repeat([]byte{5}, 32) },
+	} {
+		c := *a
+		mod(&c)
+		if c.VerifySig(ik, statusConns) == nil {
+			t.Errorf("verifies with %s", name)
+		}
+	}
+	if a.VerifySig(ik, [][]byte{bytes.Repeat([]byte{9}, 32)}) == nil {
+		t.Error("verifies for a connection not the vault's")
 	}
 	// The reviewer's input: a correctly signed status_sig and receipt over a
 	// ballot whose ballot_sig is 64 zero bytes.
@@ -318,13 +341,13 @@ func TestStatusAnswer(t *testing.T) {
 	tag, _ := a.Tag()
 	zero := &RowBallot{VK: a.Ballot.VK, ChoiceID: "yes", BallotSig: make([]byte, 64)}
 	zl, _ := zero.Ballot(tag).Leaf()
-	sm, _ := StatusMsg(a.ProposalID, tag, zl)
+	sm, _ := StatusMsg(php, statusConn, tag, zl, statusMS)
 	rm, _ := ReceiptMsg(php, zl, a.MsgMS)
 	z := *a
 	z.Ballot = zero
 	z.StatusSig = ed25519.Sign(sk, append([]byte(LabelStatus), sm...))
 	z.ReceiptSig = ed25519.Sign(sk, append([]byte(LabelReceipt), rm...))
-	if z.VerifySig(ik, php) == nil {
+	if z.VerifySig(ik, statusConns) == nil {
 		t.Error("a status answer with a garbage ballot_sig verifies")
 	}
 	if _, err := ParseStatusAnswer(statusBody(t, v, false, func(m map[string]any) { m["bundle"] = map[string]any{"x": 1} })); err != nil {
@@ -336,6 +359,10 @@ func TestStatusAnswer(t *testing.T) {
 		"receipt without ballot": func(m map[string]any) { delete(m, "ballot") },
 		"ballot without receipt": func(m map[string]any) { delete(m, "msg_ms"); delete(m, "receipt_sig") },
 		"no status_sig":          func(m map[string]any) { delete(m, "status_sig") },
+		"no connection":          func(m map[string]any) { delete(m, "connection") },
+		"short connection":       func(m map[string]any) { m["connection"] = e64(make([]byte, 31)) },
+		"no status_msg_ms":       func(m map[string]any) { delete(m, "status_msg_ms") },
+		"status_msg_ms a string": func(m map[string]any) { m["status_msg_ms"] = "1" },
 		"no proposal":            func(m map[string]any) { delete(m, "proposal") },
 		"ballot null":            func(m map[string]any) { m["ballot"] = nil },
 		"bad choice":             func(m map[string]any) { m["ballot"].(map[string]any)["choice_id"] = "Yes" },
@@ -349,14 +376,15 @@ func TestStatusAnswer(t *testing.T) {
 func TestRefusalBodyForms(t *testing.T) {
 	conn := e64(bytes.Repeat([]byte{1}, 32))
 	sig := e64(bytes.Repeat([]byte{2}, 64))
+	ph := e64(bytes.Repeat([]byte{8}, 32))
 	// An empty tag as the deployed service writes it, and an unsigned
 	// refusal (null signature).
 	for body, signed := range map[string]bool{
-		`{"refusal_sig":"` + sig + `","msg_ms":5,"connection":"` + conn + `","record_tag":""}`:   true,
-		`{"refusal_sig":"` + sig + `","msg_ms":5,"connection":"` + conn + `","record_tag":null}`: true,
-		`{"refusal_sig":"` + sig + `","msg_ms":5,"connection":"` + conn + `"}`:                   true,
-		`{"refusal_sig":null,"msg_ms":5,"connection":"` + conn + `","record_tag":""}`:            false,
-		`{"msg_ms":5,"connection":"` + conn + `"}`:                                               false,
+		`{"refusal_sig":"` + sig + `","proposal_hash":"` + ph + `","msg_ms":5,"connection":"` + conn + `","record_tag":""}`:   true,
+		`{"refusal_sig":"` + sig + `","proposal_hash":"` + ph + `","msg_ms":5,"connection":"` + conn + `","record_tag":null}`: true,
+		`{"refusal_sig":"` + sig + `","proposal_hash":"` + ph + `","msg_ms":5,"connection":"` + conn + `"}`:                   true,
+		`{"refusal_sig":null,"msg_ms":5,"connection":"` + conn + `","record_tag":""}`:                                         false,
+		`{"msg_ms":5,"connection":"` + conn + `"}`:                                                                            false,
 	} {
 		r, err := ParseRefusal([]byte(body))
 		if err != nil {
@@ -371,11 +399,15 @@ func TestRefusalBodyForms(t *testing.T) {
 		}
 	}
 	for _, body := range []string{
-		`{"refusal_sig":"` + sig + `","msg_ms":5,"connection":"AAAA"}`,
-		`{"refusal_sig":"AAAA","msg_ms":5,"connection":"` + conn + `"}`,
-		`{"refusal_sig":"` + sig + `","msg_ms":5,"connection":"` + conn + `","record_tag":"AAAA"}`,
-		`{"refusal_sig":"` + sig + `","connection":"` + conn + `"}`,
-		`{"refusal_sig":"` + sig + `","msg_ms":5,"connection":"` + conn + `","ballot":{"vk":"` + e64(make([]byte, 32)) + `","choice_id":"yes","ballot_sig":"` + sig + `"}}`,
+		`{"refusal_sig":"` + sig + `","proposal_hash":"` + ph + `","msg_ms":5,"connection":"AAAA"}`,
+		`{"refusal_sig":"AAAA","proposal_hash":"` + ph + `","msg_ms":5,"connection":"` + conn + `"}`,
+		`{"refusal_sig":"` + sig + `","proposal_hash":"` + ph + `","msg_ms":5,"connection":"` + conn + `","record_tag":"AAAA"}`,
+		`{"refusal_sig":"` + sig + `","proposal_hash":"` + ph + `","connection":"` + conn + `"}`,
+		`{"refusal_sig":"` + sig + `","proposal_hash":"` + ph + `","msg_ms":5,"connection":"` + conn + `","ballot":{"vk":"` + e64(make([]byte, 32)) + `","choice_id":"yes","ballot_sig":"` + sig + `"}}`,
+		// (0.15.0) A signed refusal carries its proposal_hash, of 32 bytes.
+		`{"refusal_sig":"` + sig + `","msg_ms":5,"connection":"` + conn + `"}`,
+		`{"refusal_sig":"` + sig + `","proposal_hash":"AAAA","msg_ms":5,"connection":"` + conn + `"}`,
+		`{"refusal_sig":"` + sig + `","proposal_hash":null,"msg_ms":5,"connection":"` + conn + `"}`,
 	} {
 		if _, err := ParseRefusal([]byte(body)); err == nil {
 			t.Errorf("accepted %s", body)
@@ -390,7 +422,8 @@ func TestRefusalExisting(t *testing.T) {
 	ph, tag := hx(t, v.ProposalHash), hx(t, v.RecordTag)
 	ik := hx(t, v.Service.IK)
 	body, _ := json.Marshal(map[string]any{
-		"refusal_sig": e64(bytes.Repeat([]byte{2}, 64)), "msg_ms": 9, "connection": e64(hx(t, v.Service.Refusal.Connection)), "record_tag": e64(tag),
+		"refusal_sig": e64(bytes.Repeat([]byte{2}, 64)), "proposal_hash": e64(ph), "msg_ms": 9,
+		"connection": e64(hx(t, v.Service.Refusal.Connection)), "record_tag": e64(tag),
 		"ballot":        map[string]any{"vk": e64(hx(t, v.VK)), "choice_id": "yes", "ballot_sig": e64(hx(t, v.BallotSig))},
 		"ballot_msg_ms": v.Service.MsgMS, "receipt_sig": e64(hx(t, v.Service.ReceiptSig)),
 	})
@@ -503,7 +536,8 @@ func TestPadIsIgnored(t *testing.T) {
 	}
 	// the already_voted refusal's ballot, with each form of pad
 	for _, pad := range []string{"", `,"pad":"0"`, `,"pad":"` + Pad("yes") + `"`, `,"pad":"` + strings.Repeat("0", 99) + `"`} {
-		raw := `{"refusal_sig":"` + e64(bytes.Repeat([]byte{2}, 64)) + `","msg_ms":9,"connection":"` + e64(hx(t, v.Service.Refusal.Connection)) +
+		raw := `{"refusal_sig":"` + e64(bytes.Repeat([]byte{2}, 64)) + `","proposal_hash":"` + e64(hx(t, v.ProposalHash)) +
+			`","msg_ms":9,"connection":"` + e64(hx(t, v.Service.Refusal.Connection)) +
 			`","record_tag":"` + e64(b.RecordTag) + `","ballot":{"vk":"` + e64(b.VK) + `","choice_id":"yes","ballot_sig":"` + e64(b.BallotSig) + `"` + pad +
 			`},"ballot_msg_ms":` + "1" + `,"receipt_sig":"` + e64(hx(t, v.Service.ReceiptSig)) + `"}`
 		if r, err := ParseRefusal([]byte(raw)); err != nil || r.Ballot == nil {

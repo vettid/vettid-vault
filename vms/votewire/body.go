@@ -347,13 +347,16 @@ func (b *RowBallot) Ballot(tag []byte) *Ballot {
 	return &Ballot{RecordTag: tag, VK: b.VK, ChoiceID: b.ChoiceID, BallotSig: b.BallotSig}
 }
 
-// StatusAnswer is the ok answer to vote.status: {proposal_id, proposal,
-// proposal_sig, bundle?, record_secret, record_proof, ballot?, msg_ms?,
-// receipt_sig?, status_sig}. `bundle` is absent until the proposal is
+// StatusAnswer is the ok answer to vote.status: {proposal_id, connection,
+// status_msg_ms, proposal, proposal_sig, bundle?, record_secret,
+// record_proof, ballot?, msg_ms?, receipt_sig?, status_sig}
+// (BALLOT-PROTOCOL 0.15.0 adds connection and status_msg_ms). `bundle` is absent until the proposal is
 // anchored; `ballot`, `msg_ms` and `receipt_sig` are present together or
 // all absent.
 type StatusAnswer struct {
 	ProposalID   string
+	Connection   []byte // H(the vault's identity key on the connection)
+	StatusMsgMS  uint64 // the relay's time of the vote.status request
 	Proposal     []byte
 	ProposalSig  []byte
 	Bundle       json.RawMessage // nil when absent
@@ -377,6 +380,12 @@ func ParseStatusAnswer(body []byte) (*StatusAnswer, error) {
 	a := &StatusAnswer{}
 	if a.ProposalID, err = proposalIDOf(o); err != nil {
 		return nil, err
+	}
+	if a.Connection, err = o.Base64("connection", HashLen); err != nil {
+		return nil, ErrBody
+	}
+	if a.StatusMsgMS, err = o.Uint("status_msg_ms", 0, strictjson.MaxSafeInteger); err != nil {
+		return nil, ErrBody
 	}
 	if a.Proposal, err = docOf(o, "proposal", MaxProposal); err != nil {
 		return nil, err
@@ -427,17 +436,21 @@ func ParseStatusAnswer(body []byte) (*StatusAnswer, error) {
 // record_secret).
 func (a *StatusAnswer) Tag() ([]byte, error) { return RecordTag(a.ProposalID, a.RecordSecret) }
 
-// VerifySig checks status_sig under the service's key over the answer's own
-// tag and ballot leaf (H("") when there is no ballot); when there is a
-// ballot, its ballot_sig under its vk and the receipt, both for the HELD
-// proposal's hash (§10.19.5). The proposal, its signature, bundle and proof
-// are checked by the caller as in §10.19.4 steps 2 to 6, and the caller
-// passes the hash of the proposal it holds, not the answer's.
-func (a *StatusAnswer) VerifySig(ik, proposalHash []byte) error {
+// VerifySig checks status_sig under the service's key (BALLOT-PROTOCOL
+// 0.15.0 §4.2): over H(the answer's own proposal), its `connection`, which
+// must be H of one of the vault's own identity keys on the connection
+// (current or earlier), its tag, its ballot leaf (H("") when there is no
+// ballot) and its status_msg_ms; when there is a ballot, its ballot_sig
+// under its vk and the receipt, for that same proposal hash (§10.19.5). The
+// proposal, its signature, bundle and proof are checked by the caller as in
+// §10.19.4 steps 2 to 6, and the caller compares the answer's proposal with
+// the one it holds, and status_msg_ms with its own deposits' relay times.
+func (a *StatusAnswer) VerifySig(ik []byte, connections [][]byte) error {
 	tag, err := a.Tag()
-	if err != nil || len(proposalHash) != HashLen {
+	if err != nil || !knownConnection(connections, a.Connection) {
 		return ErrSignature
 	}
+	proposalHash := H(a.Proposal)
 	var leaf []byte
 	if a.Ballot != nil {
 		b := a.Ballot.Ballot(tag)
@@ -451,7 +464,7 @@ func (a *StatusAnswer) VerifySig(ik, proposalHash []byte) error {
 			return err
 		}
 	}
-	if err := VerifyStatus(ik, a.ProposalID, tag, leaf, a.StatusSig); err != nil {
+	if err := VerifyStatus(ik, proposalHash, a.Connection, tag, leaf, a.StatusMsgMS, a.StatusSig); err != nil {
 		return err
 	}
 	if a.Ballot != nil {
@@ -464,13 +477,17 @@ func (a *StatusAnswer) VerifySig(ik, proposalHash []byte) error {
 // vote.status: {refusal_sig, msg_ms, connection, record_tag} and, for
 // already_voted, {ballot, ballot_msg_ms, receipt_sig}.
 type Refusal struct {
-	RefusalSig  []byte // nil: unsigned, which is no answer
-	MsgMS       uint64
-	Connection  []byte
-	RecordTag   []byte // nil: empty
-	Ballot      *RowBallot
-	BallotMsgMS uint64
-	ReceiptSig  []byte
+	RefusalSig []byte // nil: unsigned, which is no answer
+	// ProposalHash is the hash the refusal signs (BALLOT-PROTOCOL 0.15.0):
+	// the published proposal's under the id named, or NoProposal(). Nil for
+	// an unsigned refusal, which carries none.
+	ProposalHash []byte
+	MsgMS        uint64
+	Connection   []byte
+	RecordTag    []byte // nil: empty
+	Ballot       *RowBallot
+	BallotMsgMS  uint64
+	ReceiptSig   []byte
 }
 
 // optB64 reads an optional base64 member of n bytes that may also be null
@@ -497,6 +514,11 @@ func ParseRefusal(body []byte) (*Refusal, error) {
 	r := &Refusal{}
 	if r.RefusalSig, err = optB64(o, "refusal_sig", SigLen); err != nil {
 		return nil, ErrBody
+	}
+	if r.RefusalSig != nil {
+		if r.ProposalHash, err = o.Base64("proposal_hash", HashLen); err != nil {
+			return nil, ErrBody
+		}
 	}
 	if r.MsgMS, err = o.Uint("msg_ms", 0, strictjson.MaxSafeInteger); err != nil {
 		return nil, ErrBody
@@ -528,22 +550,47 @@ func ParseRefusal(body []byte) (*Refusal, error) {
 // the message of BALLOT-PROTOCOL §4.2 with the request's type, the error
 // code and request_hash (H(ballot_leaf) for vote.cast, H(proposal_id) for
 // vote.status), by the service's key.
+//
+// (BALLOT-PROTOCOL 0.15.0) The message begins with the refusal's own
+// `proposal_hash` and the vault's proposalID, so a refusal verifies only for
+// the id the vault asked about. A zero hash (NoProposal) is accepted only with
+// unknown_proposal or not_eligible. The caller compares the hash with the
+// proposal it holds: equal, the service's refusal of that proposal; zero, a
+// proposal the service doesn't hold published (kept and shown, not evidence);
+// another, a refusal signed for another version under that id (evidence).
 func (r *Refusal) Verify(ik []byte, proposalID, typ, code string, requestHash []byte, connections [][]byte, tag []byte) error {
-	if r.RefusalSig == nil {
+	if r.RefusalSig == nil || len(r.ProposalHash) != HashLen {
 		return ErrSignature
 	}
-	known := false
-	for _, c := range connections {
-		known = known || eq(c, r.Connection)
-	}
-	if !known || (len(r.RecordTag) != 0 && !eq(r.RecordTag, tag)) {
+	if r.NoProposal() && code != "unknown_proposal" && code != "not_eligible" {
 		return ErrSignature
 	}
-	m, err := RefusalMsg(proposalID, r.Connection, r.RecordTag, typ, code, r.MsgMS, requestHash)
+	if !knownConnection(connections, r.Connection) || (len(r.RecordTag) != 0 && !eq(r.RecordTag, tag)) {
+		return ErrSignature
+	}
+	m, err := RefusalMsg(r.ProposalHash, proposalID, r.Connection, r.RecordTag, typ, code, r.MsgMS, requestHash)
 	if err != nil {
 		return err
 	}
 	return Verify(ik, LabelRefusal, m, r.RefusalSig)
+}
+
+// NoProposal reports whether the refusal signs the zero hash: the service
+// holds no published proposal under the id named.
+func (r *Refusal) NoProposal() bool { return eq(r.ProposalHash, NoProposal()) }
+
+// knownConnection reports whether c is H of one of the vault's own identity
+// keys on the connection, current or earlier (the key may have rotated).
+func knownConnection(connections [][]byte, c []byte) bool {
+	if len(c) != HashLen {
+		return false
+	}
+	for _, k := range connections {
+		if eq(k, c) {
+			return true
+		}
+	}
+	return false
 }
 
 // VerifyExisting checks the ballot an already_voted refusal carries: its

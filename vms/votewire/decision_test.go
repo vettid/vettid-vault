@@ -3,7 +3,9 @@ package votewire
 import (
 	"bytes"
 	"crypto/ed25519"
+	"encoding/hex"
 	"encoding/json"
+	"os"
 	"testing"
 )
 
@@ -44,8 +46,8 @@ func raw(t *testing.T, v any) json.RawMessage {
 // Every outcome vector: Decide gives its outcome, or refuses its tally.
 func TestOutcomeVectors(t *testing.T) {
 	v := load(t)
-	if len(v.Outcomes) < 30 {
-		t.Fatalf("only %d outcome vectors", len(v.Outcomes))
+	if len(v.Outcomes) != 40 {
+		t.Fatalf("%d outcome vectors, want 40", len(v.Outcomes))
 	}
 	for _, c := range v.Outcomes {
 		p := &Proposal{Decision: c.Decision, Quorum: Quorum{MinBallots: c.MinBallots}, Eligible: c.Eligible, RemovedMayVote: c.RemovedMayVote}
@@ -71,6 +73,9 @@ func TestOutcomeVectors(t *testing.T) {
 // vector's, with that decision): parsed iff valid.
 func TestDecisionVectors(t *testing.T) {
 	v := load(t)
+	if len(v.Decisions) != 24 {
+		t.Fatalf("%d decision vectors, want 24", len(v.Decisions))
+	}
 	for _, c := range v.Decisions {
 		doc := withMembers(t, v.Documents.Proposal, map[string]json.RawMessage{
 			"decision": c.Decision, "removed_may_vote": raw(t, c.RemovedMayVote),
@@ -86,6 +91,9 @@ func TestDecisionVectors(t *testing.T) {
 // parses and is consistent in itself.
 func TestOutcomeShapeVectors(t *testing.T) {
 	v := load(t)
+	if len(v.OutcomeShapes) != 16 {
+		t.Fatalf("%d outcome shapes, want 16", len(v.OutcomeShapes))
+	}
 	for _, c := range v.OutcomeShapes {
 		doc := withMembers(t, v.DocumentsDecided.Results, map[string]json.RawMessage{"outcome": c.Outcome})
 		res, err := ParseResults(doc)
@@ -250,5 +258,24 @@ func TestDecideRefusesACountAboveTheBallots(t *testing.T) {
 	const big = int64(^uint64(0) >> 1)
 	if o, err := Decide(p, map[string]int64{"c1": big, "c2": big, "c3": 7, AbstainID: 0}, 5); err == nil {
 		t.Errorf("a tally that wraps decides: %+v", o)
+	}
+	// Nor with an eligible outside the proposal's bounds, so that the ballots
+	// (and the counts under them) can't be large enough to wrap.
+	p.Eligible = big
+	if o, err := Decide(p, map[string]int64{"c1": big / 2, "c2": big/2 + 1, "c3": 0, AbstainID: 0}, big); err == nil {
+		t.Errorf("an eligible beyond 100,000 decides: %+v", o)
+	}
+}
+
+// The vectors file is the one copied (BALLOT-PROTOCOL §11: never edited
+// here), checked by its hash as well as by its comment.
+func TestVectorsFileIsTheCopy(t *testing.T) {
+	b, err := os.ReadFile(vectorsFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const want = "ff9fcf784d5e95efcdec4e593ec9d6787f925e5887a1b6c0d5acd046744b28c4" // service-vault be57292
+	if got := hex.EncodeToString(H(b)); got != want {
+		t.Errorf("vectors.json sha256 %s, want %s: a changed copy is a stop-and-report item", got, want)
 	}
 }

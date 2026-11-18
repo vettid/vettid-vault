@@ -118,12 +118,19 @@ func (o Outcome) Equal(x Outcome) bool {
 // Decide computes the outcome (§7.1) from the proposal, the tally and the
 // number of ballots. It refuses a decision §3.5 doesn't allow, a tally that
 // doesn't name exactly the proposal's choices, a negative count, a sum other
-// than ballots, or more ballots than eligible members. Integers only: every
-// count is at most ballots, itself at most eligible (at most 100,000 in a
-// valid proposal), and den at most 10, so nothing overflows.
+// than ballots, or more ballots than eligible members, and a proposal outside
+// its bounds (eligible 1 to 100,000, at most 17 choices). Integers only:
+// every count is at most ballots, itself at most eligible, and den at most
+// 10, so nothing overflows, whatever the caller passes.
 func Decide(p *Proposal, tally map[string]int64, ballots int64) (Outcome, error) {
 	if err := p.Decision.Validate(); err != nil {
 		return Outcome{}, err
+	}
+	// The proposal's own bounds first (Validate checks them on arrival), so
+	// Decide is safe on its own: at most MaxEligible ballots and MaxChoices
+	// counts, each at most the ballots, sum to well under 2^63.
+	if p.Eligible < 1 || p.Eligible > MaxEligible || len(p.Choices) > MaxChoices {
+		return Outcome{}, ErrDocument
 	}
 	if len(tally) != len(p.Choices) || ballots < 0 || ballots > p.Eligible {
 		return Outcome{}, ErrDocument

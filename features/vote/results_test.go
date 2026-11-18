@@ -188,6 +188,12 @@ func TestResultsTable(t *testing.T) {
 		if r.Check != x.state || r.Results == nil {
 			t.Errorf("%s: not kept: %+v", x.name, r.Check)
 		}
+		// Kept results show their tally, counts and outcome only when the check
+		// verified them or left them unconfirmed, never when it failed.
+		g := obj(t, c.app("vote.get", pairBody("svc", v.ID)))
+		if shown := x.state != CheckFailed; g.Has("outcome") != shown || g.Has("tally") != shown || g.Has("counts") != shown {
+			t.Errorf("%s (%s): vote.get shows the results %v", x.name, x.state, g.Has("outcome"))
+		}
 		switch x.state {
 		case CheckFailed:
 			if !c.has("vote.check_failed", v.ID+":"+x.reason) || !c.has("vote.problem", v.ID) || !r.problem() {
@@ -245,8 +251,20 @@ func TestResultsFailures(t *testing.T) {
 		"a tally that does not sum to ballots": func(c *cenv, v *votetest.Vote) resOpts {
 			return resOpts{tamper: func(r *votewire.Results) { r.Tally["abstain"]++ }}
 		},
-		"negative counts": func(c *cenv, v *votetest.Vote) resOpts {
+		"negative unhandled": func(c *cenv, v *votetest.Vote) resOpts {
 			return resOpts{tamper: func(r *votewire.Results) { r.Counts.Unhandled = -1 }}
+		},
+		"negative removed": func(c *cenv, v *votetest.Vote) resOpts {
+			return resOpts{tamper: func(r *votewire.Results) { r.Counts.Removed = -1 }}
+		},
+		// A negative count in a tally that otherwise adds up, with the outcome
+		// a computation without the rule would give: only the rule refuses it.
+		"a negative count that sums": func(c *cenv, v *votetest.Vote) resOpts {
+			return resOpts{tamper: func(r *votewire.Results) {
+				r.Tally = map[string]int64{"yes": 2, "no": 2, "abstain": -1}
+				r.Counts.Ballots = 3
+				r.Outcome = votewire.Outcome{QuorumMet: true, Status: votewire.StatusNotDecided}
+			}}
 		},
 	}
 	for name, mk := range cases {
@@ -255,10 +273,7 @@ func TestResultsFailures(t *testing.T) {
 		if err != nil || out.State != CheckFailed || out.Reason != "results" {
 			t.Errorf("%s: %+v %v", name, out, err)
 		}
-		// Failed results show no tally, counts or outcome.
-		if g := obj(t, c.app("vote.get", pairBody("svc", v.ID))); g.Has("outcome") || g.Has("tally") || g.Has("counts") {
-			t.Errorf("%s: vote.get shows the failed results", name)
-		}
+
 	}
 }
 

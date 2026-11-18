@@ -308,13 +308,24 @@ func (f *Feature) Response(s *vault.Session, in *envelope.Inner) bool {
 		return true // after a restart: dropped, as an answer matching no request
 	}
 	delete(f.pend, in.Re)
+	before := f.get(ref.conn, ref.id)
+	wasProblem := before != nil && before.problem()
 	switch ref.kind {
 	case "cast":
-		if r := f.get(ref.conn, ref.id); r != nil && r.Ballot != nil {
+		if r := before; r != nil && r.Ballot != nil {
 			f.castAnswer(s, r, in)
 		}
 	case "status":
 		f.statusAnswer(s, ref, in)
+	}
+	// The answer whose arrival raised the record's problem is pinned among
+	// the kept answers: never evicted by those that follow.
+	if r := f.get(ref.conn, ref.id); r != nil && !wasProblem && r.problem() {
+		code := ""
+		if in.Status == envelope.StatusError && in.Error != nil {
+			code = in.Error.Code
+		}
+		r.pinAnswer(code, in.Body)
 	}
 	return true
 }
@@ -355,33 +366,48 @@ func (b *ballot) unansweredBefore(reqID string) bool {
 	return false
 }
 
-// heldBytes reports whether list holds exactly body.
-// keep adds a signed answer (a status answer or a refusal) to a list of
-// kept answers, at most votewire.MaxRefusalsKept. An answer that is the same
-// as one held but for the request's time and the signature over it (every
-// v2 answer carries a fresh status_msg_ms or msg_ms) is not kept again: the
-// first stays, so what the member exported does not change. When the list is
-// full, the oldest answer that is not evidence goes; one that is not
-// evidence never pushes out one that is. It reports whether the list changed.
-func (r *record) keep(list [][]byte, body []byte) ([][]byte, bool) {
+// keep adds a signed answer (a status answer or a refusal, with the error
+// code it came with) to a list of kept answers. An answer whose signed
+// content is the same as a held one's, code included, is not kept again
+// (answerKey: every v2 answer carries a fresh time and signature, and the
+// unsigned members prove nothing), so what the member exported does not
+// change. At most votewire.MaxRefusalsKept entries are kept apart from the
+// pinned ones (pinAnswer), which are never evicted. Over that, the oldest
+// unpinned one that is not evidence goes, else the oldest unpinned one; one
+// that is not evidence never pushes out one that is. It reports whether the
+// list changed.
+func (r *record) keep(list keptAnswers, code string, body []byte) (keptAnswers, bool) {
+	k := answerKey(code, body)
 	for _, x := range list {
-		if sameAnswer(x, body) {
+		if answerKey(x.Code, x.Body) == k {
 			return list, false
 		}
 	}
-	list = append(list, append([]byte{}, body...))
-	if len(list) <= votewire.MaxRefusalsKept {
+	list = append(list, keptAnswer{Code: code, Body: append([]byte{}, body...)})
+	n := 0
+	for _, x := range list {
+		if !x.Pinned {
+			n++
+		}
+	}
+	if n <= votewire.MaxRefusalsKept {
 		return list, true
 	}
-	drop := -1
+	drop, oldest := -1, -1
 	for i, x := range list {
-		if !r.evidenceAnswer(x) {
+		if x.Pinned {
+			continue
+		}
+		if oldest < 0 {
+			oldest = i
+		}
+		if !r.evidenceAnswer(x.Body) {
 			drop = i
 			break
 		}
 	}
 	if drop < 0 {
-		drop = 0 // all evidence: the oldest goes
+		drop = oldest // all evidence: the oldest unpinned goes
 	}
 	if drop == len(list)-1 {
 		return list[:len(list)-1], false // the new one is not evidence and all else is
@@ -389,46 +415,64 @@ func (r *record) keep(list [][]byte, body []byte) ([][]byte, bool) {
 	return append(list[:drop:drop], list[drop+1:]...), true
 }
 
-// answerTimeKeys are the members of a kept answer that change with each
-// request: the relay's time of the request and the signature over it.
-var answerTimeKeys = map[string]bool{"status_msg_ms": true, "status_sig": true, "refusal_sig": true}
+// pinAnswer marks the kept answer with that code and signed content as
+// one that raised the record's problem: it is never evicted.
+func (r *record) pinAnswer(code string, body []byte) {
+	k := answerKey(code, body)
+	pin := func(list keptAnswers) {
+		for i := range list {
+			if answerKey(list[i].Code, list[i].Body) == k {
+				list[i].Pinned = true
+			}
+		}
+	}
+	pin(r.StatusAnswers)
+	if r.Ballot != nil {
+		pin(r.Ballot.Refusals)
+	}
+}
 
-// sameAnswer reports whether two kept answers are the same but for the
-// request's time and signature.
-func sameAnswer(a, b []byte) bool {
-	oa, err := strictjson.ParseObject(a)
+// answerKey identifies a kept answer by what its signature covers
+// (BALLOT-PROTOCOL 0.15.0 §4.2) and its code: for a status answer, the
+// proposal, the connection, the tag (from proposal_id and record_secret)
+// and the ballot; for a refusal, the code, proposal_hash, the connection,
+// the tag and an already_voted ballot (signed by its own key). The time,
+// the signature over it, a receipt and every other member are left out. An
+// answer stored before 0.15.0 (or one that does not parse) is its bytes.
+func answerKey(code string, body []byte) string {
+	o, err := strictjson.ParseObject(body)
 	if err != nil {
-		return eq(a, b)
+		return "bytes|" + string(body)
 	}
-	ob, err := strictjson.ParseObject(b)
-	if err != nil {
-		return false
-	}
-	_, refusal := oa["refusal_sig"]
-	skip := func(k string) bool { return answerTimeKeys[k] || refusal && k == "msg_ms" }
-	n := 0
-	for k, v := range oa {
-		if skip(k) {
-			continue
+	ballot := func() string {
+		raw, ok := o["ballot"]
+		if !ok || string(raw) == "null" {
+			return ""
 		}
-		w, ok := ob[k]
-		if !ok || !eq(v, w) {
-			return false
+		b, err := strictjson.ParseObject(raw)
+		if err != nil {
+			return string(raw)
 		}
-		n++
+		return string(b["vk"]) + "|" + string(b["choice_id"]) + "|" + string(b["ballot_sig"])
 	}
-	for k := range ob {
-		if !skip(k) {
-			n--
+	if _, ok := o["refusal_sig"]; ok {
+		if _, v2 := o["proposal_hash"]; !v2 {
+			return "bytes|" + string(body)
 		}
+		return "refusal|" + code + "|" + string(o["proposal_hash"]) + "|" + string(o["connection"]) + "|" + string(o["record_tag"]) + "|" + ballot()
 	}
-	return n == 0
+	if _, v2 := o["status_msg_ms"]; !v2 {
+		return "bytes|" + string(body)
+	}
+	return "status|" + code + "|" + string(votewire.H(o["proposal"])) + "|" + string(o["connection"]) + "|" +
+		string(o["proposal_id"]) + "|" + string(o["record_secret"]) + "|" + ballot()
 }
 
 // evidenceAnswer reports whether a kept answer may be evidence: everything
-// but a status answer without a ballot for the held proposal and a refusal
-// under the zero hash (BALLOT-PROTOCOL 0.15.0 §8.3), the answers an honest
-// service repeats. An answer stored before 0.15.0 counts as evidence.
+// but a status answer for the held proposal carrying no ballot or the
+// vault's own (its receipt is the vault's already) and a refusal under the
+// zero hash (BALLOT-PROTOCOL 0.15.0 §8.3), the answers an honest service
+// repeats. An answer stored before 0.15.0 counts as evidence.
 func (r *record) evidenceAnswer(body []byte) bool {
 	o, err := strictjson.ParseObject(body)
 	if err != nil {
@@ -448,8 +492,19 @@ func (r *record) evidenceAnswer(body []byte) bool {
 	if err != nil || !eq(p, r.Proposal) {
 		return true
 	}
-	_, ballot := o["ballot"]
-	return ballot
+	raw, ok := o["ballot"]
+	if !ok || string(raw) == "null" {
+		return false
+	}
+	bo, err := strictjson.ParseObject(raw)
+	if err != nil {
+		return true
+	}
+	vk, _ := bo.Base64("vk", -1)
+	sig, _ := bo.Base64("ballot_sig", -1)
+	choice, _ := bo.String("choice_id")
+	b := r.Ballot
+	return b == nil || !eq(vk, b.VK) || choice != b.ChoiceID || !eq(sig, b.BallotSig)
 }
 
 // receipt records a verified receipt for the stored ballot: it always wins
@@ -569,7 +624,8 @@ func (f *Feature) keepShownRejected(s *vault.Session, r *record, sb *svcBallot, 
 	sb.Late, sb.LateRejected = true, true
 	r.ChangedMS = s.Now().UnixMilli()
 	f.shown(s, r, sb, answer, restore)
-	f.asideRejected(s, r)
+	// One vote.problem for the answer: none again if the ballot raised it.
+	f.asideRejected(s, r, r.problem())
 }
 
 // asideAfterFinal: once the results were judged finally, what is kept
@@ -688,17 +744,19 @@ func (f *Feature) rejectAsideFrom(s *vault.Session, r *record, from int64) {
 	if !hit {
 		return
 	}
-	f.asideRejected(s, r)
+	f.asideRejected(s, r, false)
 }
 
 // asideRejected follows a receipt rejected for its time: audited, the
 // problem raised once, and a restore's own-vk ballot judged as one.
-func (f *Feature) asideRejected(s *vault.Session, r *record) {
+func (f *Feature) asideRejected(s *vault.Session, r *record, raised bool) {
 	r.ChangedMS = s.Now().UnixMilli()
 	f.audit(s, "vote.receipt_rejected", r.Conn, r.ID)
 	if !r.AsideProblem {
 		r.AsideProblem = true
-		f.feed(s, "vote.problem", r.Conn, r.ID, "high")
+		if !raised {
+			f.feed(s, "vote.problem", r.Conn, r.ID, "high")
+		}
 		f.event(s, r, "problem")
 	}
 	if sb := r.ServiceBallot; sb != nil && sb.Late && sb.LateRejected && r.Ballot == nil {
@@ -758,12 +816,12 @@ func (f *Feature) castAnswer(s *vault.Session, r *record, in *envelope.Inner) {
 		// e.g. after a restore of its table) is kept and shown, not
 		// evidence; another hash is a refusal signed for another version
 		// under this id: evidence. The ballot goes on as it was either way.
-		f.refusalOtherHash(s, r, in.Body, rf)
+		f.refusalOtherHash(s, r, code, in.Body, rf)
 		return
 	}
 	gen := b.marksAnswered(in.Re, now)
 	if code != "already_voted" {
-		b.Refusals, _ = r.keep(b.Refusals, in.Body)
+		b.Refusals, _ = r.keep(b.Refusals, code, in.Body)
 	}
 	switch code {
 	case "not_open":
@@ -869,7 +927,7 @@ func (f *Feature) statusAnswer(s *vault.Session, ref pendRef, in *envelope.Inner
 		if p, err := votewire.ParseProposal(a.Proposal); err != nil || p.ProposalID != r.ID {
 			return
 		}
-		r.StatusAnswers, _ = r.keep(r.StatusAnswers, in.Body)
+		r.StatusAnswers, _ = r.keep(r.StatusAnswers, "", in.Body)
 		f.problem(s, r)
 		return
 	}
@@ -885,7 +943,7 @@ func (f *Feature) statusAnswer(s *vault.Session, ref pendRef, in *envelope.Inner
 	// The same answer again (the hourly ask after the close) is not kept
 	// twice and changes nothing the member exported (review fix 2).
 	var added bool
-	if r.StatusAnswers, added = r.keep(r.StatusAnswers, in.Body); added {
+	if r.StatusAnswers, added = r.keep(r.StatusAnswers, "", in.Body); added {
 		r.ChangedMS = now.UnixMilli()
 	}
 	if r.Restore {
@@ -1141,7 +1199,7 @@ func (f *Feature) statusRefusal(s *vault.Session, r *record, ref pendRef, in *en
 		rf.Verify(r.Signer, r.ID, "vote.status", code, votewire.H([]byte(r.ID)), ownConnections(s), r.Tag) != nil {
 		return
 	}
-	r.StatusAnswers, _ = r.keep(r.StatusAnswers, in.Body)
+	r.StatusAnswers, _ = r.keep(r.StatusAnswers, code, in.Body)
 	r.Restore = false
 	r.ChangedMS = s.Now().UnixMilli()
 	if rf.NoProposal() {
@@ -1174,8 +1232,8 @@ func (f *Feature) problem(s *vault.Session, r *record) {
 // proposal published under this id, e.g. in an older state after a restore
 // of its table) is shown, not evidence. Another non-zero hash is a refusal
 // signed for another version under this id: evidence.
-func (f *Feature) refusalOtherHash(s *vault.Session, r *record, body []byte, rf *votewire.Refusal) {
-	r.Ballot.Refusals, _ = r.keep(r.Ballot.Refusals, body)
+func (f *Feature) refusalOtherHash(s *vault.Session, r *record, code string, body []byte, rf *votewire.Refusal) {
+	r.Ballot.Refusals, _ = r.keep(r.Ballot.Refusals, code, body)
 	r.ChangedMS = s.Now().UnixMilli()
 	if rf.NoProposal() {
 		f.event(s, r, "ballot")
@@ -1210,7 +1268,7 @@ func (f *Feature) lateRefusal(s *vault.Session, r *record, in *envelope.Inner) {
 		rf.Verify(r.Signer, r.ID, "vote.cast", in.Error.Code, votewire.H(leaf), ownConnections(s), r.Tag) != nil {
 		return
 	}
-	f.refusalOtherHash(s, r, in.Body, rf)
+	f.refusalOtherHash(s, r, in.Error.Code, in.Body, rf)
 }
 
 // timed reports whether ms, the relay's time an answer claims for the
@@ -1240,8 +1298,9 @@ func (f *Feature) intakeStatus(s *vault.Session, ref pendRef, a *votewire.Status
 	// record) from an answer that does not verify under the service's key.
 	p, err := votewire.ParseProposal(a.Proposal)
 	// (0.15.0) status_sig covers the proposal bytes and the tag, not
-	// proposal_id: the answer's id must be its proposal's (the tag, derived
-	// from the id, would also fail the signature).
+	// proposal_id: the answer's id must be its proposal's. The tag, derived
+	// from the id, fails the signature for a swapped id unless the service
+	// signed that inconsistency itself; this check refuses that too.
 	if err != nil || p.ProposalID != a.ProposalID || !isConnKey(s, conn, p.Service) || a.VerifySig(p.Service, ownConnections(s)) != nil {
 		return
 	}
@@ -1251,7 +1310,7 @@ func (f *Feature) intakeStatus(s *vault.Session, ref pendRef, a *votewire.Status
 	if r == nil || r.RejectReason != "" || r.Ballot != nil || r.ServiceBallot != nil {
 		return
 	}
-	r.StatusAnswers, _ = r.keep(r.StatusAnswers, body)
+	r.StatusAnswers, _ = r.keep(r.StatusAnswers, "", body)
 	r.ChangedMS = s.Now().UnixMilli()
 	if a.Ballot == nil {
 		return

@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -175,8 +176,8 @@ func TestV2EvidenceMarksV1Answers(t *testing.T) {
 	v2Status := []byte(`{"proposal_id":"` + v.ID + `","status_msg_ms":1,"status_sig":"AAAA"}`)
 	v1Refusal := []byte(`{"refusal_sig":"AAAA","msg_ms":1}`)
 	unsigned := []byte(`{"refusal_sig":null,"msg_ms":1}`)
-	r.StatusAnswers = [][]byte{v2Status, v1Status}
-	r.Ballot.Refusals = [][]byte{v1Refusal, unsigned}
+	r.StatusAnswers = keptAnswers{{Body: v2Status}, {Body: v1Status}}
+	r.Ballot.Refusals = keptAnswers{{Body: v1Refusal}, {Body: unsigned}}
 	ev := obj(t, c.app("vote.evidence", pairBody("svc", v.ID)))
 	eo, _ := ev.Object("evidence")
 	u, err := eo.Object("unverifiable_v1")
@@ -186,7 +187,7 @@ func TestV2EvidenceMarksV1Answers(t *testing.T) {
 	if string(u["status_answers"]) != "[1]" || string(u["refusals"]) != "[0]" {
 		t.Errorf("%s / %s", u["status_answers"], u["refusals"])
 	}
-	r.StatusAnswers, r.Ballot.Refusals = [][]byte{v2Status}, [][]byte{unsigned}
+	r.StatusAnswers, r.Ballot.Refusals = keptAnswers{{Body: v2Status}}, keptAnswers{{Body: unsigned}}
 	ev = obj(t, c.app("vote.evidence", pairBody("svc", v.ID)))
 	eo, _ = ev.Object("evidence")
 	if eo.Has("unverifiable_v1") {
@@ -365,7 +366,7 @@ func TestV2CompactEvidenceMarksV1(t *testing.T) {
 	v2 := []byte(`{"refusal_sig":"AAAA","proposal_hash":"AAAA","msg_ms":1}`)
 	st := []byte(`{"proposal_id":"x","status_sig":"AAAA"}`)
 	for _, released := range []bool{false, true} {
-		c := &compact{Conn: "svc", ID: lid(1), Refusals: [][]byte{v2, v1}, StatusAnswers: [][]byte{st}, Released: released}
+		c := &compact{Conn: "svc", ID: lid(1), Refusals: keptAnswers{{Body: v2}, {Body: v1}}, StatusAnswers: keptAnswers{{Body: st}}, Released: released}
 		o, err := strictjson.ParseObject(compactEvidence(c))
 		if err != nil {
 			t.Fatal(err)
@@ -411,8 +412,8 @@ func TestV2KeptEvidenceSurvivesRepeatedAnswers(t *testing.T) {
 			digest = r.digest()
 		}
 	}
-	if len(r.StatusAnswers) != 2 || !bytes.Equal(r.StatusAnswers[0], proof) {
-		t.Errorf("%d kept, the proof first: %v", len(r.StatusAnswers), len(r.StatusAnswers) > 0 && bytes.Equal(r.StatusAnswers[0], proof))
+	if len(r.StatusAnswers) != 2 || !bytes.Equal(r.StatusAnswers[0].Body, proof) {
+		t.Errorf("%d kept, the proof first: %v", len(r.StatusAnswers), len(r.StatusAnswers) > 0 && bytes.Equal(r.StatusAnswers[0].Body, proof))
 	}
 	if !bytes.Equal(digest, r.digest()) {
 		t.Error("the digest changed with the same answer again")
@@ -431,35 +432,49 @@ func TestV2KeptEvidenceSurvivesRepeatedAnswers(t *testing.T) {
 }
 
 // When the list is full, an answer that is not evidence never pushes out
-// one that is; the oldest that is not evidence goes first.
+// one that is; the oldest that is not evidence goes first; pinned entries
+// do not count toward the cap and are never evicted.
 func TestV2KeepNeverEvictsEvidence(t *testing.T) {
 	r := &record{Proposal: []byte("held proposal")}
 	ref := func(h byte) []byte { // a signed refusal under the hash h..h (0: the zero hash)
 		return []byte(`{"refusal_sig":"AAAA","proposal_hash":"` + base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{h}, 32)) + `","msg_ms":1}`)
 	}
-	var list [][]byte
+	var list keptAnswers
 	for i := 1; i <= votewire.MaxRefusalsKept; i++ {
-		list, _ = r.keep(list, ref(byte(i)))
+		list, _ = r.keep(list, "not_eligible", ref(byte(i)))
 	}
-	l2, added := r.keep(list, ref(0))
-	if added || len(l2) != votewire.MaxRefusalsKept || !bytes.Equal(l2[0], ref(1)) {
+	l2, added := r.keep(list, "not_eligible", ref(0))
+	if added || len(l2) != votewire.MaxRefusalsKept || !bytes.Equal(l2[0].Body, ref(1)) {
 		t.Fatalf("a non-evidence answer into a full list of evidence: added %v", added)
 	}
 	// Seven evidence and one zero-hash answer: a new evidence one pushes the
 	// zero-hash one out, not the oldest evidence.
-	list = append(list[1:], ref(0))
-	l3, added := r.keep(list, ref(99))
-	if !added || len(l3) != votewire.MaxRefusalsKept || !bytes.Equal(l3[0], ref(2)) || bytes.Equal(l3[len(l3)-2], ref(0)) {
+	list = append(append(keptAnswers{}, list[1:]...), keptAnswer{Code: "not_eligible", Body: ref(0)})
+	l3, added := r.keep(list, "not_eligible", ref(99))
+	if !added || len(l3) != votewire.MaxRefusalsKept || !bytes.Equal(l3[0].Body, ref(2)) {
 		t.Errorf("evidence into a full list: added %v", added)
 	}
 	for _, x := range l3 {
-		if bytes.Equal(x, ref(0)) {
+		if bytes.Equal(x.Body, ref(0)) {
 			t.Error("the zero-hash answer kept over evidence")
 		}
 	}
-	// The same answer but for the request's time and signature is held.
-	if _, added := r.keep(l3, []byte(`{"refusal_sig":"BBBB","proposal_hash":"`+base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{99}, 32))+`","msg_ms":2}`)); added {
+	// The same refusal but for the request's time and signature is held; the
+	// same body under another code is another refusal.
+	same := []byte(`{"refusal_sig":"BBBB","proposal_hash":"` + base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{99}, 32)) + `","msg_ms":2}`)
+	if _, added := r.keep(l3, "not_eligible", same); added {
 		t.Error("the same refusal at another time kept again")
+	}
+	if l4, added := r.keep(l3, "not_open", same); !added || l4[len(l4)-1].Code != "not_open" {
+		t.Error("a refusal under another code taken for the same one")
+	}
+	// A pinned entry stays through any number of later evidence answers.
+	pinned := append(keptAnswers{{Code: "not_eligible", Body: ref(200), Pinned: true}}, l3...)
+	for i := 0; i < 3*votewire.MaxRefusalsKept; i++ {
+		pinned, _ = r.keep(pinned, "not_eligible", ref(byte(100+i)))
+	}
+	if !pinned[0].Pinned || !bytes.Equal(pinned[0].Body, ref(200)) || len(pinned) != votewire.MaxRefusalsKept+1 {
+		t.Errorf("the pinned entry: %d kept, first pinned %v", len(pinned), pinned[0].Pinned)
 	}
 }
 
@@ -499,5 +514,181 @@ func TestV2EvidenceAnswer(t *testing.T) {
 		if got := r.evidenceAnswer([]byte(body)); got != want {
 			t.Errorf("%s: %v, want %v", body, got, want)
 		}
+	}
+}
+
+// (review, round 3) A refusal's code is kept with it: a not_open, then a
+// not_eligible under the held hash, are two refusals, and the export says
+// which code each signature covers. The one that raised the problem is
+// pinned.
+func TestV2RefusalsKeepTheirCodes(t *testing.T) {
+	c := newCastEnv(t)
+	v := c.open(1)
+	c.cast(v, "yes")
+	_, ids := c.casts()
+	leaf := votewire.H(c.leafOf(v))
+	c.refusal(v, ids[0], "vote.cast", "not_open", leaf)
+	c.now = c.now.Add(time.Minute)
+	c.pending(ids[0], "cast", v)
+	c.depositsOnly(ids[0], c.now.UnixMilli())
+	c.refusal(v, ids[0], "vote.cast", "not_eligible", leaf, msgAt(uint64(c.now.UnixMilli())))
+	r := c.rec(v.ID)
+	if c.state(v) != "refused:not_eligible" || len(r.Ballot.Refusals) != 2 {
+		t.Fatalf("%s, %d kept", c.state(v), len(r.Ballot.Refusals))
+	}
+	if got := r.Ballot.Refusals.codes(); got[0] != "not_open" || got[1] != "not_eligible" || r.Ballot.Refusals[0].Pinned || !r.Ballot.Refusals[1].Pinned {
+		t.Errorf("codes %v, pinned %v %v", got, r.Ballot.Refusals[0].Pinned, r.Ballot.Refusals[1].Pinned)
+	}
+	ev := obj(t, c.app("vote.evidence", pairBody("svc", v.ID)))
+	eo, _ := ev.Object("evidence")
+	if string(eo["refusal_codes"]) != `["not_open","not_eligible"]` {
+		t.Errorf("export: %s", eo["refusal_codes"])
+	}
+	// The same for status refusals: unknown_proposal under the zero hash,
+	// then not_eligible under the held hash.
+	c2 := newCastEnv(t)
+	w := c2.open(1)
+	c2.f.Check(c2.session(), "svc", w.ID)
+	sid := c2.statuses()[0]
+	c2.refusal(w, sid, "vote.status", "unknown_proposal", votewire.H([]byte(w.ID)), zeroHash)
+	c2.pending(sid, "status", w)
+	c2.refusal(w, sid, "vote.status", "not_eligible", votewire.H([]byte(w.ID)))
+	r2 := c2.rec(w.ID)
+	if got := r2.StatusAnswers.codes(); len(got) != 2 || got[0] != "unknown_proposal" || got[1] != "not_eligible" || !r2.StatusAnswers[1].Pinned {
+		t.Errorf("status refusals: %v", got)
+	}
+}
+
+// (review, round 3, Opus's route) After a proof, a dishonest service
+// answers many asks with the member's own ballot under fresh receipt
+// times: not evidence (the receipt is the vault's already) and the same
+// signed content, kept once; the proof stays, pinned.
+func TestV2OwnBallotAnswersDoNotEvictTheProof(t *testing.T) {
+	c := newCastEnv(t)
+	v := c.open(1)
+	c.cast(v, "yes")
+	_, ids := c.casts()
+	c.okReceipt(v, ids[0], c.leafOf(v), uint64(c.now.UnixMilli()))
+	c.f.Check(c.session(), "svc", v.ID)
+	sid := c.statuses()[0]
+	w := c.svc.NewVote(votetest.VoteSpec{ID: v.ID, Opens: c.now.Add(-time.Hour), Closes: c.now.Add(5 * time.Hour)})
+	sig, _ := c.statusSigBy(c.svc.IK, w, nil)
+	proof := c.statusBody(w, nil, 0, nil, sig)
+	c.pending(sid, "status", v)
+	c.respond(sid, "vote.status", &envelope.Inner{Status: envelope.StatusOK, Body: proof})
+	own := c.ownBallot(v)
+	for i := 0; i < 2*votewire.MaxRefusalsKept; i++ {
+		c.now = c.now.Add(time.Minute)
+		c.pending(sid, "status", v)
+		c.answer(v, sid, own, uint64(c.rec(v.ID).Opens*1000+int64(i)+1), true)
+	}
+	r := c.rec(v.ID)
+	if !bytes.Equal(r.StatusAnswers[0].Body, proof) || !r.StatusAnswers[0].Pinned || len(r.StatusAnswers) > 2 {
+		t.Errorf("%d kept, proof first and pinned: %v", len(r.StatusAnswers), r.StatusAnswers[0].Pinned)
+	}
+}
+
+// (review, round 3, Fable's route) Answers that differ only in members the
+// signature does not cover (here the bundle) are the same answer.
+func TestV2UnsignedMembersDoNotMakeANewAnswer(t *testing.T) {
+	c := newCastEnv(t)
+	v := c.open(1)
+	c.cast(v, "yes")
+	c.f.Check(c.session(), "svc", v.ID)
+	sid := c.statuses()[0]
+	for i := 0; i < 2*votewire.MaxRefusalsKept; i++ {
+		c.now = c.now.Add(time.Minute)
+		c.bundles = nil // a fresh bundle each time: unsigned by status_sig
+		c.pending(sid, "status", v)
+		c.answer(v, sid, nil, 0, false)
+	}
+	if n := len(c.rec(v.ID).StatusAnswers); n != 1 {
+		t.Errorf("%d kept, want 1", n)
+	}
+}
+
+// The upgrade step: a list stored before 0.90.19 (base64 bodies) reads as
+// entries with no code; the new form reads back as written.
+func TestV2KeptAnswersReadTheOldForm(t *testing.T) {
+	var k keptAnswers
+	if err := json.Unmarshal([]byte(`["YQ==","Yg=="]`), &k); err != nil || len(k) != 2 || string(k[1].Body) != "b" || k[0].Code != "" {
+		t.Fatalf("%v %+v", err, k)
+	}
+	in := keptAnswers{{Code: "not_eligible", Body: []byte("x"), Pinned: true}}
+	b, _ := json.Marshal(in)
+	var out keptAnswers
+	if err := json.Unmarshal(b, &out); err != nil || len(out) != 1 || out[0].Code != "not_eligible" || !out[0].Pinned || string(out[0].Body) != "x" {
+		t.Errorf("%v %+v", err, out)
+	}
+	var none keptAnswers
+	if err := json.Unmarshal([]byte(`null`), &none); err != nil || len(none) != 0 {
+		t.Errorf("null: %v %v", err, none)
+	}
+}
+
+// A foreign ballot with an unreachable receipt time raises vote.problem
+// once, not once for the ballot and once for its receipt.
+func TestV2UnreachableReceiptOneProblem(t *testing.T) {
+	c := newCastEnv(t)
+	v := c.open(1)
+	c.cast(v, "yes")
+	_, ids := c.casts()
+	c.okReceipt(v, ids[0], c.leafOf(v), uint64(c.now.UnixMilli()))
+	c.f.Check(c.session(), "svc", v.ID)
+	_, vk2, _ := ed25519.GenerateKey(rand.Reader)
+	other := must(votewire.SignBallot(vk2, v.Hash, v.Tag, "no"))
+	c.answer(v, c.statuses()[0], other, uint64((c.rec(v.ID).Opens-3600)*1000), true)
+	if n := c.count("vote.problem"); n != 1 {
+		t.Errorf("vote.problem %d times", n)
+	}
+}
+
+// A status answer carrying the vault's own ballot is not evidence; another
+// ballot is.
+func TestV2OwnBallotIsNotEvidence(t *testing.T) {
+	held := []byte("held proposal")
+	own := &ballot{VK: bytes.Repeat([]byte{1}, 32), ChoiceID: "yes", BallotSig: bytes.Repeat([]byte{2}, 64)}
+	r := &record{Proposal: held, Ballot: own}
+	b64 := base64.StdEncoding.EncodeToString
+	body := func(vk []byte, choice string) []byte {
+		return []byte(`{"status_msg_ms":1,"proposal":"` + b64(held) + `","ballot":{"vk":"` + b64(vk) + `","choice_id":"` + choice +
+			`","ballot_sig":"` + b64(own.BallotSig) + `"},"status_sig":"AAAA"}`)
+	}
+	if r.evidenceAnswer(body(own.VK, "yes")) {
+		t.Error("the vault's own ballot counted as evidence")
+	}
+	if !r.evidenceAnswer(body(own.VK, "no")) || !r.evidenceAnswer(body(bytes.Repeat([]byte{3}, 32), "yes")) {
+		t.Error("another ballot not counted as evidence")
+	}
+}
+
+// Two status answers carrying different foreign ballots are two answers
+// (the ballot is signed content); and pinned entries are not counted in
+// the cap: one pinned and seven others leave room for an eighth.
+func TestV2DistinctBallotsAndThePinnedCap(t *testing.T) {
+	c := newCastEnv(t)
+	v := c.open(1)
+	c.cast(v, "yes")
+	c.f.Check(c.session(), "svc", v.ID)
+	sid := c.statuses()[0]
+	for _, ch := range []string{"no", "abstain"} {
+		_, vk, _ := ed25519.GenerateKey(rand.Reader)
+		c.pending(sid, "status", v)
+		c.answer(v, sid, must(votewire.SignBallot(vk, v.Hash, v.Tag, ch)), uint64(c.now.UnixMilli()), true)
+	}
+	if n := len(c.rec(v.ID).StatusAnswers); n != 2 {
+		t.Errorf("two foreign ballots kept as %d answers", n)
+	}
+	r := &record{Proposal: []byte("p")}
+	ref := func(h byte) []byte {
+		return []byte(`{"refusal_sig":"AAAA","proposal_hash":"` + base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{h}, 32)) + `","msg_ms":1}`)
+	}
+	list := keptAnswers{{Code: "not_eligible", Body: ref(200), Pinned: true}}
+	for i := 1; i < votewire.MaxRefusalsKept; i++ {
+		list, _ = r.keep(list, "not_eligible", ref(byte(i)))
+	}
+	list, added := r.keep(list, "not_eligible", ref(50))
+	if !added || len(list) != votewire.MaxRefusalsKept+1 || !bytes.Equal(list[1].Body, ref(1)) {
+		t.Errorf("the eighth unpinned answer: added %v, %d kept", added, len(list))
 	}
 }

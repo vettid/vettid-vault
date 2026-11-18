@@ -43,7 +43,7 @@ func TestEvictionKeepsACompactRecord(t *testing.T) {
 	}
 	// Give the oldest a ballot and a receipt so the compact record has them.
 	old := e.rec(lid(1))
-	old.Ballot = &ballot{State: BallotRecorded, ChoiceID: "yes", BallotSig: make([]byte, 64), MsgMS: 12345, ReceiptSig: make([]byte, 64), Refusals: [][]byte{[]byte("r")}}
+	old.Ballot = &ballot{State: BallotRecorded, ChoiceID: "yes", BallotSig: make([]byte, 64), MsgMS: 12345, ReceiptSig: make([]byte, 64), Refusals: keptAnswers{{Body: []byte("r")}}}
 	// The 33rd evicts the oldest evictable, not a newer one.
 	e.closedVote(100)
 	if e.rec(lid(1)) != nil || e.rec(lid(2)) == nil || len(e.f.st.Records) != votewire.MaxPerConnection {

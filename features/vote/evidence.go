@@ -82,6 +82,18 @@ func unverifiableV1(e *strictjson.Builder, refusals, status [][]byte) {
 	e.Raw("unverifiable_v1", m.Bytes())
 }
 
+// arrOfStrings is a JSON array of the strings, in order.
+func arrOfStrings(list []string) []byte {
+	arr := []byte{'['}
+	for i, x := range list {
+		if i > 0 {
+			arr = append(arr, ',')
+		}
+		arr = append(arr, strictjson.MarshalString(x)...)
+	}
+	return append(arr, ']')
+}
+
 func arrOfB64(list [][]byte) []byte {
 	arr := []byte{'['}
 	for i, x := range list {
@@ -175,7 +187,7 @@ func (f *Feature) recordEvidence(s *vault.Session, r *record) []byte {
 			bb.String("code", b.Code)
 		}
 		e.Raw("member", bb.Bytes())
-		e.Raw("refusals", arrOfB64(b.Refusals))
+		e.Raw("refusals", arrOfB64(b.Refusals.bodies())).Raw("refusal_codes", arrOfStrings(b.Refusals.codes()))
 		// Only once finally rejected (review fix 6d), as compactEvidence
 		// exports a released record's (GC #8012): a receipt still kept
 		// aside may yet be taken.
@@ -183,12 +195,12 @@ func (f *Feature) recordEvidence(s *vault.Session, r *record) []byte {
 			e.Raw("late_receipt", asideJSON(b.Aside))
 		}
 	}
-	e.Raw("status_answers", arrOfB64(r.StatusAnswers))
+	e.Raw("status_answers", arrOfB64(r.StatusAnswers.bodies())).Raw("status_answer_codes", arrOfStrings(r.StatusAnswers.codes()))
 	var refusals [][]byte
 	if r.Ballot != nil {
-		refusals = r.Ballot.Refusals
+		refusals = r.Ballot.Refusals.bodies()
 	}
-	unverifiableV1(e, refusals, r.StatusAnswers)
+	unverifiableV1(e, refusals, r.StatusAnswers.bodies())
 	if r.Other != nil {
 		e.Raw("other_ballot", svcBallotJSON(r.Other))
 	}
@@ -268,13 +280,13 @@ func compactEvidence(c *compact) []byte {
 	if len(c.BallotSig) > 0 {
 		e.Raw("ballot", ballotEvidence(c.VK, c.ChoiceID, c.BallotSig, c.MsgMS, c.ReceiptSig))
 	}
-	e.Raw("refusals", arrOfB64(c.Refusals))
+	e.Raw("refusals", arrOfB64(c.Refusals.bodies())).Raw("refusal_codes", arrOfStrings(c.Refusals.codes()))
 	// An evicted record exports its refusals and no status answers; a
 	// released one exports both.
 	if c.Released {
-		unverifiableV1(e, c.Refusals, c.StatusAnswers)
+		unverifiableV1(e, c.Refusals.bodies(), c.StatusAnswers.bodies())
 	} else {
-		unverifiableV1(e, c.Refusals, nil)
+		unverifiableV1(e, c.Refusals.bodies(), nil)
 	}
 	if c.Released {
 		if c.RejectReason != "" {
@@ -292,7 +304,7 @@ func compactEvidence(c *compact) []byte {
 		if c.SiteCopy != nil {
 			e.Raw("site_copy", evidenceCopy(c.SiteCopy))
 		}
-		e.Raw("status_answers", arrOfB64(c.StatusAnswers))
+		e.Raw("status_answers", arrOfB64(c.StatusAnswers.bodies())).Raw("status_answer_codes", arrOfStrings(c.StatusAnswers.codes()))
 		if c.Other != nil {
 			e.Raw("other_ballot", svcBallotJSON(c.Other))
 		}

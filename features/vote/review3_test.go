@@ -10,7 +10,6 @@ import (
 	"github.com/vettid/vettid-vault/vault"
 	"github.com/vettid/vettid-vault/vms/envelope"
 	"github.com/vettid/vettid-vault/vms/strictjson"
-	"github.com/vettid/vettid-vault/vms/suite"
 	"github.com/vettid/vettid-vault/vms/votewire"
 )
 
@@ -20,11 +19,11 @@ func (c *cenv) statusNoBundle(v *votetest.Vote, ballot *votewire.Ballot, msgMS u
 	if ballot != nil {
 		leaf = must(ballot.Leaf())
 	}
-	ssig, _ := suite.Sign(c.svc.IK, votewire.LabelStatus, must(votewire.StatusMsg(v.ID, v.Tag, leaf)))
+	ssig, _ := c.statusSigBy(c.svc.IK, v, leaf)
 	if badSig {
 		ssig = make([]byte, 64)
 	}
-	b := strictjson.NewBuilder().String("proposal_id", v.ID).Base64("proposal", v.Doc).Base64("proposal_sig", v.Sig).Base64("record_secret", v.Secret).
+	b := c.statusFields(strictjson.NewBuilder().String("proposal_id", v.ID)).Base64("proposal", v.Doc).Base64("proposal_sig", v.Sig).Base64("record_secret", v.Secret).
 		Raw("record_proof", (&votewire.RecordProof{Index: uint64(v.Index), TreeSize: uint64(len(v.Tags)), Path: must(votewire.Proof(v.Tags, v.Index))}).JSON())
 	return b.Base64("status_sig", ssig).Bytes()
 }
@@ -245,8 +244,8 @@ func TestUnheldStatusIsVerified(t *testing.T) {
 	w := other.NewVote(votetest.VoteSpec{ID: lid(6), Opens: c.now.Add(-time.Hour), Closes: c.now.Add(time.Hour)})
 	c.f.RequestProposal(c.session(), "svc", w.ID, w.Doc)
 	ids = c.statuses()
-	ssig, _ := suite.Sign(other.IK, votewire.LabelStatus, must(votewire.StatusMsg(w.ID, w.Tag, nil)))
-	body := strictjson.NewBuilder().String("proposal_id", w.ID).Base64("proposal", w.Doc).Base64("proposal_sig", w.Sig).Base64("record_secret", w.Secret).
+	ssig, _ := c.statusSigBy(other.IK, w, nil)
+	body := c.statusFields(strictjson.NewBuilder().String("proposal_id", w.ID)).Base64("proposal", w.Doc).Base64("proposal_sig", w.Sig).Base64("record_secret", w.Secret).
 		Raw("record_proof", (&votewire.RecordProof{Index: uint64(w.Index), TreeSize: uint64(len(w.Tags)), Path: must(votewire.Proof(w.Tags, w.Index))}).JSON()).
 		Base64("status_sig", ssig).Bytes()
 	c.respond(ids[len(ids)-1], "vote.status", &envelope.Inner{Status: envelope.StatusOK, Body: body})

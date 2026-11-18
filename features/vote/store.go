@@ -137,9 +137,9 @@ type ballot struct {
 	NextSendMS   int64 `json:"next_send_ms,omitempty"`
 	NextStatusMS int64 `json:"next_status_ms,omitempty"`
 
-	MsgMS      int64    `json:"msg_ms,omitempty"`
-	ReceiptSig []byte   `json:"receipt_sig,omitempty"`
-	Refusals   [][]byte `json:"refusals,omitempty"` // signed refusals, verbatim, the last 8
+	MsgMS      int64       `json:"msg_ms,omitempty"`
+	ReceiptSig []byte      `json:"receipt_sig,omitempty"`
+	Refusals   keptAnswers `json:"refusals,omitempty"` // signed refusals, verbatim, with their codes (keep)
 
 	// Held is the cast_sig and body signed under a new credential key whose
 	// rotation statement is held (a transfer's approval, §11.14.10): put in
@@ -285,9 +285,9 @@ type record struct {
 	// Other is the other ballot of a conflict or a dispute (evidence).
 	Other *svcBallot `json:"other,omitempty"`
 	// StatusAnswers are the signed status answers and refusals kept as
-	// evidence, verbatim, the last 8.
-	StatusAnswers [][]byte `json:"status_answers,omitempty"`
-	CheckAskMS    int64    `json:"check_ask_ms,omitempty"` // the last app-asked vote.status (rate limit)
+	// evidence, verbatim, with their codes (keep).
+	StatusAnswers keptAnswers `json:"status_answers,omitempty"`
+	CheckAskMS    int64       `json:"check_ask_ms,omitempty"` // the last app-asked vote.status (rate limit)
 	// EvidenceHash is the digest of the record when vote.evidence last
 	// returned it (EvidenceMS the time): vote.release needs the record
 	// unchanged since.
@@ -348,19 +348,19 @@ type evidence struct {
 // compact is what is kept of an evicted record (§10.19.2): what cannot be
 // fetched again.
 type compact struct {
-	Conn       string   `json:"connection_id"`
-	ID         string   `json:"proposal_id"`
-	Hash       []byte   `json:"proposal_hash"`
-	Tag        []byte   `json:"record_tag"`
-	ServiceIK  []byte   `json:"ik"`
-	VK         []byte   `json:"vk,omitempty"`
-	ChoiceID   string   `json:"choice_id,omitempty"`
-	BallotSig  []byte   `json:"ballot_sig,omitempty"`
-	MsgMS      int64    `json:"msg_ms,omitempty"`
-	ReceiptSig []byte   `json:"receipt_sig,omitempty"`
-	Refusals   [][]byte `json:"refusals,omitempty"`
-	Outcome    string   `json:"outcome"`
-	ClosedAt   int64    `json:"closed_at"` // unix s: the close in force
+	Conn       string      `json:"connection_id"`
+	ID         string      `json:"proposal_id"`
+	Hash       []byte      `json:"proposal_hash"`
+	Tag        []byte      `json:"record_tag"`
+	ServiceIK  []byte      `json:"ik"`
+	VK         []byte      `json:"vk,omitempty"`
+	ChoiceID   string      `json:"choice_id,omitempty"`
+	BallotSig  []byte      `json:"ballot_sig,omitempty"`
+	MsgMS      int64       `json:"msg_ms,omitempty"`
+	ReceiptSig []byte      `json:"receipt_sig,omitempty"`
+	Refusals   keptAnswers `json:"refusals,omitempty"`
+	Outcome    string      `json:"outcome"`
+	ClosedAt   int64       `json:"closed_at"` // unix s: the close in force
 
 	// A released problem record also holds every signed item that is not on
 	// the public site (§10.19.2): the held proposal, its signature and bundle
@@ -373,7 +373,7 @@ type compact struct {
 	Bundle        json.RawMessage `json:"bundle,omitempty"`
 	Site          string          `json:"site,omitempty"`
 	SiteCopy      *evidence       `json:"site_copy,omitempty"`
-	StatusAnswers [][]byte        `json:"status_answers,omitempty"`
+	StatusAnswers keptAnswers     `json:"status_answers,omitempty"`
 	Other         *svcBallot      `json:"other,omitempty"`
 	RejectReason  string          `json:"reject_reason,omitempty"`
 	// (0.88.12) the own-vk ballots of self_unrecorded or self_conflict (the
@@ -708,4 +708,63 @@ func (f *Feature) prune(s *vault.Session) {
 		f.last = now.UnixMilli()
 		f.recheck(s)
 	}
+}
+
+// keptAnswer is a signed answer kept as evidence (a refusal, a status
+// answer): its bytes as received, the error code it came with ("" for an ok
+// answer; a refusal's code is not in its body, BALLOT-PROTOCOL 0.15.0 §4.2,
+// so the export says which code its signature covers), and whether its
+// arrival raised the record's problem (pinned: never evicted).
+type keptAnswer struct {
+	Code string `json:"code,omitempty"`
+	// Request identifies the request a refusal answered: for vote.cast the
+	// request_hash its signature covers, H(ballot_leaf), and the generation
+	// of the body sent (castRequest); for vote.status H(proposal_id). Two
+	// refusals of one code for two requests are two refusals.
+	Request []byte `json:"request,omitempty"`
+	Body    []byte `json:"body"`
+	Pinned  bool   `json:"pinned,omitempty"`
+}
+
+// keptAnswers are a record's kept answers, oldest first.
+type keptAnswers []keptAnswer
+
+// UnmarshalJSON reads the list as stored since 0.90.19 ({code, body,
+// pinned} entries) or before it (the bodies alone, as base64 strings: the
+// code was not kept, and those answers are v1).
+func (k *keptAnswers) UnmarshalJSON(b []byte) error {
+	var old [][]byte
+	if err := json.Unmarshal(b, &old); err == nil {
+		out := make(keptAnswers, 0, len(old))
+		for _, x := range old {
+			out = append(out, keptAnswer{Body: x})
+		}
+		*k = out
+		return nil
+	}
+	var cur []keptAnswer
+	if err := json.Unmarshal(b, &cur); err != nil {
+		return err
+	}
+	*k = cur
+	return nil
+}
+
+// bodies are the kept answers' bytes, in order.
+func (k keptAnswers) bodies() [][]byte {
+	out := make([][]byte, 0, len(k))
+	for _, x := range k {
+		out = append(out, x.Body)
+	}
+	return out
+}
+
+// codes are the kept answers' codes, in order ("" for an ok answer or one
+// stored before 0.90.19).
+func (k keptAnswers) codes() []string {
+	out := make([]string, 0, len(k))
+	for _, x := range k {
+		out = append(out, x.Code)
+	}
+	return out
 }

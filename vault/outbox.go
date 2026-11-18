@@ -817,11 +817,12 @@ func (m *Manager) deposit(ctx context.Context, e *OutboxEntry, now time.Time) er
 	}
 	// Signed with the key the token was issued to: an old relay key while
 	// the recipient holds none for the current one (§3.4 (a)).
-	_, err := m.relayFor(tok).Deposit(withOneAttempt(ctx), e.RelayURL, e.Mailbox, tok, e.Payload)
+	msgID, err := m.relayFor(tok).Deposit(withOneAttempt(ctx), e.RelayURL, e.Mailbox, tok, e.Payload)
 	if mayHaveStored(err) {
 		e.Tried = true // 0.88.7 §8.3: it may have reached the relay
 	}
 	if err == nil {
+		m.recordDepositTime(e, msgID, now)
 		return nil
 	}
 	switch RelayCode(err) {
@@ -1216,4 +1217,71 @@ func (m *Manager) noStandingToken(p *Peer, now time.Time) {
 		return
 	}
 	m.startReconnect(p, now)
+}
+
+// timedRequests are the request types whose answers carry the relay's time
+// of the request, checked against the vault's own deposits of it
+// (BALLOT-PROTOCOL 0.15.0 §4.2, VAULT-MESSAGING §10.19.5).
+var timedRequests = map[string]bool{"vote.cast": true, "vote.status": true}
+
+// maxDepositTimes bounds the times kept per request (retries of one entry),
+// maxDepositRequests the requests kept (the oldest goes first).
+const (
+	maxDepositTimes    = 16
+	maxDepositRequests = 4096
+)
+
+// recordDepositTime keeps the relay's time of a timed request's deposit,
+// from the msg_id the relay returned for it. A msg_id that is not a ULID
+// records nothing (the answer is then judged no answer).
+func (m *Manager) recordDepositTime(e *OutboxEntry, msgID string, now time.Time) {
+	if e.InnerID == "" || !timedRequests[e.Type] {
+		return
+	}
+	ms, ok := envelope.ULIDTime(msgID)
+	if !ok {
+		return
+	}
+	if m.st.DepositTimes == nil {
+		m.st.DepositTimes = map[string]*DepositTimes{}
+	}
+	d := m.st.DepositTimes[e.InnerID]
+	if d == nil {
+		if len(m.st.DepositTimes) >= maxDepositRequests {
+			m.dropOldestDepositTimes()
+		}
+		d = &DepositTimes{At: now}
+		m.st.DepositTimes[e.InnerID] = d
+		m.dirty = true
+	}
+	for _, x := range d.MS {
+		if x == ms {
+			return
+		}
+	}
+	if len(d.MS) < maxDepositTimes {
+		d.MS = append(d.MS, ms)
+		m.dirty = true
+	}
+}
+
+// depositTimes returns the relay's times of the request's deposits.
+func (m *Manager) depositTimes(innerID string) []int64 {
+	if d := m.st.DepositTimes[innerID]; d != nil {
+		return append([]int64(nil), d.MS...)
+	}
+	return nil
+}
+
+// dropOldestDepositTimes removes the request whose first deposit is the
+// oldest (an answer to it is then no answer, and it is asked again).
+func (m *Manager) dropOldestDepositTimes() {
+	oldest := ""
+	var at time.Time
+	for k, d := range m.st.DepositTimes {
+		if oldest == "" || d.At.Before(at) || d.At.Equal(at) && k < oldest {
+			oldest, at = k, d.At
+		}
+	}
+	delete(m.st.DepositTimes, oldest)
 }

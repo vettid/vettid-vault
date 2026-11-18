@@ -26,7 +26,7 @@ func (c *cenv) answer(v *votetest.Vote, reqID string, ballot *votewire.Ballot, m
 			rsig, _ = suite.Sign(c.svc.IK, votewire.LabelReceipt, must(votewire.ReceiptMsg(v.Hash, leaf, msgMS)))
 		}
 	}
-	ssig, _ := suite.Sign(c.svc.IK, votewire.LabelStatus, must(votewire.StatusMsg(v.ID, v.Tag, leaf)))
+	ssig, _ := c.statusSigBy(c.svc.IK, v, leaf)
 	var rb *votewire.RowBallot
 	if ballot != nil {
 		rb = &votewire.RowBallot{VK: ballot.VK, ChoiceID: ballot.ChoiceID, BallotSig: ballot.BallotSig}
@@ -41,9 +41,9 @@ func (c *cenv) alreadyVoted(v *votetest.Vote, reqID string, shown *votewire.Ball
 	c.t.Helper()
 	sleaf := must(shown.Leaf())
 	rsig, _ := suite.Sign(c.svc.IK, votewire.LabelReceipt, must(votewire.ReceiptMsg(v.Hash, sleaf, msgMS)))
-	msg := must(votewire.RefusalMsg(v.ID, votewire.H(c.h.IK), v.Tag, "vote.cast", "already_voted", msgMS, votewire.H(c.leafOf(v))))
+	msg := must(votewire.RefusalMsg(v.Hash, v.ID, votewire.H(c.h.IK), v.Tag, "vote.cast", "already_voted", msgMS, votewire.H(c.leafOf(v))))
 	sig, _ := suite.Sign(c.svc.IK, votewire.LabelRefusal, msg)
-	body := strictjson.NewBuilder().Base64("refusal_sig", sig).Uint("msg_ms", msgMS).Base64("connection", votewire.H(c.h.IK)).Base64("record_tag", v.Tag).
+	body := strictjson.NewBuilder().Base64("refusal_sig", sig).Base64("proposal_hash", v.Hash).Uint("msg_ms", msgMS).Base64("connection", votewire.H(c.h.IK)).Base64("record_tag", v.Tag).
 		Raw("ballot", strictjson.NewBuilder().Base64("vk", shown.VK).String("choice_id", shown.ChoiceID).Base64("ballot_sig", shown.BallotSig).Bytes()).
 		Uint("ballot_msg_ms", msgMS).Base64("receipt_sig", rsig).Bytes()
 	c.respond(reqID, "vote.cast", &envelope.Inner{Status: envelope.StatusError, Error: &envelope.Error{Code: "already_voted"}, Body: body})
@@ -88,7 +88,7 @@ func TestStatusAnswersAreCheckedAndPartialOnesIgnored(t *testing.T) {
 	c.f.Check(c.session(), "svc", v.ID)
 	ids := c.statuses()
 	// A ballot without a receipt, a receipt without a ballot: no answer.
-	ssig, _ := suite.Sign(c.svc.IK, votewire.LabelStatus, must(votewire.StatusMsg(v.ID, v.Tag, nil)))
+	ssig, _ := c.statusSigBy(c.svc.IK, v, nil)
 	bad := c.statusBody(v, nil, 5, make([]byte, 64), ssig) // receipt members without a ballot: statusBody omits them
 	_ = bad
 	// A status_sig that fails.
@@ -97,13 +97,17 @@ func TestStatusAnswersAreCheckedAndPartialOnesIgnored(t *testing.T) {
 	if len(c.rec(v.ID).StatusAnswers) != 0 || c.rec(v.ID).Restore {
 		t.Error("a failing answer was kept")
 	}
-	// An answer for other proposal bytes.
+	// (BALLOT-PROTOCOL 0.15.0 §8.3) An answer for another signed proposal
+	// under this id: two signed proposals under one id, evidence. It is
+	// kept and raises the problem, and the ballot is unchanged.
 	c.f.pend[ids[0]] = pendRef{conn: "svc", id: v.ID, kind: "status"}
 	w := c.svc.NewVote(votetest.VoteSpec{ID: v.ID, Opens: c.now.Add(-time.Hour), Closes: c.now.Add(5 * time.Hour)})
-	sig2, _ := suite.Sign(c.svc.IK, votewire.LabelStatus, must(votewire.StatusMsg(w.ID, w.Tag, nil)))
+	sig2, _ := c.statusSigBy(c.svc.IK, w, nil)
+	state := c.state(v)
 	c.respond(ids[0], "vote.status", &envelope.Inner{Status: envelope.StatusOK, Body: c.statusBody(w, nil, 0, nil, sig2)})
-	if len(c.rec(v.ID).StatusAnswers) != 0 {
-		t.Error("an answer for other bytes was kept")
+	r := c.rec(v.ID)
+	if len(r.StatusAnswers) != 1 || !r.RefusalProblem || !c.has("vote.problem", v.ID) || c.state(v) != state {
+		t.Errorf("another proposal under the id: kept %d, problem %v, %s", len(r.StatusAnswers), r.RefusalProblem, c.state(v))
 	}
 }
 
@@ -118,8 +122,10 @@ func TestStatusNoBallotWhileReceiptHeld(t *testing.T) {
 	c.h.Reset()
 	c.answer(v, sid, nil, 0, false)
 	r := c.rec(v.ID)
-	if r.Ballot.State != BallotRecorded || !r.RefusalProblem || !c.has("vote.problem", v.ID) || len(r.Ballot.Body) == 0 {
-		t.Errorf("%+v", r)
+	// (BALLOT-PROTOCOL 0.15.0 §8.3) A signed "no ballot" is never evidence
+	// by itself, a receipt held or not: kept and shown, no problem.
+	if r.Ballot.State != BallotRecorded || r.RefusalProblem || c.has("vote.problem", v.ID) || len(r.Ballot.Body) == 0 || len(r.StatusAnswers) != 1 {
+		t.Errorf("state %s, problem %v, answers %d", r.Ballot.State, r.RefusalProblem, len(r.StatusAnswers))
 	}
 }
 
@@ -266,7 +272,7 @@ func TestStatusForAProposalNotHeld(t *testing.T) {
 	}
 	ids := c.statuses()
 	// The site's bytes must equal the answer's.
-	ssig, _ := suite.Sign(c.svc.IK, votewire.LabelStatus, must(votewire.StatusMsg(v.ID, v.Tag, nil)))
+	ssig, _ := c.statusSigBy(c.svc.IK, v, nil)
 	other := c.svc.NewVote(votetest.VoteSpec{ID: v.ID, Opens: c.now.Add(-time.Hour), Closes: c.now.Add(2 * time.Hour)})
 	_ = other
 	c.f.pend[ids[0]] = pendRef{conn: "svc", id: v.ID, kind: "status", want: []byte("other bytes")}
@@ -280,8 +286,8 @@ func TestStatusForAProposalNotHeld(t *testing.T) {
 	v2 := c.svc.NewVote(votetest.VoteSpec{ID: lid(8), Opens: c.now.Add(-time.Hour), Closes: c.now.Add(time.Hour)})
 	c.f.RequestProposal(c.session(), "svc", v2.ID, v2.Doc)
 	ids = c.statuses()
-	ssig2, _ := suite.Sign(c.svc.IK, votewire.LabelStatus, must(votewire.StatusMsg(v2.ID, v2.Tag, nil)))
-	nob := strictjson.NewBuilder().String("proposal_id", v2.ID).Base64("proposal", v2.Doc).Base64("proposal_sig", v2.Sig).Base64("record_secret", v2.Secret).
+	ssig2, _ := c.statusSigBy(c.svc.IK, v2, nil)
+	nob := c.statusFields(strictjson.NewBuilder().String("proposal_id", v2.ID)).Base64("proposal", v2.Doc).Base64("proposal_sig", v2.Sig).Base64("record_secret", v2.Secret).
 		Raw("record_proof", (&votewire.RecordProof{Index: uint64(v2.Index), TreeSize: uint64(len(v2.Tags)), Path: must(votewire.Proof(v2.Tags, v2.Index))}).JSON()).
 		Base64("status_sig", ssig2).Bytes()
 	c.respond(ids[len(ids)-1], "vote.status", &envelope.Inner{Status: envelope.StatusOK, Body: nob})
@@ -302,7 +308,7 @@ func TestStatusForAProposalNotHeld(t *testing.T) {
 	c.now = c.now.Add(time.Second)
 	c.f.RequestProposal(c.session(), "svc", v3.ID, v3.Doc)
 	ids = c.statuses()
-	ssig3, _ := suite.Sign(c.svc.IK, votewire.LabelStatus, must(votewire.StatusMsg(v3.ID, v3.Tag, nil)))
+	ssig3, _ := c.statusSigBy(c.svc.IK, v3, nil)
 	c.respond(ids[len(ids)-1], "vote.status", &envelope.Inner{Status: envelope.StatusOK, Body: c.statusBody(v3, nil, 0, nil, ssig3)})
 	if r := c.rec(v3.ID); r == nil || r.state(c.now) != StateOpen {
 		t.Errorf("%+v", r)

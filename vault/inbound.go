@@ -1041,6 +1041,11 @@ func (m *Manager) prune() {
 			delete(m.st.SeenMsgIDs, k)
 		}
 	}
+	for k, d := range m.st.DepositTimes {
+		if now.Sub(d.At) > DedupeRetention {
+			delete(m.st.DepositTimes, k)
+		}
+	}
 	for k, t := range m.st.SeenInner {
 		if now.Sub(t) > SeenInnerRetention {
 			delete(m.st.SeenInner, k)

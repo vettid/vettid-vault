@@ -74,7 +74,13 @@ type State struct {
 	Deferred map[string]*DeferredMsg `json:"deferred,omitempty"`
 
 	SeenMsgIDs map[string]time.Time `json:"seen_msg_ids"` // relay msg_id dedupe (16 d)
-	SeenInner  map[string]time.Time `json:"seen_inner"`   // principal|inner id (16 d)
+	// DepositTimes are, per inner id of a timed request (vote.cast,
+	// vote.status), the relay's times of its deposits: the msg_id the relay
+	// returned for each, as milliseconds, kept across retries and restarts
+	// for 16 days (BALLOT-PROTOCOL 0.15.0 §4.2: an answer's time must be one
+	// of them). A deposit whose answer was lost has none.
+	DepositTimes map[string]*DepositTimes `json:"deposit_times,omitempty"`
+	SeenInner    map[string]time.Time     `json:"seen_inner"` // principal|inner id (16 d)
 	// SeenInit are the transcript hashes th1 of the reconnect hs.init the
 	// vault answered (§6.6 "Replay", 0.72.0), hex, kept 16 days + 5 minutes.
 	SeenInit  map[string]time.Time      `json:"seen_init,omitempty"`
@@ -1006,6 +1012,12 @@ const (
 	OpRevoke      = "revoke"
 	OpDeleteClaim = "delete_claim"
 )
+
+// DepositTimes are the relay's times of a request's deposits.
+type DepositTimes struct {
+	MS []int64   `json:"ms"`
+	At time.Time `json:"at"` // the first, for the pruning
+}
 
 // OutboxEntry is a relay side effect made durable before it is performed
 // (§8.3 step 5). Deposits carry the sealed envelope; the token is resolved

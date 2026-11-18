@@ -97,14 +97,26 @@ func TestMessageFieldChecks(t *testing.T) {
 	if _, err := (&Ballot{RecordTag: h32, VK: h32, ChoiceID: "yes", BallotSig: make([]byte, 63)}).Leaf(); err == nil {
 		t.Error("short ballot_sig")
 	}
-	if _, err := StatusMsg("01JBQZ0000000000000000000A", make([]byte, 5), nil); err == nil {
+	if _, err := StatusMsg(h32, h32, make([]byte, 5), nil, 1); err == nil {
 		t.Error("short tag in a status message")
 	}
-	if _, err := RefusalMsg("01JBQZ0000000000000000000A", h32, nil, "", "x", 1, h32); err == nil {
+	if _, err := StatusMsg(h32[:31], h32, h32, nil, 1); err == nil {
+		t.Error("short proposal hash in a status message")
+	}
+	if _, err := StatusMsg(h32, h32[:31], h32, nil, 1); err == nil {
+		t.Error("short connection in a status message")
+	}
+	if _, err := RefusalMsg(h32, "01JBQZ0000000000000000000A", h32, nil, "", "x", 1, h32); err == nil {
 		t.Error("empty type")
 	}
-	if _, err := RefusalMsg("01JBQZ0000000000000000000A", h32[:5], nil, "t", "x", 1, h32); err == nil {
+	if _, err := RefusalMsg(h32, "01JBQZ0000000000000000000A", h32[:5], nil, "t", "x", 1, h32); err == nil {
 		t.Error("short connection")
+	}
+	if _, err := RefusalMsg(h32[:31], "01JBQZ0000000000000000000A", h32, nil, "t", "x", 1, h32); err == nil {
+		t.Error("short proposal hash in a refusal")
+	}
+	if _, err := RefusalMsg(h32, "not a ulid", h32, nil, "t", "x", 1, h32); err == nil {
+		t.Error("an invalid proposal_id in a refusal")
 	}
 }
 
@@ -113,7 +125,13 @@ func TestLabelsArePrefixFree(t *testing.T) {
 	ls := []string{LabelProposal, LabelExtended, LabelResults, LabelBallot, LabelCast, LabelReceipt, LabelStatus, LabelRefusal,
 		LabelAnchorKey, LabelServiceList, labelRecord}
 	for i, a := range ls {
-		if !strings.HasSuffix(a, "\x00") || !strings.HasPrefix(a, "vettid/vote/1/") {
+		// The version is per message (BALLOT-PROTOCOL 0.15.0 §2): status and
+		// refusal are at 2, the others at 1.
+		v := "vettid/vote/1/"
+		if a == LabelStatus || a == LabelRefusal {
+			v = "vettid/vote/2/"
+		}
+		if !strings.HasSuffix(a, "\x00") || !strings.HasPrefix(a, v) {
 			t.Errorf("label %q", a)
 		}
 		for j, b := range ls {

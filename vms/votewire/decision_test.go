@@ -274,7 +274,7 @@ func TestVectorsFileIsTheCopy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	const want = "ff9fcf784d5e95efcdec4e593ec9d6787f925e5887a1b6c0d5acd046744b28c4" // service-vault be57292
+	const want = "8044bb07f7d1e3ebaa768a1abc07837333e2b106b228bcec86d8eefbda895cdf" // service-vault 1e68f04
 	if got := hex.EncodeToString(H(b)); got != want {
 		t.Errorf("vectors.json sha256 %s, want %s: a changed copy is a stop-and-report item", got, want)
 	}

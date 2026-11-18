@@ -281,6 +281,10 @@ type Host interface {
 	// (0.81.2, the vote feature's vote.cast and vote.status). It returns the
 	// request's inner id.
 	SendRequest(to, typ string, body json.RawMessage, now time.Time) (string, error)
+	// DepositTimes are the relay's times (ms) of the deposits of the request
+	// with that inner id, from the msg_ids the relay returned; none when no
+	// deposit's answer arrived (BALLOT-PROTOCOL 0.15.0 §4.2).
+	DepositTimes(innerID string) []int64
 	// OwnIdentityKeys are the vault's identity key and the earlier ones of
 	// its rotation chain (§3.4), current first.
 	OwnIdentityKeys() []ed25519.PublicKey
@@ -468,6 +472,11 @@ func (s *Session) SendCallSignal(to, typ string, body json.RawMessage, o SendOpt
 func (s *Session) SendRequest(to, typ string, body json.RawMessage) (string, error) {
 	return s.host.SendRequest(to, typ, body, s.now)
 }
+
+// DepositTimes are the relay's times (ms) of the deposits of the request
+// with that inner id (SendRequest's id): an answer that claims another time
+// for it is no answer (BALLOT-PROTOCOL 0.15.0 §4.2).
+func (s *Session) DepositTimes(innerID string) []int64 { return s.host.DepositTimes(innerID) }
 
 // OwnIdentityKeys are the vault's identity key and the earlier ones of its
 // rotation chain, current first.

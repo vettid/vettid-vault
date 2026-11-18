@@ -63,7 +63,7 @@ func TestEvidenceAndRelease(t *testing.T) {
 		}
 	}
 	// A change after the export: not exported any more.
-	c.rec(v.ID).StatusAnswers = [][]byte{[]byte("an answer")}
+	c.rec(v.ID).StatusAnswers = keptAnswers{{Body: []byte("an answer")}}
 	if r := c.app("vote.release", c.releaseBody("svc", v.ID)); r.Code != "evidence_not_exported" {
 		t.Fatalf("after a change: %q", r.Code)
 	}

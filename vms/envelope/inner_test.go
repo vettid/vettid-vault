@@ -128,3 +128,27 @@ func TestValidType(t *testing.T) {
 		}
 	}
 }
+
+// ULIDTime reads back the time NewULID put in, and refuses what is not a
+// canonical ULID.
+func TestULIDTime(t *testing.T) {
+	for _, ms := range []int64{0, 1, 1795033434000, 1<<48 - 1} {
+		s, err := NewULID(time.UnixMilli(ms))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, ok := ULIDTime(s); !ok || got != ms {
+			t.Errorf("%d: %d %v", ms, got, ok)
+		}
+	}
+	for s, ms := range map[string]int64{"00000000010000000000000000": 1, "0000000010ZZZZZZZZZZZZZZZZ": 32, "7ZZZZZZZZZ0000000000000000": 1<<48 - 1} {
+		if got, ok := ULIDTime(s); !ok || got != ms {
+			t.Errorf("%s: %d %v, want %d", s, got, ok, ms)
+		}
+	}
+	for _, s := range []string{"", "01ARZ3NDEKTSV4RRFFQ69G5FA", "81ARZ3NDEKTSV4RRFFQ69G5FAV", "01arz3ndektsv4rrffq69g5fav", "01ARZ3NDEKTSV4RRFFQ69G5FAU"} {
+		if _, ok := ULIDTime(s); ok {
+			t.Errorf("accepted %q", s)
+		}
+	}
+}

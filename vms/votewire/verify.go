@@ -125,9 +125,10 @@ func VerifyReceipt(ik, proposalHash, ballotLeaf []byte, msgMS uint64, sig []byte
 }
 
 // VerifyStatus checks status_sig for the answer carrying ballotLeaf (nil
-// for an answer without a ballot).
-func VerifyStatus(ik []byte, proposalID string, recordTag, ballotLeaf, sig []byte) error {
-	m, err := StatusMsg(proposalID, recordTag, ballotLeaf)
+// for an answer without a ballot), over the answer's own proposal hash,
+// connection and status_msg_ms (BALLOT-PROTOCOL 0.15.0 §4.2).
+func VerifyStatus(ik, proposalHash, connection, recordTag, ballotLeaf []byte, statusMsgMS uint64, sig []byte) error {
+	m, err := StatusMsg(proposalHash, connection, recordTag, ballotLeaf, statusMsgMS)
 	if err != nil {
 		return err
 	}

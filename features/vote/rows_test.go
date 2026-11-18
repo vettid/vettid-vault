@@ -586,7 +586,7 @@ func TestServiceBallotsMayCarryPad(t *testing.T) {
 		now := uint64(c.now.UnixMilli())
 		leaf := must(own.Leaf())
 		rsig, _ := suite.Sign(c.svc.IK, votewire.LabelReceipt, must(votewire.ReceiptMsg(v.Hash, leaf, now)))
-		ssig, _ := suite.Sign(c.svc.IK, votewire.LabelStatus, must(votewire.StatusMsg(v.ID, v.Tag, leaf)))
+		ssig, _ := c.statusSigBy(c.svc.IK, v, leaf)
 		body := c.statusBody(v, &votewire.RowBallot{VK: own.VK, ChoiceID: own.ChoiceID, BallotSig: own.BallotSig}, now, rsig, ssig)
 		body = bytes.Replace(body, []byte(`"choice_id":"yes"`), []byte(`"choice_id":"yes"`+pad), 1)
 		c.respond(ids[0], "vote.status", &envelope.Inner{Status: envelope.StatusOK, Body: body})
@@ -603,11 +603,11 @@ func TestServiceBallotsMayCarryPad(t *testing.T) {
 		leaf := must(own.Leaf())
 		msgMS := uint64(c.now.UnixMilli())
 		rsig, _ := suite.Sign(c.svc.IK, votewire.LabelReceipt, must(votewire.ReceiptMsg(v.Hash, leaf, msgMS)))
-		msg := must(votewire.RefusalMsg(v.ID, votewire.H(c.h.IK), v.Tag, "vote.cast", "already_voted", msgMS, votewire.H(leaf)))
+		msg := must(votewire.RefusalMsg(v.Hash, v.ID, votewire.H(c.h.IK), v.Tag, "vote.cast", "already_voted", msgMS, votewire.H(leaf)))
 		sig, _ := suite.Sign(c.svc.IK, votewire.LabelRefusal, msg)
 		ballot := strictjson.NewBuilder().Base64("vk", own.VK).String("choice_id", own.ChoiceID).Base64("ballot_sig", own.BallotSig).Bytes()
 		ballot = append(ballot[:len(ballot)-1:len(ballot)-1], append([]byte(pad), '}')...)
-		body := strictjson.NewBuilder().Base64("refusal_sig", sig).Uint("msg_ms", msgMS).Base64("connection", votewire.H(c.h.IK)).Base64("record_tag", v.Tag).
+		body := strictjson.NewBuilder().Base64("refusal_sig", sig).Base64("proposal_hash", v.Hash).Uint("msg_ms", msgMS).Base64("connection", votewire.H(c.h.IK)).Base64("record_tag", v.Tag).
 			Raw("ballot", ballot).Uint("ballot_msg_ms", msgMS).Base64("receipt_sig", rsig).Bytes()
 		c.respond(ids[0], "vote.cast", &envelope.Inner{Status: envelope.StatusError, Error: &envelope.Error{Code: "already_voted"}, Body: body})
 		if c.state(v) != BallotRecorded {

@@ -274,9 +274,9 @@ func TestAlreadyVoted(t *testing.T) {
 	msgMS := uint64(c.now.UnixMilli())
 	rsig, _ := suite.Sign(c.svc.IK, votewire.LabelReceipt, must(votewire.ReceiptMsg(v.Hash, leaf, msgMS)))
 	send := func(rb *votewire.Ballot, rsig []byte, id string) {
-		msg := must(votewire.RefusalMsg(v.ID, votewire.H(c.h.IK), v.Tag, "vote.cast", "already_voted", msgMS, votewire.H(leaf)))
+		msg := must(votewire.RefusalMsg(v.Hash, v.ID, votewire.H(c.h.IK), v.Tag, "vote.cast", "already_voted", msgMS, votewire.H(leaf)))
 		sig, _ := suite.Sign(c.svc.IK, votewire.LabelRefusal, msg)
-		body := strictjson.NewBuilder().Base64("refusal_sig", sig).Uint("msg_ms", msgMS).Base64("connection", votewire.H(c.h.IK)).Base64("record_tag", v.Tag).
+		body := strictjson.NewBuilder().Base64("refusal_sig", sig).Base64("proposal_hash", v.Hash).Uint("msg_ms", msgMS).Base64("connection", votewire.H(c.h.IK)).Base64("record_tag", v.Tag).
 			Raw("ballot", strictjson.NewBuilder().Base64("vk", rb.VK).String("choice_id", rb.ChoiceID).Base64("ballot_sig", rb.BallotSig).Bytes()).
 			Uint("ballot_msg_ms", msgMS).Base64("receipt_sig", rsig).Bytes()
 		c.respond(id, "vote.cast", &envelope.Inner{Status: envelope.StatusError, Error: &envelope.Error{Code: "already_voted"}, Body: body})
@@ -296,9 +296,9 @@ func TestAlreadyVoted(t *testing.T) {
 	orsig, _ := suite.Sign(c2.svc.IK, votewire.LabelReceipt, must(votewire.ReceiptMsg(w.Hash, oleaf, msgMS)))
 	own := c2.rec(w.ID).Ballot
 	ownLeaf := must((&votewire.Ballot{RecordTag: w.Tag, VK: own.VK, ChoiceID: own.ChoiceID, BallotSig: own.BallotSig}).Leaf())
-	msg := must(votewire.RefusalMsg(w.ID, votewire.H(c2.h.IK), w.Tag, "vote.cast", "already_voted", msgMS, votewire.H(ownLeaf)))
+	msg := must(votewire.RefusalMsg(w.Hash, w.ID, votewire.H(c2.h.IK), w.Tag, "vote.cast", "already_voted", msgMS, votewire.H(ownLeaf)))
 	sig, _ := suite.Sign(c2.svc.IK, votewire.LabelRefusal, msg)
-	body := strictjson.NewBuilder().Base64("refusal_sig", sig).Uint("msg_ms", msgMS).Base64("connection", votewire.H(c2.h.IK)).Base64("record_tag", w.Tag).
+	body := strictjson.NewBuilder().Base64("refusal_sig", sig).Base64("proposal_hash", w.Hash).Uint("msg_ms", msgMS).Base64("connection", votewire.H(c2.h.IK)).Base64("record_tag", w.Tag).
 		Raw("ballot", strictjson.NewBuilder().Base64("vk", other.VK).String("choice_id", "no").Base64("ballot_sig", other.BallotSig).Bytes()).
 		Uint("ballot_msg_ms", msgMS).Base64("receipt_sig", orsig).Bytes()
 	c2.h.Reset()
@@ -417,9 +417,9 @@ func TestAlreadyVotedAfterEarlierForeign(t *testing.T) {
 	orsig, _ := suite.Sign(c.svc.IK, votewire.LabelReceipt, must(votewire.ReceiptMsg(w.Hash, must(other.Leaf()), msgMS)))
 	own := r.Ballot
 	ownLeaf := must((&votewire.Ballot{RecordTag: w.Tag, VK: own.VK, ChoiceID: own.ChoiceID, BallotSig: own.BallotSig}).Leaf())
-	msg := must(votewire.RefusalMsg(w.ID, votewire.H(c.h.IK), w.Tag, "vote.cast", "already_voted", msgMS, votewire.H(ownLeaf)))
+	msg := must(votewire.RefusalMsg(w.Hash, w.ID, votewire.H(c.h.IK), w.Tag, "vote.cast", "already_voted", msgMS, votewire.H(ownLeaf)))
 	sig, _ := suite.Sign(c.svc.IK, votewire.LabelRefusal, msg)
-	body := strictjson.NewBuilder().Base64("refusal_sig", sig).Uint("msg_ms", msgMS).Base64("connection", votewire.H(c.h.IK)).Base64("record_tag", w.Tag).
+	body := strictjson.NewBuilder().Base64("refusal_sig", sig).Base64("proposal_hash", w.Hash).Uint("msg_ms", msgMS).Base64("connection", votewire.H(c.h.IK)).Base64("record_tag", w.Tag).
 		Raw("ballot", strictjson.NewBuilder().Base64("vk", other.VK).String("choice_id", "no").Base64("ballot_sig", other.BallotSig).Bytes()).
 		Uint("ballot_msg_ms", msgMS).Base64("receipt_sig", orsig).Bytes()
 	c.h.Reset()

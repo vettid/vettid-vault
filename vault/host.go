@@ -80,6 +80,8 @@ func (h managerHost) SendRequest(to, typ string, body json.RawMessage, now time.
 	return id, nil
 }
 
+func (h managerHost) DepositTimes(innerID string) []int64 { return h.m.depositTimes(innerID) }
+
 func (h managerHost) OwnIdentityKeys() []ed25519.PublicKey {
 	out := []ed25519.PublicKey{h.IdentityKey()}
 	for i := len(h.m.st.Rotations) - 1; i >= 0; i-- {

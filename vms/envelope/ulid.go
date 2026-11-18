@@ -66,3 +66,17 @@ func encodeULID(b [16]byte) string {
 	}
 	return string(out)
 }
+
+// ULIDTime returns the milliseconds a canonical ULID carries (its first 48
+// bits), as the relay's msg_id records the time it took a deposit; false
+// for a string that is not a canonical ULID.
+func ULIDTime(s string) (int64, bool) {
+	if !ValidULID(s) {
+		return 0, false
+	}
+	var ms uint64
+	for i := 0; i < 10; i++ { // 10 characters = 50 bits, the top 2 zero
+		ms = ms<<5 | uint64(crockfordValue(s[i]))
+	}
+	return int64(ms), true
+}

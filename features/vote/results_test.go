@@ -721,7 +721,7 @@ func TestReceiptAsideAtTheFinalJudgement(t *testing.T) {
 	own := c.ownBallot(v)
 	leaf := must(own.Leaf())
 	rsig, _ := suite.Sign(c.svc.IK, votewire.LabelReceipt, must(votewire.ReceiptMsg(v.Hash, leaf, late)))
-	ssig, _ := suite.Sign(c.svc.IK, votewire.LabelStatus, must(votewire.StatusMsg(v.ID, v.Tag, leaf)))
+	ssig, _ := c.statusSigBy(c.svc.IK, v, leaf)
 	body := c.statusBody(v, &votewire.RowBallot{VK: own.VK, ChoiceID: own.ChoiceID, BallotSig: own.BallotSig}, late, rsig, ssig)
 	for i := 0; i < 3; i++ {
 		c.now = c.now.Add(61 * time.Minute)

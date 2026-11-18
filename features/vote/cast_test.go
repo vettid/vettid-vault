@@ -35,6 +35,9 @@ type cenv struct {
 	cred ed25519.PrivateKey
 	keys *fakeKeys
 	auth *fakeAuth
+	// untimed: respond records no relay time for the answer, as when the
+	// vault never learned its deposit's msg_id (BALLOT-PROTOCOL 0.15.0).
+	untimed bool
 }
 
 func newCastEnv(t *testing.T) *cenv {
@@ -95,7 +98,40 @@ func (c *cenv) statuses() (ids []string) {
 func (c *cenv) respond(reqID, typ string, in *envelope.Inner) {
 	c.t.Helper()
 	in.Re, in.Type = reqID, typ
+	if !c.untimed {
+		// An honest relay: the time the answer claims for the request
+		// (status_msg_ms, a refusal's msg_ms) is the msg_id time the relay
+		// returned for the vault's deposit of it.
+		if o, err := strictjson.ParseObject(in.Body); err == nil {
+			for _, k := range []string{"status_msg_ms", "msg_ms"} {
+				if k == "msg_ms" && in.Status != envelope.StatusError {
+					continue
+				}
+				if ms, err := o.Uint(k, 0, strictjson.MaxSafeInteger); err == nil {
+					if c.h.Deposits == nil {
+						c.h.Deposits = map[string][]int64{}
+					}
+					c.h.Deposits[reqID] = append(c.h.Deposits[reqID], int64(ms))
+				}
+			}
+		}
+	}
 	c.f.Response(c.session(), in)
+}
+
+// statusMS is the relay time status answers here claim for their request.
+func (c *cenv) statusMS() uint64 { return uint64(c.now.UnixMilli()) }
+
+// statusSigBy signs a v2 status answer for v's member (BALLOT-PROTOCOL
+// 0.15.0): over v's proposal hash, the vault's connection hash, v's tag, the
+// leaf (nil: no ballot) and statusMS.
+func (c *cenv) statusSigBy(ik ed25519.PrivateKey, v *votetest.Vote, leaf []byte) ([]byte, error) {
+	return suite.Sign(ik, votewire.LabelStatus, must(votewire.StatusMsg(v.Hash, votewire.H(c.h.IK), v.Tag, leaf, c.statusMS())))
+}
+
+// statusFields adds a v2 status answer's connection and status_msg_ms.
+func (c *cenv) statusFields(b *strictjson.Builder) *strictjson.Builder {
+	return b.Base64("connection", votewire.H(c.h.IK)).Uint("status_msg_ms", c.statusMS())
 }
 
 func (c *cenv) okReceipt(v *votetest.Vote, reqID string, leaf []byte, msgMS uint64) {
@@ -114,15 +150,15 @@ func must[T any](v T, err error) T {
 // refusal answers a request with a signed refusal; sign=false leaves it
 // unsigned, conn overrides the connection hash.
 func (c *cenv) refusal(v *votetest.Vote, reqID, typ, codeStr string, hash []byte, opts ...func(*refOpts)) []byte {
-	o := &refOpts{conn: votewire.H(c.h.IK), tag: v.Tag, sign: true, msgMS: uint64(c.now.UnixMilli())}
+	o := &refOpts{conn: votewire.H(c.h.IK), tag: v.Tag, sign: true, msgMS: uint64(c.now.UnixMilli()), hash: v.Hash}
 	for _, f := range opts {
 		f(o)
 	}
-	msg := must(votewire.RefusalMsg(v.ID, o.conn, o.tag, typ, codeStr, o.msgMS, hash))
+	msg := must(votewire.RefusalMsg(o.hash, v.ID, o.conn, o.tag, typ, codeStr, o.msgMS, hash))
 	b := strictjson.NewBuilder()
 	if o.sign {
 		sig, _ := suite.Sign(c.svc.IK, votewire.LabelRefusal, msg)
-		b.Base64("refusal_sig", sig)
+		b.Base64("refusal_sig", sig).Base64("proposal_hash", o.hash)
 	} else {
 		b.Raw("refusal_sig", []byte("null"))
 	}
@@ -136,6 +172,7 @@ type refOpts struct {
 	conn, tag []byte
 	sign      bool
 	msgMS     uint64
+	hash      []byte // the proposal_hash it signs (BALLOT-PROTOCOL 0.15.0): v's
 }
 
 func (c *cenv) leafOf(v *votetest.Vote) []byte {
@@ -429,7 +466,7 @@ func TestClosedWithAnEarlierSendUnanswered(t *testing.T) {
 	}
 	// A signed answer without a ballot, before closes_at + 24 h: still waiting.
 	statusNone := func(reqID string) {
-		sig, _ := suite.Sign(c.svc.IK, votewire.LabelStatus, must(votewire.StatusMsg(v.ID, v.Tag, nil)))
+		sig, _ := c.statusSigBy(c.svc.IK, v, nil)
 		body := c.statusBody(v, nil, 0, nil, sig)
 		c.respond(reqID, "vote.status", &envelope.Inner{Status: envelope.StatusOK, Body: body})
 	}
@@ -456,7 +493,7 @@ func TestClosedWithAnEarlierSendUnanswered(t *testing.T) {
 
 // statusBody builds an ok vote.status answer for v's member.
 func (c *cenv) statusBody(v *votetest.Vote, ballot *votewire.RowBallot, msgMS uint64, receiptSig, statusSig []byte) []byte {
-	b := strictjson.NewBuilder().String("proposal_id", v.ID).Base64("proposal", v.Doc).Base64("proposal_sig", v.Sig).
+	b := c.statusFields(strictjson.NewBuilder().String("proposal_id", v.ID)).Base64("proposal", v.Doc).Base64("proposal_sig", v.Sig).
 		Raw("bundle", c.auth0Bundle(v)).Base64("record_secret", v.Secret).
 		Raw("record_proof", (&votewire.RecordProof{Index: uint64(v.Index), TreeSize: uint64(len(v.Tags)), Path: must(votewire.Proof(v.Tags, v.Index))}).JSON())
 	if ballot != nil {

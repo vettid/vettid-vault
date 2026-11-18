@@ -3,6 +3,7 @@ package vote
 import (
 	"encoding/base64"
 	"encoding/json"
+	"strconv"
 
 	"github.com/vettid/vettid-vault/vault"
 	"github.com/vettid/vettid-vault/vms/envelope"
@@ -20,6 +21,65 @@ func ballotEvidence(vk []byte, choice string, sig []byte, msgMS int64, receipt [
 		b.Uint("msg_ms", uint64(msgMS)).Base64("receipt_sig", receipt)
 	}
 	return b.Bytes()
+}
+
+// v1Indices are the positions of the stored answers made before
+// BALLOT-PROTOCOL 0.15.0: a status answer without status_msg_ms, a signed
+// refusal without proposal_hash. They are kept, and exported marked
+// "unverifiable (v1)": a vault of this release verifies v2 only.
+func v1Indices(list [][]byte) []byte {
+	arr := []byte{'['}
+	n := 0
+	for i, x := range list {
+		if !storedV1(x) {
+			continue
+		}
+		if n > 0 {
+			arr = append(arr, ',')
+		}
+		arr = strconv.AppendInt(arr, int64(i), 10)
+		n++
+	}
+	if n == 0 {
+		return nil
+	}
+	return append(arr, ']')
+}
+
+// storedV1 reports whether a stored answer body is of BALLOT-PROTOCOL before
+// 0.15.0: a status answer (it has status_sig) without status_msg_ms, or a
+// signed refusal without proposal_hash.
+func storedV1(body []byte) bool {
+	o, err := strictjson.ParseObject(body)
+	if err != nil {
+		return false
+	}
+	if _, ok := o["status_sig"]; ok {
+		_, v2 := o["status_msg_ms"]
+		return !v2
+	}
+	if raw, ok := o["refusal_sig"]; ok && string(raw) != "null" {
+		_, v2 := o["proposal_hash"]
+		return !v2
+	}
+	return false
+}
+
+// unverifiableV1 marks the v1 entries of the refusals and status answers an
+// export carries (by position), when there are any.
+func unverifiableV1(e *strictjson.Builder, refusals, status [][]byte) {
+	r, st := v1Indices(refusals), v1Indices(status)
+	if r == nil && st == nil {
+		return
+	}
+	m := strictjson.NewBuilder()
+	if r != nil {
+		m.Raw("refusals", r)
+	}
+	if st != nil {
+		m.Raw("status_answers", st)
+	}
+	e.Raw("unverifiable_v1", m.Bytes())
 }
 
 func arrOfB64(list [][]byte) []byte {
@@ -124,6 +184,11 @@ func (f *Feature) recordEvidence(s *vault.Session, r *record) []byte {
 		}
 	}
 	e.Raw("status_answers", arrOfB64(r.StatusAnswers))
+	var refusals [][]byte
+	if r.Ballot != nil {
+		refusals = r.Ballot.Refusals
+	}
+	unverifiableV1(e, refusals, r.StatusAnswers)
 	if r.Other != nil {
 		e.Raw("other_ballot", svcBallotJSON(r.Other))
 	}
@@ -221,6 +286,7 @@ func compactEvidence(c *compact) []byte {
 			e.Raw("site_copy", evidenceCopy(c.SiteCopy))
 		}
 		e.Raw("status_answers", arrOfB64(c.StatusAnswers))
+		unverifiableV1(e, c.Refusals, c.StatusAnswers)
 		if c.Other != nil {
 			e.Raw("other_ballot", svcBallotJSON(c.Other))
 		}

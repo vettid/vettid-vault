@@ -637,13 +637,26 @@ func (f *Feature) castAnswer(s *vault.Session, r *record, in *envelope.Inner) {
 	}
 	code := in.Error.Code
 	rf, err := votewire.ParseRefusal(in.Body)
-	if err != nil || rf.Verify(r.Signer, r.ID, "vote.cast", code, votewire.H(leaf), ownConnections(s), r.Tag) != nil {
+	// (BALLOT-PROTOCOL 0.15.0) A refusal timed at no deposit of this request
+	// the relay told the vault of (a mismatch, or the deposit's answer lost)
+	// is discarded as no answer: sending the cast again is idempotent.
+	if err != nil || !timed(s, in.Re, rf.MsgMS) ||
+		rf.Verify(r.Signer, r.ID, "vote.cast", code, votewire.H(leaf), ownConnections(s), r.Tag) != nil {
 		return // unsigned or failing: no answer
 	}
 	switch code {
 	case "not_open", "not_signed_in", "closed", "late", "not_active", "not_eligible", "bad_ballot", "already_voted":
 	default:
 		return // a code the vault does not know is no answer
+	}
+	if !eq(rf.ProposalHash, r.Hash) {
+		// (0.15.0) Signed under another hash than the held proposal's: the
+		// zero hash (the service holds no proposal published under this id,
+		// e.g. after a restore of its table) is kept and shown, not
+		// evidence; another hash is a refusal signed for another version
+		// under this id: evidence. The ballot goes on as it was either way.
+		f.refusalOtherHash(s, r, in.Body, rf)
+		return
 	}
 	gen := b.marksAnswered(in.Re, now)
 	if code != "already_voted" {
@@ -723,8 +736,8 @@ func (f *Feature) statusAnswer(s *vault.Session, ref pendRef, in *envelope.Inner
 		return
 	}
 	a, err := votewire.ParseStatusAnswer(in.Body)
-	if err != nil || a.ProposalID != ref.id {
-		return
+	if err != nil || a.ProposalID != ref.id || !timed(s, in.Re, a.StatusMsgMS) {
+		return // (0.15.0) timed at no deposit of this request: no answer
 	}
 	if r == nil {
 		// A proposal the vault was not sent (the site's index has it): the
@@ -736,7 +749,23 @@ func (f *Feature) statusAnswer(s *vault.Session, ref pendRef, in *envelope.Inner
 		f.intakeStatus(s, ref, a, in.Body)
 		return
 	}
-	if !eq(a.Proposal, r.Proposal) || a.VerifySig(r.Signer, r.Hash) != nil {
+	if a.VerifySig(r.Signer, ownConnections(s)) != nil {
+		return
+	}
+	if !eq(a.Proposal, r.Proposal) {
+		// (0.15.0) A status signed over another proposal under this id, its
+		// proposal signed by the service: two signed proposals under one id,
+		// evidence. Anything else is no answer.
+		if eq(votewire.H(a.Proposal), r.Hash) || votewire.VerifyProposal(r.Signer, a.Proposal, a.ProposalSig) != nil {
+			return
+		}
+		if p, err := votewire.ParseProposal(a.Proposal); err != nil || p.ProposalID != r.ID {
+			return
+		}
+		if !heldBytes(r.StatusAnswers, in.Body) {
+			r.StatusAnswers = keepRefusal(r.StatusAnswers, in.Body)
+		}
+		f.problem(s, r)
 		return
 	}
 	tag, err := a.Tag()
@@ -762,12 +791,11 @@ func (f *Feature) statusAnswer(s *vault.Session, ref pendRef, in *envelope.Inner
 		b.LastAnswerMS = now.UnixMilli()
 	}
 	if a.Ballot == nil {
+		// (BALLOT-PROTOCOL 0.15.0 §8.3) A signed "no ballot" is never
+		// evidence by itself, a receipt held or not: the service need not
+		// handle a connection's messages in relay order. Receipt against
+		// results (§10.19.6) stays the check. The answer is kept and shown.
 		switch {
-		case b != nil && b.State == BallotRecorded:
-			// A receipt held and the service says it has none: evidence against it.
-			r.RefusalProblem = true
-			f.feed(s, "vote.problem", r.Conn, r.ID, "high")
-			f.event(s, r, "problem")
 		case b != nil && b.State == BallotWaiting && b.Reason == "closed" && now.After(time.Unix(r.Closes, 0).Add(FinalAfter)):
 			f.refuse(s, r, "closed", false) // final only after closes_at + 24 h
 		}
@@ -998,17 +1026,64 @@ func (f *Feature) statusRefusal(s *vault.Session, r *record, ref pendRef, in *en
 		return
 	}
 	rf, err := votewire.ParseRefusal(in.Body)
-	if err != nil || rf.Verify(r.Signer, r.ID, "vote.status", code, votewire.H([]byte(r.ID)), ownConnections(s), r.Tag) != nil {
+	if err != nil || !timed(s, in.Re, rf.MsgMS) ||
+		rf.Verify(r.Signer, r.ID, "vote.status", code, votewire.H([]byte(r.ID)), ownConnections(s), r.Tag) != nil {
 		return
 	}
 	r.StatusAnswers = keepRefusal(r.StatusAnswers, in.Body)
 	r.Restore = false
+	r.ChangedMS = s.Now().UnixMilli()
+	if rf.NoProposal() {
+		// (0.15.0) The zero hash: the service holds no proposal published
+		// under this id. Kept and shown, not evidence.
+		f.event(s, r, "ballot")
+		return
+	}
+	// Under the held proposal's hash (a signed not_eligible is evidence the
+	// member can show, BALLOT-PROTOCOL §10.1), or under another, a refusal
+	// signed for another version under this id: evidence either way.
+	f.problem(s, r)
+}
+
+// problem raises the record's refusal problem once: a vote.problem feed
+// item and the record in the problem set.
+func (f *Feature) problem(s *vault.Session, r *record) {
 	if !r.RefusalProblem {
 		r.RefusalProblem = true
 		f.feed(s, "vote.problem", r.Conn, r.ID, "high")
 	}
 	r.ChangedMS = s.Now().UnixMilli()
 	f.event(s, r, "problem")
+}
+
+// refusalOtherHash handles a verified vote.cast refusal signed under
+// another hash than the held proposal's (BALLOT-PROTOCOL 0.15.0 §4.2,
+// §8.3). It is kept either way and the ballot's state is unchanged: it
+// goes on being sent by its schedule. The zero hash (the service holds no
+// proposal published under this id, e.g. in an older state after a restore
+// of its table) is shown, not evidence. Another non-zero hash is a refusal
+// signed for another version under this id: evidence.
+func (f *Feature) refusalOtherHash(s *vault.Session, r *record, body []byte, rf *votewire.Refusal) {
+	r.Ballot.Refusals = keepRefusal(r.Ballot.Refusals, body)
+	r.ChangedMS = s.Now().UnixMilli()
+	if rf.NoProposal() {
+		f.event(s, r, "ballot")
+		return
+	}
+	f.problem(s, r)
+}
+
+// timed reports whether ms, the relay's time an answer claims for the
+// request it answers (re), is the time of one of the vault's own deposits of
+// that request (BALLOT-PROTOCOL 0.15.0 §4.2). A mismatch, or a request whose
+// deposit answer was lost, makes the answer no answer, never evidence.
+func timed(s *vault.Session, re string, ms uint64) bool {
+	for _, t := range s.DepositTimes(re) {
+		if t >= 0 && uint64(t) == ms {
+			return true
+		}
+	}
+	return false
 }
 
 // intakeStatus keeps a proposal from a status answer (§10.19.4 "A proposal
@@ -1024,7 +1099,7 @@ func (f *Feature) intakeStatus(s *vault.Session, ref pendRef, a *votewire.Status
 	// The answer's signatures first: nothing is kept (not even a rejected
 	// record) from an answer that does not verify under the service's key.
 	p, err := votewire.ParseProposal(a.Proposal)
-	if err != nil || !isConnKey(s, conn, p.Service) || a.VerifySig(p.Service, votewire.H(a.Proposal)) != nil {
+	if err != nil || !isConnKey(s, conn, p.Service) || a.VerifySig(p.Service, ownConnections(s)) != nil {
 		return
 	}
 	msg := &votewire.ProposalMsg{Proposal: a.Proposal, ProposalSig: a.ProposalSig, Bundle: a.Bundle, RecordSecret: a.RecordSecret, RecordProof: a.RecordProof}

@@ -255,6 +255,10 @@ func TestResultsFailures(t *testing.T) {
 		if err != nil || out.State != CheckFailed || out.Reason != "results" {
 			t.Errorf("%s: %+v %v", name, out, err)
 		}
+		// Failed results show no tally, counts or outcome.
+		if g := obj(t, c.app("vote.get", pairBody("svc", v.ID))); g.Has("outcome") || g.Has("tally") || g.Has("counts") {
+			t.Errorf("%s: vote.get shows the failed results", name)
+		}
 	}
 }
 

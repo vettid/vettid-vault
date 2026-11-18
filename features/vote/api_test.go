@@ -247,8 +247,15 @@ func TestAPIGetTallyOnlyFromVerifiedResults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := json.Unmarshal(c.app("vote.get", pairBody("svc", v.ID)).Body, &after); err != nil || after.Outcome == nil || !after.Outcome.Equal(res.Outcome) {
+	body := c.app("vote.get", pairBody("svc", v.ID)).Body
+	if err := json.Unmarshal(body, &after); err != nil || after.Outcome == nil || !after.Outcome.Equal(res.Outcome) {
 		t.Errorf("outcome %+v, want %+v (%v)", after.Outcome, res.Outcome, err)
+	}
+	// The members that don't apply are written as null, not left out (§8.5).
+	for _, want := range []string{`"threshold":null`, `"choice":null`} {
+		if !bytes.Contains(body, []byte(want)) {
+			t.Errorf("vote.get lacks %s: %s", want, body)
+		}
 	}
 	ck, _ := g.Object("check")
 	if st, _ := ck.String("state"); st != CheckVerified {
@@ -459,6 +466,32 @@ func TestAPIPadIgnored(t *testing.T) {
 		r := c.app("vote.results.submit", string(body))
 		if p.ok != r.OK() || (!p.ok && r.Code != "bad_request") {
 			t.Errorf("vote.results.submit %s: %q %s", p.name, r.Code, r.Body)
+		}
+	}
+}
+
+// decisionJSON and outcomeJSON write BALLOT-PROTOCOL §8.5's shapes exactly:
+// every member present, null where it doesn't apply, in §8.5's order.
+func TestDecisionAndOutcomeJSON(t *testing.T) {
+	cast, voted := votewire.BaseCast, votewire.BaseVoted
+	yes := "yes"
+	for want, d := range map[string]votewire.Decision{
+		`{"rule":"plurality","base":null,"threshold":null}`:                 {Rule: votewire.RulePlurality},
+		`{"rule":"majority","base":"cast","threshold":null}`:                {Rule: votewire.RuleMajority, Base: &cast},
+		`{"rule":"threshold","base":"voted","threshold":{"num":2,"den":3}}`: {Rule: votewire.RuleThreshold, Base: &voted, Threshold: &votewire.Threshold{Num: 2, Den: 3}},
+	} {
+		if got := string(decisionJSON(d)); got != want {
+			t.Errorf("decision: got %s, want %s", got, want)
+		}
+	}
+	for want, o := range map[string]votewire.Outcome{
+		`{"quorum_met":false,"status":"no_quorum","choice":null}`:  {Status: votewire.StatusNoQuorum},
+		`{"quorum_met":true,"status":"not_decided","choice":null}`: {QuorumMet: true, Status: votewire.StatusNotDecided},
+		`{"quorum_met":true,"status":"tied","choice":null}`:        {QuorumMet: true, Status: votewire.StatusTied},
+		`{"quorum_met":true,"status":"decided","choice":"yes"}`:    {QuorumMet: true, Status: votewire.StatusDecided, Choice: &yes},
+	} {
+		if got := string(outcomeJSON(o)); got != want {
+			t.Errorf("outcome: got %s, want %s", got, want)
 		}
 	}
 }

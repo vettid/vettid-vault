@@ -439,7 +439,8 @@ func (f *Feature) apiGet(s *vault.Session, body []byte) (json.RawMessage, error)
 		// under the record's own voting key ("Is this your vote?").
 		b.Raw("service_ballot", strictjson.NewBuilder().String("choice_id", sb.ChoiceID).String("pad", votewire.Pad(sb.ChoiceID)).Uint("msg_ms", uint64(sb.MsgMS)).Bytes())
 	}
-	// tally and counts come only from verified results.
+	// tally, counts and outcome come only from results the check judged
+	// verified or unconfirmed.
 	if r.Results != nil && (r.Check == CheckVerified || r.Check == CheckUnconfirmed) {
 		if res, err := votewire.ParseResults(r.Results.Doc); err == nil {
 			t := strictjson.NewBuilder()
@@ -681,4 +682,3 @@ func outcomeJSON(o votewire.Outcome) []byte {
 	}
 	return b.Bytes()
 }
-

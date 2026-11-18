@@ -1013,16 +1013,16 @@ const (
 	OpDeleteClaim = "delete_claim"
 )
 
-// OutboxEntry is a relay side effect made durable before it is performed
-// (§8.3 step 5). Deposits carry the sealed envelope; the token is resolved
-// at deposit time from the peer's record unless Token is set (open and
-// reconnect tokens, best-effort notices to removed peers).
 // DepositTimes are the relay's times of a request's deposits.
 type DepositTimes struct {
 	MS []int64   `json:"ms"`
 	At time.Time `json:"at"` // the first, for the pruning
 }
 
+// OutboxEntry is a relay side effect made durable before it is performed
+// (§8.3 step 5). Deposits carry the sealed envelope; the token is resolved
+// at deposit time from the peer's record unless Token is set (open and
+// reconnect tokens, best-effort notices to removed peers).
 type OutboxEntry struct {
 	ID       string `json:"id"`
 	Op       string `json:"op"`

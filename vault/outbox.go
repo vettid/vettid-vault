@@ -1252,6 +1252,7 @@ func (m *Manager) recordDepositTime(e *OutboxEntry, msgID string, now time.Time)
 		}
 		d = &DepositTimes{At: now}
 		m.st.DepositTimes[e.InnerID] = d
+		m.dirty = true
 	}
 	for _, x := range d.MS {
 		if x == ms {
@@ -1260,8 +1261,8 @@ func (m *Manager) recordDepositTime(e *OutboxEntry, msgID string, now time.Time)
 	}
 	if len(d.MS) < maxDepositTimes {
 		d.MS = append(d.MS, ms)
+		m.dirty = true
 	}
-	m.dirty = true
 }
 
 // depositTimes returns the relay's times of the request's deposits.

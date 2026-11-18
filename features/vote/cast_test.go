@@ -38,6 +38,7 @@ type cenv struct {
 	// untimed: respond records no relay time for the answer, as when the
 	// vault never learned its deposit's msg_id (BALLOT-PROTOCOL 0.15.0).
 	untimed bool
+	bundles map[string][]byte // auth0Bundle's, by proposal bytes
 }
 
 func newCastEnv(t *testing.T) *cenv {
@@ -503,6 +504,15 @@ func (c *cenv) statusBody(v *votetest.Vote, ballot *votewire.RowBallot, msgMS ui
 	return b.Base64("status_sig", statusSig).Bytes()
 }
 
+// auth0Bundle is the proposal's anchor bundle: made once per proposal, as
+// the service publishes one and sends it in every status answer.
 func (c *cenv) auth0Bundle(v *votetest.Vote) []byte {
-	return c.env.auth.Bundle(v.Doc, c.svc.Anchor, c.now)
+	if b, ok := c.bundles[string(v.Doc)]; ok {
+		return b
+	}
+	if c.bundles == nil {
+		c.bundles = map[string][]byte{}
+	}
+	c.bundles[string(v.Doc)] = c.env.auth.Bundle(v.Doc, c.svc.Anchor, c.now)
+	return c.bundles[string(v.Doc)]
 }

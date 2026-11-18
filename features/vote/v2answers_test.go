@@ -194,51 +194,70 @@ func TestV2EvidenceMarksV1Answers(t *testing.T) {
 	}
 }
 
-// far is a receipt time no extension can reach: past the original close
-// plus the most an extension adds.
-func far(v *votetest.Vote, r *record) uint64 {
-	return uint64((r.OrigClose + votewire.MaxExtension + 3600) * 1000)
+// unreachable are receipt times no extension can make valid: before the
+// open, and past the original close plus the most an extension adds.
+func unreachable(r *record) map[string]uint64 {
+	return map[string]uint64{
+		"before the open":     uint64((r.Opens - 3600) * 1000),
+		"past the last close": uint64((r.OrigClose + votewire.MaxExtension + 3600) * 1000),
+	}
 }
 
-// (§8.3) A status naming another ballot than the vault's receipt is
-// evidence whatever the times: one whose receipt time no extension can
-// reach is conflict evidence, its receipt never taken.
+// (VAULT-MESSAGING 0.81.3, 0.90.19) A status naming another ballot whose
+// receipt time no extension can reach is conflict evidence at once, its
+// receipt rejected at once: the results check then ends, it never waits
+// for an extension.
 func TestV2ForeignBallotOutsideAnyWindowInAStatus(t *testing.T) {
-	c := newCastEnv(t)
-	v := c.open(1)
-	c.cast(v, "yes")
-	_, ids := c.casts()
-	c.okReceipt(v, ids[0], c.leafOf(v), uint64(c.now.UnixMilli()))
-	c.f.Check(c.session(), "svc", v.ID)
-	_, vk2, _ := ed25519.GenerateKey(rand.Reader)
-	other := must(votewire.SignBallot(vk2, v.Hash, v.Tag, "no"))
-	c.answer(v, c.statuses()[0], other, far(v, c.rec(v.ID)), true)
-	r := c.rec(v.ID)
-	if r.Ballot.State != BallotRecorded || !r.ConflictEv || r.Other == nil || !c.has("vote.conflict", v.ID) || !r.problem() {
-		t.Errorf("%s, conflict %v, other %v", r.Ballot.State, r.ConflictEv, r.Other != nil)
+	probe := newCastEnv(t)
+	for name := range unreachable(probe.rec(probe.open(1).ID)) {
+		_, vk2, _ := ed25519.GenerateKey(rand.Reader)
+		c, v := closedWith(t, func(c *cenv, v *votetest.Vote) {
+			receipted(c, v)
+			c.f.Check(c.session(), "svc", v.ID)
+			other := must(votewire.SignBallot(vk2, v.Hash, v.Tag, "no"))
+			c.answer(v, c.statuses()[0], other, unreachable(c.rec(v.ID))[name], true)
+		})
+		r := c.rec(v.ID)
+		if r.Ballot.State != BallotRecorded || !r.ConflictEv || r.Other == nil || !c.has("vote.conflict", v.ID) || !r.problem() {
+			t.Errorf("%s: %s, conflict %v, other %v", name, r.Ballot.State, r.ConflictEv, r.Other != nil)
+		}
+		if r.Other != nil && (!r.Other.Late || !r.Other.LateRejected) || r.asidePending() != 0 || !c.has("vote.receipt_rejected", v.ID) {
+			t.Errorf("%s: the receipt not rejected at once (pending %d)", name, r.asidePending())
+		}
+		out, err := c.f.SubmitResults(c.session(), "svc", v.ID, c.resultsFor(v, resOpts{mine: c.ownBallot(v)}))
+		if err != nil || out.State == CheckPending || !out.ConflictEvidence {
+			t.Errorf("%s: the check %+v %v", name, out, err)
+		}
 	}
 }
 
 // The same for an already_voted refusal carrying another ballot.
 func TestV2ForeignBallotOutsideAnyWindowInAlreadyVoted(t *testing.T) {
-	c := newCastEnv(t)
-	w := c.open(1)
-	c.cast(w, "yes")
-	_, ids := c.casts()
-	now := uint64(c.now.UnixMilli())
-	ballotMS := far(w, c.rec(w.ID))
-	_, vk2, _ := ed25519.GenerateKey(rand.Reader)
-	other := must(votewire.SignBallot(vk2, w.Hash, w.Tag, "no"))
-	orsig, _ := suite.Sign(c.svc.IK, votewire.LabelReceipt, must(votewire.ReceiptMsg(w.Hash, must(other.Leaf()), ballotMS)))
-	msg := must(votewire.RefusalMsg(w.Hash, w.ID, votewire.H(c.h.IK), w.Tag, "vote.cast", "already_voted", now, votewire.H(c.leafOf(w))))
-	sig, _ := suite.Sign(c.svc.IK, votewire.LabelRefusal, msg)
-	body := strictjson.NewBuilder().Base64("refusal_sig", sig).Base64("proposal_hash", w.Hash).Uint("msg_ms", now).Base64("connection", votewire.H(c.h.IK)).Base64("record_tag", w.Tag).
-		Raw("ballot", strictjson.NewBuilder().Base64("vk", other.VK).String("choice_id", "no").Base64("ballot_sig", other.BallotSig).Bytes()).
-		Uint("ballot_msg_ms", ballotMS).Base64("receipt_sig", orsig).Bytes()
-	c.respond(ids[0], "vote.cast", &envelope.Inner{Status: envelope.StatusError, Error: &envelope.Error{Code: "already_voted"}, Body: body})
-	r := c.rec(w.ID)
-	if r.Other == nil || !c.has("vote.conflict", w.ID) || !r.problem() {
-		t.Errorf("%s, other %v", r.Ballot.State, r.Other != nil)
+	probe := newCastEnv(t)
+	for name := range unreachable(probe.rec(probe.open(1).ID)) {
+		c, w := closedWith(t, func(c *cenv, w *votetest.Vote) {
+			c.cast(w, "yes")
+			_, ids := c.casts()
+			now := uint64(c.now.UnixMilli())
+			ballotMS := unreachable(c.rec(w.ID))[name]
+			_, vk2, _ := ed25519.GenerateKey(rand.Reader)
+			other := must(votewire.SignBallot(vk2, w.Hash, w.Tag, "no"))
+			orsig, _ := suite.Sign(c.svc.IK, votewire.LabelReceipt, must(votewire.ReceiptMsg(w.Hash, must(other.Leaf()), ballotMS)))
+			msg := must(votewire.RefusalMsg(w.Hash, w.ID, votewire.H(c.h.IK), w.Tag, "vote.cast", "already_voted", now, votewire.H(c.leafOf(w))))
+			sig, _ := suite.Sign(c.svc.IK, votewire.LabelRefusal, msg)
+			body := strictjson.NewBuilder().Base64("refusal_sig", sig).Base64("proposal_hash", w.Hash).Uint("msg_ms", now).Base64("connection", votewire.H(c.h.IK)).Base64("record_tag", w.Tag).
+				Raw("ballot", strictjson.NewBuilder().Base64("vk", other.VK).String("choice_id", "no").Base64("ballot_sig", other.BallotSig).Bytes()).
+				Uint("ballot_msg_ms", ballotMS).Base64("receipt_sig", orsig).Bytes()
+			c.respond(ids[0], "vote.cast", &envelope.Inner{Status: envelope.StatusError, Error: &envelope.Error{Code: "already_voted"}, Body: body})
+		})
+		r := c.rec(w.ID)
+		if r.Other == nil || !c.has("vote.conflict", w.ID) || !r.problem() || r.asidePending() != 0 {
+			t.Errorf("%s: %s, other %v, pending %d", name, r.Ballot.State, r.Other != nil, r.asidePending())
+		}
+		out, err := c.f.SubmitResults(c.session(), "svc", w.ID, c.resultsFor(w, resOpts{mine: c.ownBallot(w)}))
+		if err != nil || out.State == CheckPending {
+			t.Errorf("%s: the check %+v %v", name, out, err)
+		}
 	}
 }
 
@@ -360,6 +379,125 @@ func TestV2CompactEvidenceMarksV1(t *testing.T) {
 		}
 		if _, ok := u["status_answers"]; ok != released {
 			t.Errorf("released %v: status_answers %s", released, u["status_answers"])
+		}
+	}
+}
+
+// A kept proof survives the honest answers that follow it, the clock
+// moving between them (each v2 answer carries a fresh time and signature):
+// an answer the same but for those is kept once, so the record's digest
+// (what the member exported) does not change with each hourly answer.
+func TestV2KeptEvidenceSurvivesRepeatedAnswers(t *testing.T) {
+	c := newCastEnv(t)
+	v := c.open(1)
+	c.cast(v, "yes")
+	c.f.Check(c.session(), "svc", v.ID)
+	sid := c.statuses()[0]
+	w := c.svc.NewVote(votetest.VoteSpec{ID: v.ID, Opens: c.now.Add(-time.Hour), Closes: c.now.Add(5 * time.Hour)})
+	sig, _ := c.statusSigBy(c.svc.IK, w, nil)
+	proof := c.statusBody(w, nil, 0, nil, sig)
+	c.pending(sid, "status", v)
+	c.respond(sid, "vote.status", &envelope.Inner{Status: envelope.StatusOK, Body: proof})
+	r := c.rec(v.ID)
+	if len(r.StatusAnswers) != 1 || !r.RefusalProblem {
+		t.Fatalf("setup: %d kept, problem %v", len(r.StatusAnswers), r.RefusalProblem)
+	}
+	var digest []byte
+	for i := 0; i < 2*votewire.MaxRefusalsKept; i++ {
+		c.now = c.now.Add(time.Hour)
+		c.pending(sid, "status", v)
+		c.answer(v, sid, nil, 0, false)
+		if i == 0 {
+			digest = r.digest()
+		}
+	}
+	if len(r.StatusAnswers) != 2 || !bytes.Equal(r.StatusAnswers[0], proof) {
+		t.Errorf("%d kept, the proof first: %v", len(r.StatusAnswers), len(r.StatusAnswers) > 0 && bytes.Equal(r.StatusAnswers[0], proof))
+	}
+	if !bytes.Equal(digest, r.digest()) {
+		t.Error("the digest changed with the same answer again")
+	}
+	// The same for refusals: a zero-hash refusal again at another time.
+	_, ids := c.casts()
+	for i := 0; i < 3; i++ {
+		c.now = c.now.Add(time.Minute)
+		c.pending(ids[0], "cast", v)
+		c.depositsOnly(ids[0], c.now.UnixMilli())
+		c.refusal(v, ids[0], "vote.cast", "not_eligible", votewire.H(c.leafOf(v)), zeroHash, msgAt(uint64(c.now.UnixMilli())))
+	}
+	if n := len(r.Ballot.Refusals); n != 1 {
+		t.Errorf("the same zero-hash refusal kept %d times", n)
+	}
+}
+
+// When the list is full, an answer that is not evidence never pushes out
+// one that is; the oldest that is not evidence goes first.
+func TestV2KeepNeverEvictsEvidence(t *testing.T) {
+	r := &record{Proposal: []byte("held proposal")}
+	ref := func(h byte) []byte { // a signed refusal under the hash h..h (0: the zero hash)
+		return []byte(`{"refusal_sig":"AAAA","proposal_hash":"` + base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{h}, 32)) + `","msg_ms":1}`)
+	}
+	var list [][]byte
+	for i := 1; i <= votewire.MaxRefusalsKept; i++ {
+		list, _ = r.keep(list, ref(byte(i)))
+	}
+	l2, added := r.keep(list, ref(0))
+	if added || len(l2) != votewire.MaxRefusalsKept || !bytes.Equal(l2[0], ref(1)) {
+		t.Fatalf("a non-evidence answer into a full list of evidence: added %v", added)
+	}
+	// Seven evidence and one zero-hash answer: a new evidence one pushes the
+	// zero-hash one out, not the oldest evidence.
+	list = append(list[1:], ref(0))
+	l3, added := r.keep(list, ref(99))
+	if !added || len(l3) != votewire.MaxRefusalsKept || !bytes.Equal(l3[0], ref(2)) || bytes.Equal(l3[len(l3)-2], ref(0)) {
+		t.Errorf("evidence into a full list: added %v", added)
+	}
+	for _, x := range l3 {
+		if bytes.Equal(x, ref(0)) {
+			t.Error("the zero-hash answer kept over evidence")
+		}
+	}
+	// The same answer but for the request's time and signature is held.
+	if _, added := r.keep(l3, []byte(`{"refusal_sig":"BBBB","proposal_hash":"`+base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{99}, 32))+`","msg_ms":2}`)); added {
+		t.Error("the same refusal at another time kept again")
+	}
+}
+
+// A late refusal under another hash timed at no deposit of its request is
+// no answer, as on the live path.
+func TestV2LateRefusalMustBeTimed(t *testing.T) {
+	c := newCastEnv(t)
+	v := c.open(1)
+	c.cast(v, "yes")
+	_, ids := c.casts()
+	c.okReceipt(v, ids[0], c.leafOf(v), uint64(c.now.UnixMilli()))
+	c.pending(ids[0], "cast", v)
+	c.depositsOnly(ids[0], c.now.UnixMilli()-1)
+	c.refusal(v, ids[0], "vote.cast", "not_eligible", votewire.H(c.leafOf(v)), hashOf(votewire.H([]byte("other"))))
+	if r := c.rec(v.ID); r.RefusalProblem || len(r.Ballot.Refusals) != 0 {
+		t.Error("an untimed late refusal was kept")
+	}
+}
+
+// What counts as evidence when the list is full: a status answer for the
+// held proposal is evidence only with a ballot; another proposal, a stored
+// v1 answer and a non-zero refusal hash are; a zero hash is not.
+func TestV2EvidenceAnswer(t *testing.T) {
+	held := []byte("held proposal")
+	r := &record{Proposal: held}
+	b64 := base64.StdEncoding.EncodeToString
+	for body, want := range map[string]bool{
+		`{"status_msg_ms":1,"proposal":"` + b64(held) + `","status_sig":"AAAA"}`:                        false,
+		`{"status_msg_ms":1,"proposal":"` + b64(held) + `","ballot":{"vk":"AAAA"},"status_sig":"AAAA"}`: true,
+		`{"status_msg_ms":1,"proposal":"` + b64([]byte("other")) + `","status_sig":"AAAA"}`:             true,
+		`{"proposal":"` + b64(held) + `","status_sig":"AAAA"}`:                                          true, // v1
+		`{"refusal_sig":"AAAA","proposal_hash":"` + b64(make([]byte, 32)) + `","msg_ms":1}`:             false,
+		`{"refusal_sig":"AAAA","proposal_hash":"` + b64(bytes.Repeat([]byte{1}, 32)) + `","msg_ms":1}`:  true,
+		`{"refusal_sig":"AAAA","msg_ms":1}`:                                                             true, // v1
+		`{"refusal_sig":null,"msg_ms":1}`:                                                               false,
+	} {
+		if got := r.evidenceAnswer([]byte(body)); got != want {
+			t.Errorf("%s: %v, want %v", body, got, want)
 		}
 	}
 }

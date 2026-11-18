@@ -80,6 +80,8 @@ func (c *cenv) resultsFor(v *votetest.Vote, o resOpts) ResultsSubmit {
 	res := &votewire.Results{V: 1, ProposalID: v.ID, Proposal: votewire.Signed{Doc: v.Doc, Sig: v.Sig}, Extensions: exts,
 		RowsHash: votewire.H([]byte("rows")), RowsRoot: votewire.Root(leaves), Tally: tally,
 		Counts: votewire.Counts{Eligible: int64(len(v.Tags)), Ballots: ballots}}
+	// The outcome as the service computes it (BALLOT-PROTOCOL 0.14.0 §7.1).
+	res.Outcome = must(votewire.Decide(v.Proposal, tally, ballots))
 	if o.tamper != nil {
 		o.tamper(res)
 	}
@@ -186,6 +188,12 @@ func TestResultsTable(t *testing.T) {
 		if r.Check != x.state || r.Results == nil {
 			t.Errorf("%s: not kept: %+v", x.name, r.Check)
 		}
+		// Kept results show their tally, counts and outcome only when the check
+		// verified them or left them unconfirmed, never when it failed.
+		g := obj(t, c.app("vote.get", pairBody("svc", v.ID)))
+		if shown := x.state != CheckFailed; g.Has("outcome") != shown || g.Has("tally") != shown || g.Has("counts") != shown {
+			t.Errorf("%s (%s): vote.get shows the results %v", x.name, x.state, g.Has("outcome"))
+		}
 		switch x.state {
 		case CheckFailed:
 			if !c.has("vote.check_failed", v.ID+":"+x.reason) || !c.has("vote.problem", v.ID) || !r.problem() {
@@ -225,6 +233,39 @@ func TestResultsFailures(t *testing.T) {
 			other := (v.Index + 1) % len(v.Tags)
 			return resOpts{dupAt: &other}
 		},
+		// (BALLOT-PROTOCOL 0.14.0 §8.3 step 2) From results.json alone: an
+		// outcome that does not recompute, one not consistent in itself, a
+		// negative count, a sum other than counts.ballots.
+		"an outcome that does not recompute": func(c *cenv, v *votetest.Vote) resOpts {
+			return resOpts{tamper: func(r *votewire.Results) {
+				no := "no"
+				r.Outcome = votewire.Outcome{QuorumMet: true, Status: votewire.StatusDecided, Choice: &no}
+			}}
+		},
+		"an outcome not consistent in itself": func(c *cenv, v *votetest.Vote) resOpts {
+			return resOpts{tamper: func(r *votewire.Results) { r.Outcome.QuorumMet = !r.Outcome.QuorumMet }}
+		},
+		"a negative count": func(c *cenv, v *votetest.Vote) resOpts {
+			return resOpts{tamper: func(r *votewire.Results) { r.Tally["no"]--; r.Tally["abstain"]++ }}
+		},
+		"a tally that does not sum to ballots": func(c *cenv, v *votetest.Vote) resOpts {
+			return resOpts{tamper: func(r *votewire.Results) { r.Tally["abstain"]++ }}
+		},
+		"negative unhandled": func(c *cenv, v *votetest.Vote) resOpts {
+			return resOpts{tamper: func(r *votewire.Results) { r.Counts.Unhandled = -1 }}
+		},
+		"negative removed": func(c *cenv, v *votetest.Vote) resOpts {
+			return resOpts{tamper: func(r *votewire.Results) { r.Counts.Removed = -1 }}
+		},
+		// A negative count in a tally that otherwise adds up, with the outcome
+		// a computation without the rule would give: only the rule refuses it.
+		"a negative count that sums": func(c *cenv, v *votetest.Vote) resOpts {
+			return resOpts{tamper: func(r *votewire.Results) {
+				r.Tally = map[string]int64{"yes": 2, "no": 2, "abstain": -1}
+				r.Counts.Ballots = 3
+				r.Outcome = votewire.Outcome{QuorumMet: true, Status: votewire.StatusNotDecided}
+			}}
+		},
 	}
 	for name, mk := range cases {
 		c, v := closedWith(t, nil)
@@ -232,6 +273,7 @@ func TestResultsFailures(t *testing.T) {
 		if err != nil || out.State != CheckFailed || out.Reason != "results" {
 			t.Errorf("%s: %+v %v", name, out, err)
 		}
+
 	}
 }
 

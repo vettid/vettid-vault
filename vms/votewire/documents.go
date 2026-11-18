@@ -35,6 +35,7 @@ type Proposal struct {
 	Title          string   `json:"title"`
 	Text           string   `json:"text"`
 	Choices        []Choice `json:"choices"`
+	Decision       Decision `json:"decision"`
 	Quorum         Quorum   `json:"quorum"`
 	Binding        bool     `json:"binding"`
 	RemovedMayVote bool     `json:"removed_may_vote"`
@@ -86,6 +87,7 @@ type Results struct {
 	RowsRoot   []byte           `json:"rows_root"`
 	Tally      map[string]int64 `json:"tally"`
 	Counts     Counts           `json:"counts"`
+	Outcome    Outcome          `json:"outcome"`
 }
 
 // AnchorKey is one anchor key of a service list entry: an ECDSA P-256
@@ -115,17 +117,22 @@ type ServiceList struct {
 
 // schema is the exact member names of a document's objects: a key maps to
 // nested names for an object, a one-element []any{schema} for an array of
-// objects, "map" for an object of integers, or nil for a leaf (whose type
-// the decode checks).
+// objects, "map" for an object of integers, orNull for a member that may be
+// null (BALLOT-PROTOCOL 0.14.0: a decision's base and threshold, an
+// outcome's choice), or nil for a leaf (whose type the decode checks).
 type schema map[string]any
+
+// orNull is a member that is null or else as its schema (nil: a leaf).
+type orNull struct{ s any }
 
 var (
 	signedSchema   = schema{"doc": nil, "sig": nil}
 	proposalSchema = schema{
 		"v": nil, "proposal_id": nil, "service": nil, "title": nil, "text": nil,
-		"choices": []any{schema{"id": nil, "label": nil}},
-		"quorum":  schema{"text": nil, "min_ballots": nil},
-		"binding": nil, "removed_may_vote": nil, "record_at": nil, "opens_at": nil,
+		"choices":  []any{schema{"id": nil, "label": nil}},
+		"decision": schema{"rule": nil, "base": orNull{}, "threshold": orNull{schema{"num": nil, "den": nil}}},
+		"quorum":   schema{"text": nil, "min_ballots": nil},
+		"binding":  nil, "removed_may_vote": nil, "record_at": nil, "opens_at": nil,
 		"closes_at": nil, "eligible": nil, "record_root": nil, "outage_rule": nil,
 	}
 	extensionSchema = schema{
@@ -135,8 +142,9 @@ var (
 	resultsSchema = schema{
 		"v": nil, "proposal_id": nil, "proposal": signedSchema,
 		"extensions": []any{signedSchema}, "rows_hash": nil, "rows_root": nil,
-		"tally":  "map",
-		"counts": schema{"eligible": nil, "ballots": nil, "removed": nil, "unhandled": nil},
+		"tally":   "map",
+		"counts":  schema{"eligible": nil, "ballots": nil, "removed": nil, "unhandled": nil},
+		"outcome": schema{"quorum_met": nil, "status": nil, "choice": orNull{}},
 	}
 	serviceListSchema = schema{
 		"v": nil, "version": nil, "previous": nil,
@@ -152,6 +160,15 @@ var (
 func checkSchema(m map[string]any, s schema) error {
 	for k, sub := range s {
 		v, ok := m[k]
+		if n, nullable := sub.(orNull); nullable {
+			if !ok {
+				return ErrDocument
+			}
+			if v == nil {
+				continue
+			}
+			sub = n.s
+		}
 		if !ok || v == nil {
 			return ErrDocument
 		}
@@ -235,7 +252,9 @@ func ParseProposal(data []byte) (*Proposal, error) {
 // unique ids matching [a-z0-9-]{1,32} and `abstain` among them, each label
 // 1 to 200 bytes, quorum.text at most 1,024 bytes and min_ballots at least
 // 0, outage_rule at most 1,024 bytes, opens_at < closes_at with a window of
-// at most 604,800 s, eligible 1 to 100,000, and every string valid UTF-8.
+// at most 604,800 s, eligible 1 to 100,000, and every string valid UTF-8;
+// (BALLOT-PROTOCOL 0.14.0) a decision §3.5 allows and min_ballots at most
+// eligible; (0.14.1) removed_may_vote false.
 func (p *Proposal) Validate() error {
 	switch {
 	case p.V != 1,
@@ -249,6 +268,9 @@ func (p *Proposal) Validate() error {
 		p.RecordAt > p.OpensAt, // as the service (spec erratum pending, finding 1)
 		p.OpensAt >= p.ClosesAt || p.ClosesAt-p.OpensAt > MaxWindow,
 		p.Eligible < 1 || p.Eligible > MaxEligible,
+		p.Quorum.MinBallots > p.Eligible, // (0.14.0)
+		p.RemovedMayVote,                 // always false (0.14.1)
+		p.Decision.Validate() != nil,     // (0.14.0)
 		len(p.RecordRoot) != HashLen:
 		return ErrDocument
 	}
@@ -364,8 +386,7 @@ func ParseResults(data []byte) (*Results, error) {
 		return nil, err
 	}
 	if r.V != 1 || !ValidProposalID(r.ProposalID) || len(r.RowsHash) != HashLen || len(r.RowsRoot) != HashLen ||
-		len(r.Proposal.Sig) != SigLen || r.Tally == nil || r.Extensions == nil || len(r.Extensions) > MaxExtensions || len(r.Tally) > MaxChoices ||
-		r.Counts.Eligible < 1 || r.Counts.Ballots < 0 || r.Counts.Removed < 0 || r.Counts.Unhandled < 0 {
+		len(r.Proposal.Sig) != SigLen || r.Tally == nil || r.Extensions == nil || len(r.Extensions) > MaxExtensions || len(r.Tally) > MaxChoices {
 		return nil, ErrDocument
 	}
 	for _, e := range r.Extensions {
@@ -373,25 +394,30 @@ func ParseResults(data []byte) (*Results, error) {
 			return nil, ErrDocument
 		}
 	}
-	for _, n := range r.Tally {
-		if n < 0 {
-			return nil, ErrDocument
-		}
-	}
+	// The tally, the counts and the outcome are judged against the proposal
+	// (CheckProposal): under the service's signature a wrong one is a
+	// failure with the evidence, not a document that does not parse
+	// (BALLOT-PROTOCOL 0.14.0 §8.3 step 2, §8.5: the tally's values and the
+	// counts are at least 0).
 	return &r, nil
 }
 
 // CheckProposal checks the results against the proposal they are for
-// (§10.19.6 step 2): the same proposal_id, `tally` naming exactly the
-// proposal's choices and `counts.eligible` equal to the proposal's.
+// (VAULT-MESSAGING §10.19.6 step 2, BALLOT-PROTOCOL 0.14.0 §8.3 step 2),
+// from results.json alone: the same proposal_id and `counts.eligible` the
+// proposal's, `counts.removed` and `counts.unhandled` at least 0; the tally naming exactly the proposal's choices, every count
+// at least 0, their sum `counts.ballots`, at most `counts.eligible`; and an
+// `outcome` consistent in itself (§8.5) that recomputes (§7.1).
 func (r *Results) CheckProposal(p *Proposal) error {
-	if r.ProposalID != p.ProposalID || r.Counts.Eligible != p.Eligible || len(r.Tally) != len(p.Choices) {
+	if r.ProposalID != p.ProposalID || r.Counts.Eligible != p.Eligible || r.Counts.Removed < 0 || r.Counts.Unhandled < 0 {
 		return ErrDocument
 	}
-	for _, c := range p.Choices {
-		if _, ok := r.Tally[c.ID]; !ok {
-			return ErrDocument
-		}
+	if err := r.Outcome.Validate(); err != nil {
+		return err
+	}
+	want, err := Decide(p, r.Tally, r.Counts.Ballots)
+	if err != nil || !want.Equal(r.Outcome) {
+		return ErrDocument
 	}
 	return nil
 }

@@ -423,6 +423,9 @@ func (f *Feature) apiGet(s *vault.Session, body []byte) (json.RawMessage, error)
 		}
 		b.Raw("choices", append(ch, ']'))
 		b.Raw("quorum", strictjson.NewBuilder().String("text", p.Quorum.Text).Uint("min_ballots", uint64(p.Quorum.MinBallots)).Bytes())
+		// How the vote is decided (BALLOT-PROTOCOL 0.14.0 §3.5): the apps show
+		// it before the member votes, from this answer.
+		b.Raw("decision", decisionJSON(p.Decision))
 		b.Bool("binding", p.Binding)
 	}
 	b.Base64("record_tag", r.Tag)
@@ -436,7 +439,8 @@ func (f *Feature) apiGet(s *vault.Session, body []byte) (json.RawMessage, error)
 		// under the record's own voting key ("Is this your vote?").
 		b.Raw("service_ballot", strictjson.NewBuilder().String("choice_id", sb.ChoiceID).String("pad", votewire.Pad(sb.ChoiceID)).Uint("msg_ms", uint64(sb.MsgMS)).Bytes())
 	}
-	// tally and counts come only from verified results.
+	// tally, counts and outcome come only from results the check judged
+	// verified or unconfirmed.
 	if r.Results != nil && (r.Check == CheckVerified || r.Check == CheckUnconfirmed) {
 		if res, err := votewire.ParseResults(r.Results.Doc); err == nil {
 			t := strictjson.NewBuilder()
@@ -451,6 +455,9 @@ func (f *Feature) apiGet(s *vault.Session, body []byte) (json.RawMessage, error)
 			b.Raw("tally", t.Bytes())
 			b.Raw("counts", strictjson.NewBuilder().Uint("eligible", uint64(res.Counts.Eligible)).Uint("ballots", uint64(res.Counts.Ballots)).
 				Uint("removed", uint64(res.Counts.Removed)).Uint("unhandled", uint64(res.Counts.Unhandled)).Bytes())
+			// The outcome (§7.1), recomputed by the check that verified
+			// these results; shown with counts.unhandled when that is above 0.
+			b.Raw("outcome", outcomeJSON(res.Outcome))
 		}
 	}
 	b.String("ik_fingerprint", suite.FormatIKFingerprint(r.ServiceIK))
@@ -646,4 +653,32 @@ func parseOtherRows(o strictjson.Object) ([]OtherRow, error) {
 		out = append(out, e)
 	}
 	return out, nil
+}
+
+// decisionJSON is a decision as BALLOT-PROTOCOL §8.5 writes it: base and
+// threshold null where they don't apply.
+func decisionJSON(d votewire.Decision) []byte {
+	b := strictjson.NewBuilder().String("rule", d.Rule)
+	if d.Base != nil {
+		b.String("base", *d.Base)
+	} else {
+		b.Raw("base", []byte("null"))
+	}
+	if t := d.Threshold; t != nil {
+		b.Raw("threshold", strictjson.NewBuilder().Uint("num", uint64(t.Num)).Uint("den", uint64(t.Den)).Bytes())
+	} else {
+		b.Raw("threshold", []byte("null"))
+	}
+	return b.Bytes()
+}
+
+// outcomeJSON is an outcome as §8.5 writes it: choice null unless decided.
+func outcomeJSON(o votewire.Outcome) []byte {
+	b := strictjson.NewBuilder().Bool("quorum_met", o.QuorumMet).String("status", o.Status)
+	if o.Choice != nil {
+		b.String("choice", *o.Choice)
+	} else {
+		b.Raw("choice", []byte("null"))
+	}
+	return b.Bytes()
 }

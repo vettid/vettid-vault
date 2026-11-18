@@ -246,6 +246,25 @@ func TestStep2To4Rejections(t *testing.T) {
 				return e.svc.NewVote(votetest.VoteSpec{ID: "01JBQZ00000000000000000007", Opens: e.now.Add(-time.Hour), Closes: e.now.Add(time.Hour),
 					Edit: func(p *votewire.Proposal) { p.Title = "" }})
 			}},
+		// (BALLOT-PROTOCOL 0.14.0 §3.5) A decision §3.5 doesn't allow is
+		// refused on arrival, never found only at the close.
+		{name: "a decision with no base", id: "01JBQZ00000000000000000008", reason: "malformed",
+			build: func() *votetest.Vote {
+				return e.svc.NewVote(votetest.VoteSpec{ID: "01JBQZ00000000000000000008", Opens: e.now.Add(-time.Hour), Closes: e.now.Add(time.Hour),
+					Edit: func(p *votewire.Proposal) { p.Decision.Base = nil }})
+			}},
+		// (0.14.1) removed_may_vote is always false: true is refused on arrival.
+		{name: "removed_may_vote true", id: "01JBQZ00000000000000000009", reason: "malformed",
+			build: func() *votetest.Vote {
+				return e.svc.NewVote(votetest.VoteSpec{ID: "01JBQZ00000000000000000009", Opens: e.now.Add(-time.Hour), Closes: e.now.Add(time.Hour),
+					Edit: func(p *votewire.Proposal) { p.RemovedMayVote = true }})
+			}},
+		// (0.14.0) A quorum of more ballots than eligible members.
+		{name: "min_ballots above eligible", id: "01JBQZ0000000000000000000A", reason: "malformed",
+			build: func() *votetest.Vote {
+				return e.svc.NewVote(votetest.VoteSpec{ID: "01JBQZ0000000000000000000A", Opens: e.now.Add(-time.Hour), Closes: e.now.Add(time.Hour),
+					Edit: func(p *votewire.Proposal) { p.Quorum.MinBallots = p.Eligible + 1 }})
+			}},
 	}
 	for _, c := range cases {
 		v := e.svc.NewVote(votetest.VoteSpec{ID: c.id, Opens: e.now.Add(-time.Hour), Closes: e.now.Add(time.Hour)})

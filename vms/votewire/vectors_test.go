@@ -11,8 +11,8 @@ import (
 )
 
 // The vectors of VAULT-MESSAGING §16 "§10.19 votes", copied byte for byte
-// from vettid/service-vault vote/testdata/vectors.json at 61aca6e
-// (BALLOT-PROTOCOL 0.13.10 §11, sha256 9bbc4fee...6a81). The file is
+// from vettid/service-vault vote/testdata/vectors.json at be57292
+// (BALLOT-PROTOCOL 0.14.1 §11, sha256 ff9fcf78...28c4). The file is
 // authoritative: a vector that stops matching is a stop-and-report item
 // (BALLOT-PROTOCOL §11), never a reason to edit the file here.
 const vectorsFile = "../../testdata/vote/vectors.json"
@@ -67,16 +67,60 @@ type vectors struct {
 		Sig   string `json:"sig"`
 		Valid bool   `json:"valid"`
 	} `json:"ed25519"`
-	Documents struct {
-		ServiceSeed  string `json:"service_seed"`
-		Proposal     string `json:"proposal"`
-		ProposalSig  string `json:"proposal_sig"`
-		Extension    string `json:"extension"`
-		ExtensionSig string `json:"extension_sig"`
-		Rows         string `json:"rows"`
-		Results      string `json:"results"`
-		ResultsSig   string `json:"results_sig"`
-	} `json:"documents"`
+	Documents docVectors `json:"documents"`
+	// DocumentsDecided is a vote of four members, all voting (yes, no,
+	// abstain, yes): its outcome is decided, for yes (0.14.0).
+	DocumentsDecided docVectors `json:"documents_decided"`
+	// §11 item 5 (0.14.0).
+	Outcomes      []outcomeCase  `json:"outcomes"`
+	Decisions     []decisionCase `json:"decisions"`
+	OutcomeShapes []outcomeShape `json:"outcome_shapes"`
+	// A canonical proposal whose removed_may_vote is true, which every
+	// verifier refuses (0.14.1).
+	ProposalRemovedMayVote string `json:"proposal_removed_may_vote_true"`
+}
+
+// docVectors is §11 item 3: a vote's documents as the service builds and
+// signs them.
+type docVectors struct {
+	ServiceSeed  string `json:"service_seed"`
+	Proposal     string `json:"proposal"`
+	ProposalSig  string `json:"proposal_sig"`
+	Extension    string `json:"extension"`
+	ExtensionSig string `json:"extension_sig"`
+	Rows         string `json:"rows"`
+	Results      string `json:"results"`
+	ResultsSig   string `json:"results_sig"`
+}
+
+// outcomeCase is one outcome vector: a proposal's decision, quorum,
+// eligible and choices, a tally and its ballots, and the outcome (null:
+// the tally is refused).
+type outcomeCase struct {
+	Case           string           `json:"case"`
+	Decision       Decision         `json:"decision"`
+	RemovedMayVote bool             `json:"removed_may_vote"`
+	MinBallots     int64            `json:"min_ballots"`
+	Eligible       int64            `json:"eligible"`
+	Choices        []string         `json:"choices"`
+	Tally          map[string]int64 `json:"tally"`
+	Ballots        int64            `json:"ballots"`
+	Outcome        *Outcome         `json:"outcome"`
+}
+
+// decisionCase is a decision judged as a proposal's member.
+type decisionCase struct {
+	Case           string          `json:"case"`
+	Decision       json.RawMessage `json:"decision"`
+	RemovedMayVote bool            `json:"removed_may_vote"`
+	Valid          bool            `json:"valid"`
+}
+
+// outcomeShape is an outcome object, consistent or not.
+type outcomeShape struct {
+	Case    string          `json:"case"`
+	Outcome json.RawMessage `json:"outcome"`
+	Valid   bool            `json:"valid"`
 }
 
 func load(t *testing.T) *vectors {

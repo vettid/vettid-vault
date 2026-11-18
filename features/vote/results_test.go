@@ -80,6 +80,8 @@ func (c *cenv) resultsFor(v *votetest.Vote, o resOpts) ResultsSubmit {
 	res := &votewire.Results{V: 1, ProposalID: v.ID, Proposal: votewire.Signed{Doc: v.Doc, Sig: v.Sig}, Extensions: exts,
 		RowsHash: votewire.H([]byte("rows")), RowsRoot: votewire.Root(leaves), Tally: tally,
 		Counts: votewire.Counts{Eligible: int64(len(v.Tags)), Ballots: ballots}}
+	// The outcome as the service computes it (BALLOT-PROTOCOL 0.14.0 §7.1).
+	res.Outcome = must(votewire.Decide(v.Proposal, tally, ballots))
 	if o.tamper != nil {
 		o.tamper(res)
 	}
@@ -224,6 +226,27 @@ func TestResultsFailures(t *testing.T) {
 		"a verifying proof at another index": func(c *cenv, v *votetest.Vote) resOpts {
 			other := (v.Index + 1) % len(v.Tags)
 			return resOpts{dupAt: &other}
+		},
+		// (BALLOT-PROTOCOL 0.14.0 §8.3 step 2) From results.json alone: an
+		// outcome that does not recompute, one not consistent in itself, a
+		// negative count, a sum other than counts.ballots.
+		"an outcome that does not recompute": func(c *cenv, v *votetest.Vote) resOpts {
+			return resOpts{tamper: func(r *votewire.Results) {
+				no := "no"
+				r.Outcome = votewire.Outcome{QuorumMet: true, Status: votewire.StatusDecided, Choice: &no}
+			}}
+		},
+		"an outcome not consistent in itself": func(c *cenv, v *votetest.Vote) resOpts {
+			return resOpts{tamper: func(r *votewire.Results) { r.Outcome.QuorumMet = !r.Outcome.QuorumMet }}
+		},
+		"a negative count": func(c *cenv, v *votetest.Vote) resOpts {
+			return resOpts{tamper: func(r *votewire.Results) { r.Tally["no"]--; r.Tally["abstain"]++ }}
+		},
+		"a tally that does not sum to ballots": func(c *cenv, v *votetest.Vote) resOpts {
+			return resOpts{tamper: func(r *votewire.Results) { r.Tally["abstain"]++ }}
+		},
+		"negative counts": func(c *cenv, v *votetest.Vote) resOpts {
+			return resOpts{tamper: func(r *votewire.Results) { r.Counts.Unhandled = -1 }}
 		},
 	}
 	for name, mk := range cases {

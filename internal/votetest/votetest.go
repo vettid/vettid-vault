@@ -271,8 +271,9 @@ func (s *Service) NewVote(sp VoteSpec) *Vote {
 		}
 	}
 	p := &votewire.Proposal{V: 1, ProposalID: sp.ID, Service: s.Pub(), Title: "Adopt the budget", Text: "The text.",
-		Choices: []votewire.Choice{{ID: "yes", Label: "Yes"}, {ID: "no", Label: "No"}, {ID: "abstain", Label: "Abstain"}},
-		Quorum:  votewire.Quorum{Text: "none", MinBallots: 0}, RecordAt: sp.Opens.Unix() - 100, OpensAt: sp.Opens.Unix(), ClosesAt: sp.Closes.Unix(),
+		Choices:  []votewire.Choice{{ID: "yes", Label: "Yes"}, {ID: "no", Label: "No"}, {ID: "abstain", Label: "Abstain"}},
+		Decision: MajorityOfCast(),
+		Quorum:   votewire.Quorum{Text: "none", MinBallots: 0}, RecordAt: sp.Opens.Unix() - 100, OpensAt: sp.Opens.Unix(), ClosesAt: sp.Closes.Unix(),
 		Eligible: int64(sp.Eligible), RecordRoot: votewire.Root(v.Tags), OutageRule: "none"}
 	if sp.Edit != nil {
 		sp.Edit(p)
@@ -334,4 +335,11 @@ func List(site ed25519.PrivateKey, version int64, previous []byte, svcs ...*Serv
 	doc = must(votewire.EncodeDocument(l))
 	sig = must(suite.Sign(site, votewire.LabelServiceList, votewire.H(doc)))
 	return doc, sig
+}
+
+// MajorityOfCast is the decision a test proposal states unless edited:
+// majority of the ballots for a real choice (BALLOT-PROTOCOL 0.14.0 §3.5).
+func MajorityOfCast() votewire.Decision {
+	cast := votewire.BaseCast
+	return votewire.Decision{Rule: votewire.RuleMajority, Base: &cast}
 }

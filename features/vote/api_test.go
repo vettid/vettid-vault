@@ -3,6 +3,7 @@ package vote
 import (
 	"bytes"
 	"crypto/ed25519"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -210,17 +211,44 @@ func TestAPIListGetAndCast(t *testing.T) {
 func TestAPIGetTallyOnlyFromVerifiedResults(t *testing.T) {
 	c, v := closedWith(t, nil)
 	g := obj(t, c.app("vote.get", pairBody("svc", v.ID)))
-	if g.Has("tally") || g.Has("counts") {
-		t.Error("tally before results")
+	if g.Has("tally") || g.Has("counts") || g.Has("outcome") {
+		t.Error("tally or outcome before results")
 	}
-	out, _ := c.f.SubmitResults(c.session(), "svc", v.ID, c.resultsFor(v, resOpts{}))
+	// The decision is there from the start (BALLOT-PROTOCOL 0.14.0 §3.5).
+	var before struct {
+		Decision *struct {
+			Rule      string  `json:"rule"`
+			Base      *string `json:"base"`
+			Threshold *struct {
+				Num int64 `json:"num"`
+				Den int64 `json:"den"`
+			} `json:"threshold"`
+		} `json:"decision"`
+	}
+	if err := json.Unmarshal(c.app("vote.get", pairBody("svc", v.ID)).Body, &before); err != nil || before.Decision == nil ||
+		before.Decision.Rule != votewire.RuleMajority || before.Decision.Base == nil || *before.Decision.Base != votewire.BaseCast || before.Decision.Threshold != nil {
+		t.Errorf("decision %+v %v", before.Decision, err)
+	}
+	in := c.resultsFor(v, resOpts{})
+	out, _ := c.f.SubmitResults(c.session(), "svc", v.ID, in)
 	if out.State != CheckVerified {
 		t.Fatal(out)
 	}
 	g = obj(t, c.app("vote.get", pairBody("svc", v.ID)))
 	cn, _ := g.Object("counts")
-	if e, _ := cn.Uint("eligible", 0, 100); e != 3 || !g.Has("tally") {
+	if e, _ := cn.Uint("eligible", 0, 100); e != 3 || !g.Has("tally") || !cn.Has("unhandled") {
 		t.Errorf("%s", g)
+	}
+	// The outcome of the verified results, which the check recomputed.
+	var after struct {
+		Outcome *votewire.Outcome `json:"outcome"`
+	}
+	res, err := votewire.ParseResults(in.Results)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(c.app("vote.get", pairBody("svc", v.ID)).Body, &after); err != nil || after.Outcome == nil || !after.Outcome.Equal(res.Outcome) {
+		t.Errorf("outcome %+v, want %+v (%v)", after.Outcome, res.Outcome, err)
 	}
 	ck, _ := g.Object("check")
 	if st, _ := ck.String("state"); st != CheckVerified {

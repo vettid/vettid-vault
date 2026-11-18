@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -441,16 +442,16 @@ func TestV2KeepNeverEvictsEvidence(t *testing.T) {
 	}
 	var list keptAnswers
 	for i := 1; i <= votewire.MaxRefusalsKept; i++ {
-		list, _ = r.keep(list, "not_eligible", ref(byte(i)))
+		list, _ = r.keep(list, "not_eligible", nil, ref(byte(i)))
 	}
-	l2, added := r.keep(list, "not_eligible", ref(0))
+	l2, added := r.keep(list, "not_eligible", nil, ref(0))
 	if added || len(l2) != votewire.MaxRefusalsKept || !bytes.Equal(l2[0].Body, ref(1)) {
 		t.Fatalf("a non-evidence answer into a full list of evidence: added %v", added)
 	}
 	// Seven evidence and one zero-hash answer: a new evidence one pushes the
 	// zero-hash one out, not the oldest evidence.
 	list = append(append(keptAnswers{}, list[1:]...), keptAnswer{Code: "not_eligible", Body: ref(0)})
-	l3, added := r.keep(list, "not_eligible", ref(99))
+	l3, added := r.keep(list, "not_eligible", nil, ref(99))
 	if !added || len(l3) != votewire.MaxRefusalsKept || !bytes.Equal(l3[0].Body, ref(2)) {
 		t.Errorf("evidence into a full list: added %v", added)
 	}
@@ -462,16 +463,16 @@ func TestV2KeepNeverEvictsEvidence(t *testing.T) {
 	// The same refusal but for the request's time and signature is held; the
 	// same body under another code is another refusal.
 	same := []byte(`{"refusal_sig":"BBBB","proposal_hash":"` + base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{99}, 32)) + `","msg_ms":2}`)
-	if _, added := r.keep(l3, "not_eligible", same); added {
+	if _, added := r.keep(l3, "not_eligible", nil, same); added {
 		t.Error("the same refusal at another time kept again")
 	}
-	if l4, added := r.keep(l3, "not_open", same); !added || l4[len(l4)-1].Code != "not_open" {
+	if l4, added := r.keep(l3, "not_open", nil, same); !added || l4[len(l4)-1].Code != "not_open" {
 		t.Error("a refusal under another code taken for the same one")
 	}
 	// A pinned entry stays through any number of later evidence answers.
 	pinned := append(keptAnswers{{Code: "not_eligible", Body: ref(200), Pinned: true}}, l3...)
 	for i := 0; i < 3*votewire.MaxRefusalsKept; i++ {
-		pinned, _ = r.keep(pinned, "not_eligible", ref(byte(100+i)))
+		pinned, _ = r.keep(pinned, "not_eligible", nil, ref(byte(100+i)))
 	}
 	if !pinned[0].Pinned || !bytes.Equal(pinned[0].Body, ref(200)) || len(pinned) != votewire.MaxRefusalsKept+1 {
 		t.Errorf("the pinned entry: %d kept, first pinned %v", len(pinned), pinned[0].Pinned)
@@ -685,10 +686,136 @@ func TestV2DistinctBallotsAndThePinnedCap(t *testing.T) {
 	}
 	list := keptAnswers{{Code: "not_eligible", Body: ref(200), Pinned: true}}
 	for i := 1; i < votewire.MaxRefusalsKept; i++ {
-		list, _ = r.keep(list, "not_eligible", ref(byte(i)))
+		list, _ = r.keep(list, "not_eligible", nil, ref(byte(i)))
 	}
-	list, added := r.keep(list, "not_eligible", ref(50))
+	list, added := r.keep(list, "not_eligible", nil, ref(50))
 	if !added || len(list) != votewire.MaxRefusalsKept+1 || !bytes.Equal(list[1].Body, ref(1)) {
 		t.Errorf("the eighth unpinned answer: added %v, %d kept", added, len(list))
+	}
+}
+
+// (review, round 4) After a credential-key rotation the re-signed body
+// keeps its leaf: a bad_ballot for the send before it and the final one
+// for the body in force are two refusals (the send's generation), and the
+// final one is pinned.
+func TestV2BadBallotAfterResignKeepsBoth(t *testing.T) {
+	c := newCastEnv(t)
+	v := c.open(1)
+	c.cast(v, "yes")
+	leaf := c.leafOf(v)
+	_, ids := c.casts()
+	oldID := ids[0]
+	_, newKey, _ := ed25519.GenerateKey(rand.Reader)
+	c.f.CredentialKeysOpen(c.session(), c.cred, newKey)
+	_, ids = c.casts()
+	newID := ids[len(ids)-1]
+	c.refusal(v, oldID, "vote.cast", "bad_ballot", votewire.H(leaf))
+	if c.state(v) != "waiting:bad_ballot" {
+		t.Fatalf("setup: %s", c.state(v))
+	}
+	c.now = c.now.Add(time.Minute)
+	c.depositsOnly(newID, c.now.UnixMilli())
+	c.refusal(v, newID, "vote.cast", "bad_ballot", votewire.H(leaf), msgAt(uint64(c.now.UnixMilli())))
+	r := c.rec(v.ID)
+	if c.state(v) != "refused:bad_ballot" || len(r.Ballot.Refusals) != 2 {
+		t.Fatalf("%s, %d kept", c.state(v), len(r.Ballot.Refusals))
+	}
+	if r.Ballot.Refusals[0].Pinned || !r.Ballot.Refusals[1].Pinned {
+		t.Errorf("pinned: %v %v", r.Ballot.Refusals[0].Pinned, r.Ballot.Refusals[1].Pinned)
+	}
+}
+
+// A problem raised from an answer pins it even when the record was a
+// problem already (here an own-vk self_conflict).
+func TestV2PinWhereRaisedOnAProblemRecord(t *testing.T) {
+	c := newCastEnv(t)
+	v := c.open(1)
+	c.cast(v, "yes")
+	_, ids := c.casts()
+	c.rec(v.ID).SelfConflict = true
+	c.refusal(v, ids[0], "vote.cast", "not_eligible", votewire.H(c.leafOf(v)))
+	r := c.rec(v.ID)
+	if len(r.Ballot.Refusals) != 1 || !r.Ballot.Refusals[0].Pinned {
+		t.Errorf("the refusal that raised the problem is not pinned: %+v", r.Ballot.Refusals)
+	}
+}
+
+// The key is built from decoded values: a JSON escape of the same value is
+// the same answer.
+func TestV2AnswerKeyDecodes(t *testing.T) {
+	h := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0xfb}, 32)) // has '+' and '/'
+	plain := `{"refusal_sig":"AAAA","proposal_hash":"` + h + `","msg_ms":1,"connection":"` + h + `"}`
+	escaped := strings.Replace(plain, "/", `\/`, -1)
+	escaped = strings.Replace(escaped, `"connection"`, `"connection"`, 1)
+	if plain == escaped {
+		t.Fatal("setup")
+	}
+	if answerKey("not_eligible", nil, []byte(plain)) != answerKey("not_eligible", nil, []byte(escaped)) {
+		t.Error("an escaped spelling made a new answer")
+	}
+}
+
+// (review N-c) An own-vk ballot (self_conflict, not the service's doing)
+// with a receipt time no extension can reach: the receipt's rejection
+// still raises vote.problem.
+func TestV2OwnVKUnreachableReceiptRaisesTheProblem(t *testing.T) {
+	c := newCastEnv(t)
+	v := c.open(1)
+	c.cast(v, "yes")
+	c.f.Check(c.session(), "svc", v.ID)
+	own := ed25519.NewKeyFromSeed(c.rec(v.ID).VKSeed)
+	c.answer(v, c.statuses()[0], must(votewire.SignBallot(own, v.Hash, v.Tag, "no")), uint64((c.rec(v.ID).Opens-3600)*1000), true)
+	r := c.rec(v.ID)
+	if !r.SelfConflict || c.count("vote.problem") != 1 {
+		t.Errorf("self_conflict %v, vote.problem %d", r.SelfConflict, c.count("vote.problem"))
+	}
+}
+
+// Each place a problem is raised from an answer pins that answer: a
+// foreign ballot (conflict evidence), a second receipt (two receipts), and
+// a rejected receipt time; and at most maxPinned are pinned per list.
+func TestV2PinAtEachRaisePoint(t *testing.T) {
+	// a foreign ballot
+	c := newCastEnv(t)
+	v := c.open(1)
+	c.cast(v, "yes")
+	c.f.Check(c.session(), "svc", v.ID)
+	_, vk, _ := ed25519.GenerateKey(rand.Reader)
+	c.answer(v, c.statuses()[0], must(votewire.SignBallot(vk, v.Hash, v.Tag, "no")), uint64(c.now.UnixMilli()), true)
+	if r := c.rec(v.ID); len(r.StatusAnswers) != 1 || !r.StatusAnswers[0].Pinned {
+		t.Error("the answer with a foreign ballot is not pinned")
+	}
+	// two receipts (an own-vk ballot receipted beside the vault's own)
+	c = newCastEnv(t)
+	v = c.open(1)
+	shown := c.selfBallot(v, "no")
+	receipted(c, v)
+	c.f.Check(c.session(), "svc", v.ID)
+	c.answer(v, c.statuses()[0], shown, uint64(c.now.UnixMilli()), true)
+	if r := c.rec(v.ID); !r.TwoReceipts || len(r.StatusAnswers) != 1 || !r.StatusAnswers[0].Pinned {
+		t.Error("the answer with the second receipt is not pinned")
+	}
+	// a rejected receipt time (own-vk, so only the rejection raises it)
+	c = newCastEnv(t)
+	v = c.open(1)
+	c.cast(v, "yes")
+	c.f.Check(c.session(), "svc", v.ID)
+	own := ed25519.NewKeyFromSeed(c.rec(v.ID).VKSeed)
+	c.answer(v, c.statuses()[0], must(votewire.SignBallot(own, v.Hash, v.Tag, "no")), uint64((c.rec(v.ID).Opens-3600)*1000), true)
+	if r := c.rec(v.ID); len(r.StatusAnswers) != 1 || !r.StatusAnswers[0].Pinned {
+		t.Error("the answer whose receipt was rejected is not pinned")
+	}
+	// the bound
+	r := &record{Proposal: []byte("p")}
+	ref := func(h byte) []byte {
+		return []byte(`{"refusal_sig":"AAAA","proposal_hash":"` + base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{h}, 32)) + `","msg_ms":1}`)
+	}
+	for i := 0; i < maxPinned; i++ {
+		r.StatusAnswers = append(r.StatusAnswers, keptAnswer{Code: "not_eligible", Body: ref(byte(i)), Pinned: true})
+	}
+	r.StatusAnswers = append(r.StatusAnswers, keptAnswer{Code: "not_eligible", Body: ref(99)})
+	r.pinAnswer("not_eligible", nil, ref(99))
+	if r.StatusAnswers[maxPinned].Pinned {
+		t.Error("pinned past maxPinned")
 	}
 }

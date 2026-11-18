@@ -285,7 +285,7 @@ type record struct {
 	// Other is the other ballot of a conflict or a dispute (evidence).
 	Other *svcBallot `json:"other,omitempty"`
 	// StatusAnswers are the signed status answers and refusals kept as
-	// evidence, verbatim, the last 8.
+	// evidence, verbatim, with their codes (keep).
 	StatusAnswers keptAnswers `json:"status_answers,omitempty"`
 	CheckAskMS    int64       `json:"check_ask_ms,omitempty"` // the last app-asked vote.status (rate limit)
 	// EvidenceHash is the digest of the record when vote.evidence last
@@ -716,9 +716,14 @@ func (f *Feature) prune(s *vault.Session) {
 // so the export says which code its signature covers), and whether its
 // arrival raised the record's problem (pinned: never evicted).
 type keptAnswer struct {
-	Code   string `json:"code,omitempty"`
-	Body   []byte `json:"body"`
-	Pinned bool   `json:"pinned,omitempty"`
+	Code string `json:"code,omitempty"`
+	// Request identifies the request a refusal answered: for vote.cast the
+	// request_hash its signature covers, H(ballot_leaf), and the generation
+	// of the body sent (castRequest); for vote.status H(proposal_id). Two
+	// refusals of one code for two requests are two refusals.
+	Request []byte `json:"request,omitempty"`
+	Body    []byte `json:"body"`
+	Pinned  bool   `json:"pinned,omitempty"`
 }
 
 // keptAnswers are a record's kept answers, oldest first.

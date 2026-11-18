@@ -2,8 +2,11 @@ package vote
 
 import (
 	"crypto/ed25519"
+	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"sort"
+	"strconv"
 	"time"
 
 	"github.com/vettid/vettid-vault/vault"
@@ -308,24 +311,20 @@ func (f *Feature) Response(s *vault.Session, in *envelope.Inner) bool {
 		return true // after a restart: dropped, as an answer matching no request
 	}
 	delete(f.pend, in.Re)
-	before := f.get(ref.conn, ref.id)
-	wasProblem := before != nil && before.problem()
+	// The answer being handled: a problem raised from it pins it among the
+	// kept answers (pinCurrent), never evicted by those that follow.
+	f.cur = &curAnswer{body: in.Body}
+	if in.Status == envelope.StatusError && in.Error != nil {
+		f.cur.code = in.Error.Code
+	}
+	defer func() { f.cur = nil }()
 	switch ref.kind {
 	case "cast":
-		if r := before; r != nil && r.Ballot != nil {
+		if r := f.get(ref.conn, ref.id); r != nil && r.Ballot != nil {
 			f.castAnswer(s, r, in)
 		}
 	case "status":
 		f.statusAnswer(s, ref, in)
-	}
-	// The answer whose arrival raised the record's problem is pinned among
-	// the kept answers: never evicted by those that follow.
-	if r := f.get(ref.conn, ref.id); r != nil && !wasProblem && r.problem() {
-		code := ""
-		if in.Status == envelope.StatusError && in.Error != nil {
-			code = in.Error.Code
-		}
-		r.pinAnswer(code, in.Body)
 	}
 	return true
 }
@@ -352,6 +351,27 @@ func (b *ballot) marksAnswered(reqID string, now time.Time) (gen int) {
 	return gen
 }
 
+// sendGen is the body generation of the send with that request id (0 for
+// one the ballot does not list).
+func (b *ballot) sendGen(reqID string) int {
+	for _, x := range b.Sends {
+		if x.ID == reqID {
+			return x.Gen
+		}
+	}
+	return 0
+}
+
+// castRequest identifies the request a cast refusal answered: the
+// request_hash its signature covers, H(ballot_leaf), and the generation of
+// the body sent. A re-signed body (§3.5.5) keeps its leaf, so the
+// generation is what tells the final refusal of the body in force from one
+// of an older send: both are kept, each with its own msg_ms.
+func castRequest(leaf []byte, gen int) []byte {
+	out := append([]byte{}, votewire.H(leaf)...)
+	return binary.BigEndian.AppendUint64(out, uint64(gen))
+}
+
 // unansweredBefore reports whether a send other than reqID has no verified
 // answer.
 func (b *ballot) unansweredBefore(reqID string) bool {
@@ -376,14 +396,14 @@ func (b *ballot) unansweredBefore(reqID string) bool {
 // unpinned one that is not evidence goes, else the oldest unpinned one; one
 // that is not evidence never pushes out one that is. It reports whether the
 // list changed.
-func (r *record) keep(list keptAnswers, code string, body []byte) (keptAnswers, bool) {
-	k := answerKey(code, body)
+func (r *record) keep(list keptAnswers, code string, request, body []byte) (keptAnswers, bool) {
+	k := answerKey(code, request, body)
 	for _, x := range list {
-		if answerKey(x.Code, x.Body) == k {
+		if answerKey(x.Code, x.Request, x.Body) == k {
 			return list, false
 		}
 	}
-	list = append(list, keptAnswer{Code: code, Body: append([]byte{}, body...)})
+	list = append(list, keptAnswer{Code: code, Request: append([]byte(nil), request...), Body: append([]byte{}, body...)})
 	n := 0
 	for _, x := range list {
 		if !x.Pinned {
@@ -415,13 +435,25 @@ func (r *record) keep(list keptAnswers, code string, body []byte) (keptAnswers, 
 	return append(list[:drop:drop], list[drop+1:]...), true
 }
 
-// pinAnswer marks the kept answer with that code and signed content as
-// one that raised the record's problem: it is never evicted.
-func (r *record) pinAnswer(code string, body []byte) {
-	k := answerKey(code, body)
+// maxPinned bounds the pinned answers per list.
+const maxPinned = votewire.MaxRefusalsKept
+
+// pinAnswer marks the kept answer with that code, request hash and signed
+// content as one that raised the record's problem: it is never evicted.
+func (r *record) pinAnswer(code string, request, body []byte) {
+	k := answerKey(code, request, body)
 	pin := func(list keptAnswers) {
+		n := 0
+		for _, x := range list {
+			if x.Pinned {
+				n++
+			}
+		}
 		for i := range list {
-			if answerKey(list[i].Code, list[i].Body) == k {
+			// At most maxPinned per list (the first proofs): a service that
+			// signs ever more evidence cannot grow the record without bound.
+			if !list[i].Pinned && n < maxPinned && answerKey(list[i].Code, list[i].Request, list[i].Body) == k {
+				n++
 				list[i].Pinned = true
 			}
 		}
@@ -433,39 +465,68 @@ func (r *record) pinAnswer(code string, body []byte) {
 }
 
 // answerKey identifies a kept answer by what its signature covers
-// (BALLOT-PROTOCOL 0.15.0 §4.2) and its code: for a status answer, the
-// proposal, the connection, the tag (from proposal_id and record_secret)
-// and the ballot; for a refusal, the code, proposal_hash, the connection,
-// the tag and an already_voted ballot (signed by its own key). The time,
-// the signature over it, a receipt and every other member are left out. An
-// answer stored before 0.15.0 (or one that does not parse) is its bytes.
-func answerKey(code string, body []byte) string {
+// (BALLOT-PROTOCOL 0.15.0 §4.2) and its code, from decoded values (so that
+// another JSON spelling of the same value is the same answer): for a status
+// answer, the proposal, the connection, the tag (from proposal_id and
+// record_secret) and the ballot; for a refusal, the code, proposal_hash, the
+// connection, the tag, the request hash it answered and an already_voted
+// ballot (signed by its own key). The time, the signature over it, a receipt
+// and every other member are left out. An answer stored before 0.15.0 (or
+// one that does not parse) is its bytes.
+func answerKey(code string, request, body []byte) string {
 	o, err := strictjson.ParseObject(body)
 	if err != nil {
 		return "bytes|" + string(body)
 	}
+	b64 := func(obj strictjson.Object, name string) string {
+		v, err := obj.Base64(name, -1)
+		if err != nil {
+			return "?" + string(obj[name])
+		}
+		return hex.EncodeToString(v)
+	}
+	str := func(obj strictjson.Object, name string) string {
+		v, err := obj.String(name)
+		if err != nil {
+			return "?" + string(obj[name])
+		}
+		return strconv.Quote(v)
+	}
 	ballot := func() string {
 		raw, ok := o["ballot"]
 		if !ok || string(raw) == "null" {
-			return ""
+			return "-"
 		}
-		b, err := strictjson.ParseObject(raw)
+		bo, err := strictjson.ParseObject(raw)
 		if err != nil {
-			return string(raw)
+			return "?" + string(raw)
 		}
-		return string(b["vk"]) + "|" + string(b["choice_id"]) + "|" + string(b["ballot_sig"])
+		return b64(bo, "vk") + "|" + str(bo, "choice_id") + "|" + b64(bo, "ballot_sig")
 	}
 	if _, ok := o["refusal_sig"]; ok {
 		if _, v2 := o["proposal_hash"]; !v2 {
 			return "bytes|" + string(body)
 		}
-		return "refusal|" + code + "|" + string(o["proposal_hash"]) + "|" + string(o["connection"]) + "|" + string(o["record_tag"]) + "|" + ballot()
+		return "refusal|" + strconv.Quote(code) + "|" + hex.EncodeToString(request) + "|" + b64(o, "proposal_hash") + "|" +
+			b64(o, "connection") + "|" + b64(o, "record_tag") + "|" + ballot()
 	}
 	if _, v2 := o["status_msg_ms"]; !v2 {
 		return "bytes|" + string(body)
 	}
-	return "status|" + code + "|" + string(votewire.H(o["proposal"])) + "|" + string(o["connection"]) + "|" +
-		string(o["proposal_id"]) + "|" + string(o["record_secret"]) + "|" + ballot()
+	p, err := o.Base64("proposal", -1)
+	if err != nil {
+		return "bytes|" + string(body)
+	}
+	return "status|" + strconv.Quote(code) + "|" + hex.EncodeToString(votewire.H(p)) + "|" + b64(o, "connection") + "|" +
+		str(o, "proposal_id") + "|" + b64(o, "record_secret") + "|" + ballot()
+}
+
+// pinCurrent pins the answer being handled among r's kept answers: it is
+// called where a problem is raised from that answer.
+func (f *Feature) pinCurrent(r *record) {
+	if f.cur != nil {
+		r.pinAnswer(f.cur.code, f.cur.request, f.cur.body)
+	}
 }
 
 // evidenceAnswer reports whether a kept answer may be evidence: everything
@@ -624,8 +685,9 @@ func (f *Feature) keepShownRejected(s *vault.Session, r *record, sb *svcBallot, 
 	sb.Late, sb.LateRejected = true, true
 	r.ChangedMS = s.Now().UnixMilli()
 	f.shown(s, r, sb, answer, restore)
-	// One vote.problem for the answer: none again if the ballot raised it.
-	f.asideRejected(s, r, r.problem())
+	// One vote.problem for the answer: none again if the ballot raised a
+	// service-side problem (capProblem; an own-vk self_conflict is not one).
+	f.asideRejected(s, r, r.capProblem())
 }
 
 // asideAfterFinal: once the results were judged finally, what is kept
@@ -755,6 +817,7 @@ func (f *Feature) asideRejected(s *vault.Session, r *record, raised bool) {
 	if !r.AsideProblem {
 		r.AsideProblem = true
 		if !raised {
+			f.pinCurrent(r)
 			f.feed(s, "vote.problem", r.Conn, r.ID, "high")
 		}
 		f.event(s, r, "problem")
@@ -784,6 +847,10 @@ func (f *Feature) castAnswer(s *vault.Session, r *record, in *envelope.Inner) {
 	leaf, err := r.ballotLeaf()
 	if err != nil {
 		return
+	}
+	request := castRequest(leaf, b.sendGen(in.Re))
+	if f.cur != nil {
+		f.cur.request = request
 	}
 	if in.Status != envelope.StatusError {
 		a, err := votewire.ParseCastAnswer(in.Body)
@@ -816,12 +883,12 @@ func (f *Feature) castAnswer(s *vault.Session, r *record, in *envelope.Inner) {
 		// e.g. after a restore of its table) is kept and shown, not
 		// evidence; another hash is a refusal signed for another version
 		// under this id: evidence. The ballot goes on as it was either way.
-		f.refusalOtherHash(s, r, code, in.Body, rf)
+		f.refusalOtherHash(s, r, code, request, in.Body, rf)
 		return
 	}
 	gen := b.marksAnswered(in.Re, now)
 	if code != "already_voted" {
-		b.Refusals, _ = r.keep(b.Refusals, code, in.Body)
+		b.Refusals, _ = r.keep(b.Refusals, code, request, in.Body)
 	}
 	switch code {
 	case "not_open":
@@ -888,6 +955,7 @@ func (f *Feature) refuse(s *vault.Session, r *record, code string, problem bool)
 	f.audit(s, "vote.refused", r.Conn, r.ID+":"+code)
 	if problem {
 		r.RefusalProblem = true
+		f.pinCurrent(r)
 		f.feed(s, "vote.problem", r.Conn, r.ID, "high")
 	}
 }
@@ -927,7 +995,7 @@ func (f *Feature) statusAnswer(s *vault.Session, ref pendRef, in *envelope.Inner
 		if p, err := votewire.ParseProposal(a.Proposal); err != nil || p.ProposalID != r.ID {
 			return
 		}
-		r.StatusAnswers, _ = r.keep(r.StatusAnswers, "", in.Body)
+		r.StatusAnswers, _ = r.keep(r.StatusAnswers, "", nil, in.Body)
 		f.problem(s, r)
 		return
 	}
@@ -943,7 +1011,7 @@ func (f *Feature) statusAnswer(s *vault.Session, ref pendRef, in *envelope.Inner
 	// The same answer again (the hourly ask after the close) is not kept
 	// twice and changes nothing the member exported (review fix 2).
 	var added bool
-	if r.StatusAnswers, added = r.keep(r.StatusAnswers, "", in.Body); added {
+	if r.StatusAnswers, added = r.keep(r.StatusAnswers, "", nil, in.Body); added {
 		r.ChangedMS = now.UnixMilli()
 	}
 	if r.Restore {
@@ -1132,6 +1200,7 @@ func (f *Feature) twoReceipts(s *vault.Session, r *record) {
 	}
 	r.TwoReceipts = true
 	r.ChangedMS = s.Now().UnixMilli()
+	f.pinCurrent(r)
 	f.feed(s, "vote.problem", r.Conn, r.ID, "high")
 	f.event(s, r, "problem")
 	f.rejudgeResults(s, r)
@@ -1180,6 +1249,7 @@ func (f *Feature) foreign(s *vault.Session, r *record, b *ballot, sb *svcBallot,
 		return // raised by the first
 	}
 	f.audit(s, "vote.conflict", r.Conn, r.ID)
+	f.pinCurrent(r)
 	f.feed(s, "vote.problem", r.Conn, r.ID, "high")
 	f.event(s, r, "problem")
 }
@@ -1199,7 +1269,11 @@ func (f *Feature) statusRefusal(s *vault.Session, r *record, ref pendRef, in *en
 		rf.Verify(r.Signer, r.ID, "vote.status", code, votewire.H([]byte(r.ID)), ownConnections(s), r.Tag) != nil {
 		return
 	}
-	r.StatusAnswers, _ = r.keep(r.StatusAnswers, code, in.Body)
+	request := votewire.H([]byte(r.ID))
+	if f.cur != nil {
+		f.cur.request = request
+	}
+	r.StatusAnswers, _ = r.keep(r.StatusAnswers, code, request, in.Body)
 	r.Restore = false
 	r.ChangedMS = s.Now().UnixMilli()
 	if rf.NoProposal() {
@@ -1217,6 +1291,7 @@ func (f *Feature) statusRefusal(s *vault.Session, r *record, ref pendRef, in *en
 // problem raises the record's refusal problem once: a vote.problem feed
 // item and the record in the problem set.
 func (f *Feature) problem(s *vault.Session, r *record) {
+	f.pinCurrent(r) // whether or not it is the first: this answer is evidence
 	if !r.RefusalProblem {
 		r.RefusalProblem = true
 		f.feed(s, "vote.problem", r.Conn, r.ID, "high")
@@ -1232,8 +1307,8 @@ func (f *Feature) problem(s *vault.Session, r *record) {
 // proposal published under this id, e.g. in an older state after a restore
 // of its table) is shown, not evidence. Another non-zero hash is a refusal
 // signed for another version under this id: evidence.
-func (f *Feature) refusalOtherHash(s *vault.Session, r *record, code string, body []byte, rf *votewire.Refusal) {
-	r.Ballot.Refusals, _ = r.keep(r.Ballot.Refusals, code, body)
+func (f *Feature) refusalOtherHash(s *vault.Session, r *record, code string, request, body []byte, rf *votewire.Refusal) {
+	r.Ballot.Refusals, _ = r.keep(r.Ballot.Refusals, code, request, body)
 	r.ChangedMS = s.Now().UnixMilli()
 	if rf.NoProposal() {
 		f.event(s, r, "ballot")
@@ -1263,12 +1338,16 @@ func (f *Feature) lateRefusal(s *vault.Session, r *record, in *envelope.Inner) {
 	if err != nil {
 		return
 	}
+	request := castRequest(leaf, r.Ballot.sendGen(in.Re))
+	if f.cur != nil {
+		f.cur.request = request
+	}
 	rf, err := votewire.ParseRefusal(in.Body)
 	if err != nil || !castRefusalCode(in.Error.Code) || !timed(s, in.Re, rf.MsgMS) || rf.NoProposal() || eq(rf.ProposalHash, r.Hash) ||
 		rf.Verify(r.Signer, r.ID, "vote.cast", in.Error.Code, votewire.H(leaf), ownConnections(s), r.Tag) != nil {
 		return
 	}
-	f.refusalOtherHash(s, r, in.Error.Code, in.Body, rf)
+	f.refusalOtherHash(s, r, in.Error.Code, request, in.Body, rf)
 }
 
 // timed reports whether ms, the relay's time an answer claims for the
@@ -1310,7 +1389,7 @@ func (f *Feature) intakeStatus(s *vault.Session, ref pendRef, a *votewire.Status
 	if r == nil || r.RejectReason != "" || r.Ballot != nil || r.ServiceBallot != nil {
 		return
 	}
-	r.StatusAnswers, _ = r.keep(r.StatusAnswers, "", body)
+	r.StatusAnswers, _ = r.keep(r.StatusAnswers, "", nil, body)
 	r.ChangedMS = s.Now().UnixMilli()
 	if a.Ballot == nil {
 		return

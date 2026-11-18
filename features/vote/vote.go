@@ -77,6 +77,17 @@ type Feature struct {
 	// before a ballot sent then, once per connection (memory only).
 	owed map[string][]byte
 	idx  *listIndex // the held list, parsed (memory only)
+	// cur is the answer being handled (Response), so that a problem raised
+	// from it pins it among the kept answers (pinCurrent; memory only).
+	cur *curAnswer
+}
+
+// curAnswer is the answer Response is handling: its code ("" for ok), the
+// request hash its signature covers when known, and its bytes.
+type curAnswer struct {
+	code    string
+	request []byte
+	body    []byte
 }
 
 // New returns the feature.

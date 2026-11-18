@@ -2,11 +2,15 @@ package vote
 
 import (
 	"bytes"
+	"crypto/ed25519"
+	"crypto/rand"
 	"encoding/base64"
 	"testing"
+	"time"
 
 	"github.com/vettid/vettid-vault/internal/votetest"
 	"github.com/vettid/vettid-vault/vms/envelope"
+	"github.com/vettid/vettid-vault/vms/strictjson"
 	"github.com/vettid/vettid-vault/vms/suite"
 	"github.com/vettid/vettid-vault/vms/votewire"
 )
@@ -187,5 +191,175 @@ func TestV2EvidenceMarksV1Answers(t *testing.T) {
 	eo, _ = ev.Object("evidence")
 	if eo.Has("unverifiable_v1") {
 		t.Error("marked with no v1 answer")
+	}
+}
+
+// far is a receipt time no extension can reach: past the original close
+// plus the most an extension adds.
+func far(v *votetest.Vote, r *record) uint64 {
+	return uint64((r.OrigClose + votewire.MaxExtension + 3600) * 1000)
+}
+
+// (§8.3) A status naming another ballot than the vault's receipt is
+// evidence whatever the times: one whose receipt time no extension can
+// reach is conflict evidence, its receipt never taken.
+func TestV2ForeignBallotOutsideAnyWindowInAStatus(t *testing.T) {
+	c := newCastEnv(t)
+	v := c.open(1)
+	c.cast(v, "yes")
+	_, ids := c.casts()
+	c.okReceipt(v, ids[0], c.leafOf(v), uint64(c.now.UnixMilli()))
+	c.f.Check(c.session(), "svc", v.ID)
+	_, vk2, _ := ed25519.GenerateKey(rand.Reader)
+	other := must(votewire.SignBallot(vk2, v.Hash, v.Tag, "no"))
+	c.answer(v, c.statuses()[0], other, far(v, c.rec(v.ID)), true)
+	r := c.rec(v.ID)
+	if r.Ballot.State != BallotRecorded || !r.ConflictEv || r.Other == nil || !c.has("vote.conflict", v.ID) || !r.problem() {
+		t.Errorf("%s, conflict %v, other %v", r.Ballot.State, r.ConflictEv, r.Other != nil)
+	}
+}
+
+// The same for an already_voted refusal carrying another ballot.
+func TestV2ForeignBallotOutsideAnyWindowInAlreadyVoted(t *testing.T) {
+	c := newCastEnv(t)
+	w := c.open(1)
+	c.cast(w, "yes")
+	_, ids := c.casts()
+	now := uint64(c.now.UnixMilli())
+	ballotMS := far(w, c.rec(w.ID))
+	_, vk2, _ := ed25519.GenerateKey(rand.Reader)
+	other := must(votewire.SignBallot(vk2, w.Hash, w.Tag, "no"))
+	orsig, _ := suite.Sign(c.svc.IK, votewire.LabelReceipt, must(votewire.ReceiptMsg(w.Hash, must(other.Leaf()), ballotMS)))
+	msg := must(votewire.RefusalMsg(w.Hash, w.ID, votewire.H(c.h.IK), w.Tag, "vote.cast", "already_voted", now, votewire.H(c.leafOf(w))))
+	sig, _ := suite.Sign(c.svc.IK, votewire.LabelRefusal, msg)
+	body := strictjson.NewBuilder().Base64("refusal_sig", sig).Base64("proposal_hash", w.Hash).Uint("msg_ms", now).Base64("connection", votewire.H(c.h.IK)).Base64("record_tag", w.Tag).
+		Raw("ballot", strictjson.NewBuilder().Base64("vk", other.VK).String("choice_id", "no").Base64("ballot_sig", other.BallotSig).Bytes()).
+		Uint("ballot_msg_ms", ballotMS).Base64("receipt_sig", orsig).Bytes()
+	c.respond(ids[0], "vote.cast", &envelope.Inner{Status: envelope.StatusError, Error: &envelope.Error{Code: "already_voted"}, Body: body})
+	r := c.rec(w.ID)
+	if r.Other == nil || !c.has("vote.conflict", w.ID) || !r.problem() {
+		t.Errorf("%s, other %v", r.Ballot.State, r.Other != nil)
+	}
+}
+
+// (§8.3 (c)) A cast refusal under another non-zero hash that comes after
+// the ballot is final is still evidence; one under the held hash or the
+// zero hash changes nothing then.
+func TestV2LateRefusalUnderAnotherHash(t *testing.T) {
+	c := newCastEnv(t)
+	v := c.open(1)
+	c.cast(v, "yes")
+	_, ids := c.casts()
+	c.okReceipt(v, ids[0], c.leafOf(v), uint64(c.now.UnixMilli()))
+	leaf := votewire.H(c.leafOf(v))
+	for _, opt := range []func(*refOpts){func(*refOpts) {}, zeroHash} {
+		c.pending(ids[0], "cast", v)
+		c.refusal(v, ids[0], "vote.cast", "not_eligible", leaf, opt)
+	}
+	r := c.rec(v.ID)
+	if r.RefusalProblem || len(r.Ballot.Refusals) != 0 {
+		t.Fatalf("held or zero hash after the receipt: problem %v, %d kept", r.RefusalProblem, len(r.Ballot.Refusals))
+	}
+	c.pending(ids[0], "cast", v)
+	c.refusal(v, ids[0], "vote.cast", "no_such_code", leaf, hashOf(votewire.H([]byte("other"))))
+	if r.RefusalProblem || len(r.Ballot.Refusals) != 0 {
+		t.Fatal("an unknown code after the receipt was kept")
+	}
+	c.pending(ids[0], "cast", v)
+	c.refusal(v, ids[0], "vote.cast", "not_eligible", leaf, hashOf(votewire.H([]byte("other"))))
+	if r.Ballot.State != BallotRecorded || !r.RefusalProblem || len(r.Ballot.Refusals) != 1 {
+		t.Errorf("another hash after the receipt: %s, problem %v, %d kept", r.Ballot.State, r.RefusalProblem, len(r.Ballot.Refusals))
+	}
+	// The same after a final refusal.
+	c2 := newCastEnv(t)
+	w := c2.open(1)
+	c2.cast(w, "yes")
+	_, ids2 := c2.casts()
+	l2 := votewire.H(c2.leafOf(w))
+	c2.refusal(w, ids2[0], "vote.cast", "not_active", l2)
+	if c2.state(w) != "refused:not_active" {
+		t.Fatalf("setup: %s", c2.state(w))
+	}
+	r2 := c2.rec(w.ID)
+	n := len(r2.Ballot.Refusals)
+	c2.pending(ids2[0], "cast", w)
+	c2.refusal(w, ids2[0], "vote.cast", "not_eligible", l2, hashOf(votewire.H([]byte("other"))))
+	if len(r2.Ballot.Refusals) != n+1 || c2.state(w) != "refused:not_active" {
+		t.Errorf("another hash after a final refusal: %d kept, %s", len(r2.Ballot.Refusals), c2.state(w))
+	}
+}
+
+// The other-proposal evidence needs a proposal the service signed, under
+// the same id: a bad proposal_sig or another id is no answer.
+func TestV2OtherProposalNeedsTheServicesSignatureAndTheID(t *testing.T) {
+	for _, tc := range []string{"bad proposal_sig", "another id"} {
+		c := newCastEnv(t)
+		v := c.open(1)
+		c.f.Check(c.session(), "svc", v.ID)
+		sid := c.statuses()[0]
+		id := v.ID
+		if tc == "another id" {
+			id = lid(77)
+		}
+		w := c.svc.NewVote(votetest.VoteSpec{ID: id, Opens: c.now.Add(-time.Hour), Closes: c.now.Add(5 * time.Hour)})
+		if tc == "bad proposal_sig" {
+			w.Sig = make([]byte, 64)
+		}
+		sig, _ := c.statusSigBy(c.svc.IK, w, nil)
+		body := c.statusBody(w, nil, 0, nil, sig)
+		if tc == "another id" { // the answer names ours, the proposal another
+			body = bytes.Replace(body, []byte(`"proposal_id":"`+id+`"`), []byte(`"proposal_id":"`+v.ID+`"`), 1)
+		}
+		c.respond(sid, "vote.status", &envelope.Inner{Status: envelope.StatusOK, Body: body})
+		if r := c.rec(v.ID); len(r.StatusAnswers) != 0 || r.RefusalProblem {
+			t.Errorf("%s: %d kept, problem %v", tc, len(r.StatusAnswers), r.RefusalProblem)
+		}
+	}
+}
+
+// A status for a proposal not held whose proposal_id is not the proposal's
+// own keeps nothing (status_sig does not cover proposal_id).
+func TestV2IntakeStatusTiesTheIDToTheProposal(t *testing.T) {
+	for _, guard := range []bool{false, true} {
+		c := newCastEnv(t)
+		c.open(1) // the service's connection
+		w := c.svc.NewVote(votetest.VoteSpec{ID: lid(8), Opens: c.now.Add(-time.Hour), Closes: c.now.Add(time.Hour)})
+		asked := lid(9)
+		if !guard {
+			asked = w.ID // control: the same answer under its own id is kept
+		}
+		c.f.RequestProposal(c.session(), "svc", asked, w.Doc)
+		ids := c.statuses()
+		sig, _ := c.statusSigBy(c.svc.IK, w, nil)
+		body := bytes.Replace(c.statusBody(w, nil, 0, nil, sig), []byte(`"proposal_id":"`+w.ID+`"`), []byte(`"proposal_id":"`+asked+`"`), 1)
+		c.respond(ids[len(ids)-1], "vote.status", &envelope.Inner{Status: envelope.StatusOK, Body: body})
+		if kept := c.rec(w.ID) != nil; kept == guard {
+			t.Errorf("answer naming %s for proposal %s: kept %v", asked, w.ID, kept)
+		}
+	}
+}
+
+// (finding: compact records) An evicted record exports its refusals with
+// the v1 ones marked; a released one its refusals and status answers.
+func TestV2CompactEvidenceMarksV1(t *testing.T) {
+	v1 := []byte(`{"refusal_sig":"AAAA","msg_ms":1}`)
+	v2 := []byte(`{"refusal_sig":"AAAA","proposal_hash":"AAAA","msg_ms":1}`)
+	st := []byte(`{"proposal_id":"x","status_sig":"AAAA"}`)
+	for _, released := range []bool{false, true} {
+		c := &compact{Conn: "svc", ID: lid(1), Refusals: [][]byte{v2, v1}, StatusAnswers: [][]byte{st}, Released: released}
+		o, err := strictjson.ParseObject(compactEvidence(c))
+		if err != nil {
+			t.Fatal(err)
+		}
+		u, err := o.Object("unverifiable_v1")
+		if err != nil {
+			t.Fatalf("released %v: no unverifiable_v1", released)
+		}
+		if string(u["refusals"]) != "[1]" {
+			t.Errorf("released %v: refusals %s", released, u["refusals"])
+		}
+		if _, ok := u["status_answers"]; ok != released {
+			t.Errorf("released %v: status_answers %s", released, u["status_answers"])
+		}
 	}
 }

@@ -122,11 +122,9 @@ type Host struct {
 	// OwnPrior are the earlier identity keys of the fake vault's chain.
 	SentIDs map[int]string
 	// Deposits are the relay's times (ms) of each request's deposits, by
-	// inner id (SendRequest records now); LostDeposit makes SendRequest
-	// record none, as a deposit whose answer was lost.
-	Deposits    map[string][]int64
-	LostDeposit bool
-	OwnPrior    []ed25519.PublicKey
+	// inner id (SendRequest records now).
+	Deposits map[string][]int64
+	OwnPrior []ed25519.PublicKey
 	// Blobs are the blobs of the fake vault's mailbox by id (sealed), BlobMax
 	// the relay's attachment_max_bytes, BlobResults the answers of deferred
 	// blob calls.
@@ -566,14 +564,11 @@ func (h *Host) SendRequest(to, typ string, body json.RawMessage, now time.Time) 
 		h.SentIDs = map[int]string{}
 	}
 	h.SentIDs[len(h.Sent)-1] = id
-	// The relay took the deposit at now: its msg_id's time (unless the test
-	// set LostDeposit, a deposit whose answer was lost).
-	if !h.LostDeposit {
-		if h.Deposits == nil {
-			h.Deposits = map[string][]int64{}
-		}
-		h.Deposits[id] = append(h.Deposits[id], now.UnixMilli())
+	// The relay took the deposit at now: its msg_id's time.
+	if h.Deposits == nil {
+		h.Deposits = map[string][]int64{}
 	}
+	h.Deposits[id] = append(h.Deposits[id], now.UnixMilli())
 	return id, nil
 }
 

@@ -2,6 +2,7 @@ package vault
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -129,5 +130,33 @@ func TestDepositTimesKeptAcrossRetriesAndPruned(t *testing.T) {
 	m.prune()
 	if m.depositTimes("req") != nil {
 		t.Error("kept past 16 days")
+	}
+}
+
+// At most maxDepositRequests requests are kept: the one whose first deposit
+// is the oldest goes first.
+func TestDepositTimesBoundedByRequests(t *testing.T) {
+	f := newR29Fx(t)
+	m := f.m(0)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	id, err := envelope.NewULID(f.clk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < maxDepositRequests; i++ {
+		m.recordDepositTime(&OutboxEntry{InnerID: fmt.Sprintf("req-%05d", i), Type: "vote.status"}, id, f.clk.Add(time.Duration(i)*time.Second))
+	}
+	m.recordDepositTime(&OutboxEntry{InnerID: "req-new", Type: "vote.status"}, id, f.clk.Add(time.Hour*2))
+	if n := len(m.st.DepositTimes); n != maxDepositRequests {
+		t.Fatalf("%d requests kept, want %d", n, maxDepositRequests)
+	}
+	if m.depositTimes("req-00000") != nil || m.depositTimes("req-00001") == nil || m.depositTimes("req-new") == nil {
+		t.Error("not the oldest dropped")
+	}
+	// A further time for a request already kept drops nothing.
+	m.recordDepositTime(&OutboxEntry{InnerID: "req-00001", Type: "vote.status"}, id, f.clk)
+	if m.depositTimes("req-00002") == nil {
+		t.Error("a request dropped for a retry's time")
 	}
 }

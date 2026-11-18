@@ -1224,8 +1224,12 @@ func (m *Manager) noStandingToken(p *Peer, now time.Time) {
 // (BALLOT-PROTOCOL 0.15.0 §4.2, VAULT-MESSAGING §10.19.5).
 var timedRequests = map[string]bool{"vote.cast": true, "vote.status": true}
 
-// maxDepositTimes bounds the times kept per request (retries of one entry).
-const maxDepositTimes = 16
+// maxDepositTimes bounds the times kept per request (retries of one entry),
+// maxDepositRequests the requests kept (the oldest goes first).
+const (
+	maxDepositTimes    = 16
+	maxDepositRequests = 4096
+)
 
 // recordDepositTime keeps the relay's time of a timed request's deposit,
 // from the msg_id the relay returned for it. A msg_id that is not a ULID
@@ -1243,6 +1247,9 @@ func (m *Manager) recordDepositTime(e *OutboxEntry, msgID string, now time.Time)
 	}
 	d := m.st.DepositTimes[e.InnerID]
 	if d == nil {
+		if len(m.st.DepositTimes) >= maxDepositRequests {
+			m.dropOldestDepositTimes()
+		}
 		d = &DepositTimes{At: now}
 		m.st.DepositTimes[e.InnerID] = d
 	}
@@ -1263,4 +1270,17 @@ func (m *Manager) depositTimes(innerID string) []int64 {
 		return append([]int64(nil), d.MS...)
 	}
 	return nil
+}
+
+// dropOldestDepositTimes removes the request whose first deposit is the
+// oldest (an answer to it is then no answer, and it is asked again).
+func (m *Manager) dropOldestDepositTimes() {
+	oldest := ""
+	var at time.Time
+	for k, d := range m.st.DepositTimes {
+		if oldest == "" || d.At.Before(at) || d.At.Equal(at) && k < oldest {
+			oldest, at = k, d.At
+		}
+	}
+	delete(m.st.DepositTimes, oldest)
 }

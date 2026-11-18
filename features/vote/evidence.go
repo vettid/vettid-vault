@@ -269,6 +269,13 @@ func compactEvidence(c *compact) []byte {
 		e.Raw("ballot", ballotEvidence(c.VK, c.ChoiceID, c.BallotSig, c.MsgMS, c.ReceiptSig))
 	}
 	e.Raw("refusals", arrOfB64(c.Refusals))
+	// An evicted record exports its refusals and no status answers; a
+	// released one exports both.
+	if c.Released {
+		unverifiableV1(e, c.Refusals, c.StatusAnswers)
+	} else {
+		unverifiableV1(e, c.Refusals, nil)
+	}
 	if c.Released {
 		if c.RejectReason != "" {
 			e.String("reason", c.RejectReason)
@@ -286,7 +293,6 @@ func compactEvidence(c *compact) []byte {
 			e.Raw("site_copy", evidenceCopy(c.SiteCopy))
 		}
 		e.Raw("status_answers", arrOfB64(c.StatusAnswers))
-		unverifiableV1(e, c.Refusals, c.StatusAnswers)
 		if c.Other != nil {
 			e.Raw("other_ballot", svcBallotJSON(c.Other))
 		}

@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/vettid/vettid-vault/vms/envelope"
@@ -389,10 +390,18 @@ func parseProxy(raw []byte) (*ProxyWays, error) {
 // unlock window. Dropping a pin, a program, a host, a name or a way, and
 // each set to true, only narrow.
 //
-// A change of the proxy's header or prefix is not a widening: the value
-// still goes only to the item's bound hosts, which an added host would
-// widen (the spec lists the widenings, and these
-// are not among them).
+// Binding an unbound item (programs from empty to a list) narrows, unless
+// an entry lists env names: an unbound item allows no env at all. An
+// absolute entry that replaces a bare one with the same last element
+// narrows too (the bare name matched it and more), unless it lists a name
+// the bare entry did not.
+//
+// A change of the proxy's header is a widening (not in the spec's list;
+// an erratum): some hosts echo or log a header, so a new header name can
+// send the value somewhere the member did not approve. Only its case is
+// free (header names compare without case). A change of the prefix is
+// not: it is printable ASCII only, and the value still goes only to the
+// bound hosts.
 func Widens(cur, next *ItemWays) bool {
 	for _, way := range next.WayList() {
 		if !cur.Has(way) {
@@ -403,9 +412,19 @@ func Widens(cur, next *ItemWays) bool {
 		if len(next.Run.Programs) == 0 && len(cur.Run.Programs) > 0 {
 			return true // unbound: any program
 		}
+		unbound := len(cur.Run.Programs) == 0
 		for _, p := range next.Run.Programs {
 			q, ok := findProgram(cur.Run.Programs, p.Program)
-			if !ok {
+			switch {
+			case ok:
+			case unbound:
+				q = Program{} // bound now: narrower, with no env allowed before
+			case IsAbsProgram(p.Program):
+				// A bare entry this absolute one narrows, if there is one.
+				if q, ok = findBare(cur.Run.Programs, ProgramKey(LastElement(p.Program))); !ok {
+					return true
+				}
+			default:
 				return true // a program added (a changed program is one added)
 			}
 			for _, n := range p.Env {
@@ -417,6 +436,9 @@ func Widens(cur, next *ItemWays) bool {
 		if !next.Run.Each && cur.Run.Each {
 			return true
 		}
+	}
+	if next.Proxy != nil && cur != nil && cur.Proxy != nil && !strings.EqualFold(next.Proxy.Header, cur.Proxy.Header) {
+		return true
 	}
 	if next.Proxy != nil && cur != nil && cur.Proxy != nil {
 		have := map[string]bool{}
@@ -430,6 +452,16 @@ func Widens(cur, next *ItemWays) bool {
 		}
 	}
 	return false
+}
+
+// findBare finds the bare entry with the program key key.
+func findBare(ps []Program, key string) (Program, bool) {
+	for _, p := range ps {
+		if !IsAbsProgram(p.Program) && ProgramKey(p.Program) == key {
+			return p, true
+		}
+	}
+	return Program{}, false
 }
 
 func findProgram(ps []Program, program string) (Program, bool) {
@@ -458,13 +490,16 @@ func IsAbsProgram(p string) bool {
 
 // ValidProgram reports whether p is a binding's program: an absolute path
 // or a bare name (no separator and no volume), at most MaxProgram bytes of
-// UTF-8 without control characters (the bounds are not in the spec).
+// UTF-8 without control characters, nor format characters (Unicode Cf:
+// bidirectional overrides and isolates, zero-width characters) or line
+// and paragraph separators (Zl, Zp), which could make the program shown
+// on the phone read as another (the bounds are not in the spec).
 func ValidProgram(p string) bool {
 	if p == "" || len(p) > MaxProgram || !utf8.ValidString(p) {
 		return false
 	}
 	for _, r := range p {
-		if r < 0x20 || r == 0x7f || r >= 0x80 && r < 0xa0 {
+		if r < 0x20 || r == 0x7f || r >= 0x80 && r < 0xa0 || unicode.In(r, unicode.Cf, unicode.Zl, unicode.Zp) {
 			return false
 		}
 	}
@@ -483,10 +518,21 @@ func LastElement(p string) string {
 }
 
 // ProgramKey is how bindings are compared (0.85.3): without case and
-// without a final .exe.
+// without a final .exe. As Windows reads them, a drive path's / is \, and
+// trailing dots and spaces of the last element are dropped (C:/x/git.exe.
+// and c:\x\GIT name one file).
 func ProgramKey(p string) string {
 	k := strings.ToLower(p)
-	return strings.TrimSuffix(k, ".exe")
+	dir, last := "", k
+	if i := strings.LastIndexAny(k, "/"+string(rune(backslash))); i >= 0 {
+		dir, last = k[:i+1], k[i+1:]
+	}
+	if len(dir) >= 3 && dir[1] == ':' { // a drive path (IsAbsProgram)
+		dir = strings.ReplaceAll(dir, "/", string(rune(backslash)))
+	}
+	last = strings.TrimRight(last, " .")
+	last = strings.TrimRight(strings.TrimSuffix(last, ".exe"), " .")
+	return dir + last
 }
 
 var (
@@ -549,8 +595,8 @@ func ValidEnvName(n string) bool {
 }
 
 // ValidProxyHost reports whether h is a proxy binding's host: a lowercase
-// DNS name with an optional :port (1–65535, default 443), no wildcard and
-// no IP literal.
+// DNS name of at least two labels with an optional :port (1–65535, default
+// 443), no wildcard, no IP literal, and not localhost or under it.
 func ValidProxyHost(h string) bool {
 	name := h
 	if i := strings.LastIndexByte(h, ':'); i >= 0 {
@@ -568,6 +614,11 @@ func ValidProxyHost(h string) bool {
 		return false
 	}
 	labels := strings.Split(name, ".")
+	if len(labels) < 2 || labels[len(labels)-1] == "localhost" {
+		// A single-label name or localhost (RFC 6761) names this computer or
+		// its local network, never an API's host.
+		return false
+	}
 	for _, l := range labels {
 		if l == "" || len(l) > 63 || l[0] == '-' || l[len(l)-1] == '-' {
 			return false

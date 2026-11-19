@@ -522,7 +522,16 @@ func TestWindowOpenDoesNotExtend(t *testing.T) {
 	if _, ok := e.f.UseKey(e.clk.T.Add(61*time.Second), time.Minute); ok {
 		t.Fatal("UseKey after the window")
 	}
-	e.ok(e.unlock(blob, pw))
+	blob = blobOf(t, e.ok(e.unlock(blob, pw)))
+	// A credential alarm (§3.5.9) closes it, as for UseKey.
+	e.f.st.Alarm = &Alarm{ID: "01JB2Z6V9K3M4N5P6Q7R8S9T0V", State: AlarmFrozen, At: e.clk.T}
+	if e.f.WindowOpen(e.clk.T) {
+		t.Fatal("open during an alarm")
+	}
+	e.f.st.Alarm = nil
+	if !e.f.WindowOpen(e.clk.T) {
+		t.Fatal("the test's window is not open")
+	}
 	e.ok(e.raw("app", "credential.lock", `{}`))
 	if e.f.WindowOpen(e.clk.T) {
 		t.Fatal("open after credential.lock")

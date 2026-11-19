@@ -53,8 +53,25 @@ func (f *fakeItems) AgentWays(agent string, rules []itemspec.AgentRule, item str
 	return f.ways[[2]string{agent, item}].Clone(), true
 }
 
+// memberIncluded: a rule includes the item, a use left or not.
+func (f *fakeItems) memberIncluded(agent string, rules []itemspec.AgentRule, item string) bool {
+	for _, r := range rules {
+		if r.AgentID == agent && f.incl[r.ID][item] {
+			return true
+		}
+	}
+	return false
+}
+
+func (f *fakeItems) AgentMemberWays(agent string, rules []itemspec.AgentRule, item string) (*itemspec.ItemWays, bool) {
+	if !f.memberIncluded(agent, rules, item) {
+		return nil, false
+	}
+	return f.ways[[2]string{agent, item}].Clone(), true
+}
+
 func (f *fakeItems) AgentSetWays(agent string, rules []itemspec.AgentRule, item string, w *itemspec.ItemWays) bool {
-	if f.AgentIncluded(agent, rules, item) == "" {
+	if !f.memberIncluded(agent, rules, item) {
 		return false
 	}
 	if f.ways == nil {
@@ -67,7 +84,7 @@ func (f *fakeItems) AgentSetWays(agent string, rules []itemspec.AgentRule, item 
 func (f *fakeItems) AgentWaysList(agent string, rules []itemspec.AgentRule) []itemspec.AgentItemWays {
 	var out []itemspec.AgentItemWays
 	for _, id := range []string{"01JB2Z6V9K3M4N5P6Q7R8S9BAN", "01JB2Z6V9K3M4N5P6Q7R8S9W1F"} { // sorted
-		if f.items[id] != nil && f.AgentIncluded(agent, rules, id) != "" {
+		if f.items[id] != nil && f.memberIncluded(agent, rules, id) {
 			out = append(out, itemspec.AgentItemWays{ItemID: id, Ways: f.ways[[2]string{agent, id}].Clone()})
 		}
 	}

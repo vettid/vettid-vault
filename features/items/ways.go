@@ -148,12 +148,46 @@ func (f *Feature) AgentWays(agent string, rules []itemspec.AgentRule, itemID str
 	return settle(incs).Clone(), true
 }
 
+// memberIncls is the agent's inclusions of the item under rules, whatever
+// their uses: what the member sees and changes (leash.item.set and .list),
+// so that settings of an item with no use left can still be seen and
+// narrowed. What the agent reads, and the decisions, use agentIncls.
+func (f *Feature) memberIncls(agent string, rules []itemspec.AgentRule, itemID string) []*Inclusion {
+	it := f.st.Items[itemID]
+	if it == nil || it.Sensitivity == itemspec.Critical {
+		return nil
+	}
+	var out []*Inclusion
+	for i := range rules {
+		if rules[i].AgentID != agent {
+			continue
+		}
+		if inc := f.incl(rules[i].ID, itemID); inc != nil && inc.State == StateIncluded {
+			out = append(out, inc)
+		}
+	}
+	return out
+}
+
+// AgentMemberWays is AgentWays for the member (leash.item.set): an item
+// with no use left counts as included.
+func (f *Feature) AgentMemberWays(agent string, rules []itemspec.AgentRule, itemID string) (*itemspec.ItemWays, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	incs := f.memberIncls(agent, rules, itemID)
+	if len(incs) == 0 {
+		return nil, false
+	}
+	return settle(incs).Clone(), true
+}
+
 // AgentSetWays stores the agent's settings for an item on every inclusion
-// of it by the agent's rules in force; false if none includes it.
+// of it by the agent's rules in force, whatever their uses; false if none
+// includes it.
 func (f *Feature) AgentSetWays(agent string, rules []itemspec.AgentRule, itemID string, w *itemspec.ItemWays) bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	incs, _ := f.agentIncls(agent, rules, itemID)
+	incs := f.memberIncls(agent, rules, itemID)
 	if len(incs) == 0 {
 		return false
 	}
@@ -163,14 +197,14 @@ func (f *Feature) AgentSetWays(agent string, rules []itemspec.AgentRule, itemID 
 	return true
 }
 
-// AgentWaysList lists the settings of each item the agent's rules include
-// (nil Ways: absent), sorted by item id.
+// AgentWaysList lists the settings of each item the agent's rules include,
+// with or without a use left (nil Ways: absent), sorted by item id.
 func (f *Feature) AgentWaysList(agent string, rules []itemspec.AgentRule) []itemspec.AgentItemWays {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	var out []itemspec.AgentItemWays
 	for _, it := range f.sortedItems() {
-		if incs, _ := f.agentIncls(agent, rules, it.ID); len(incs) > 0 {
+		if incs := f.memberIncls(agent, rules, it.ID); len(incs) > 0 {
 			out = append(out, itemspec.AgentItemWays{ItemID: it.ID, Ways: settle(incs).Clone()})
 		}
 	}

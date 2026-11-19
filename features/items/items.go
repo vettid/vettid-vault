@@ -876,14 +876,17 @@ func (f *Feature) finish(s *vault.Session, ch *change, kind string) {
 		s.Record(vault.Activity{Kind: kind, Ref: ch.after.ID, Audit: true})
 	} else {
 		id := ch.before.ID
+		// The plan above withdrew every live inclusion of the deleted item,
+		// and apply announced the agents' settings that went with them
+		// (§10.11); what is left here (declines, inclusions of rules no
+		// longer in force, which expire dropped before this request) holds
+		// none.
 		for rid, m := range f.st.Incl {
-			f.noteWaysGone(m[id], id)
 			delete(m, id)
 			if len(m) == 0 {
 				delete(f.st.Incl, rid)
 			}
 		}
-		f.flushWays(s)
 		s.SyncEvent("item.deleted", strictjson.NewBuilder().String("item_id", id).Bytes())
 		s.Record(vault.Activity{Kind: kind, Ref: id, Audit: true})
 		f.itemDeleted(id)

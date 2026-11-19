@@ -146,7 +146,27 @@ func TestVaultctlBatch3(t *testing.T) {
 	if out = runAs(agent, "agent", "request", "-op", "catalog"); !strings.Contains(out, wifi) || strings.Contains(out, "hunter22") {
 		t.Fatalf("catalog: %s", out)
 	}
-	if out = runAs(agent, "agent", "request", "-op", "item.get", "-item", wifi); !strings.Contains(out, "hunter22") {
+	// (0.42.0) A reveal needs the item's reveal way, then the app's approval
+	// each time.
+	if out, err := runErr(agent, "agent", "request", "-op", "item.get", "-item", wifi); err == nil || !strings.Contains(out, "way_not_allowed") {
+		t.Fatalf("item.get without reveal: %v %s", err, out)
+	}
+	run("request", "leash.item.set", `{"agent_id":"`+agentID+`","item_id":"`+wifi+`","ways":["use","reveal"]}`)
+	time.Sleep(2 * time.Second) // past the refusal cooldown
+	got := make(chan string, 1)
+	go func() {
+		out, err := runErr(agent, "agent", "request", "-op", "item.get", "-item", wifi)
+		if err != nil {
+			out = fmt.Sprintf("%v: %s", err, out)
+		}
+		got <- out
+	}()
+	out = poll(app, `"flags"`)
+	if !strings.Contains(out, `"history"`) {
+		t.Fatalf("reveal approval: %s", out)
+	}
+	run("request", "approval.decide", `{"approval_id":"`+between(out, `"approval_id": "`, `"`)+`","approve":true}`)
+	if out = <-got; !strings.Contains(out, "hunter22") {
 		t.Fatalf("item.get: %s", out)
 	}
 	if out = run("leash", "list", "-agent", agentID); strings.Count(out, `"grant_id"`) != 2 || !strings.Contains(out, `"items.read"`) {

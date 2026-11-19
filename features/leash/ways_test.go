@@ -2,7 +2,9 @@ package leash
 
 import (
 	"bytes"
+	"context"
 	"crypto/ed25519"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -10,6 +12,7 @@ import (
 	"github.com/vettid/vettid-vault/features/itemspec"
 	"github.com/vettid/vettid-vault/internal/featuretest"
 	"github.com/vettid/vettid-vault/vault"
+	"github.com/vettid/vettid-vault/vms/envelope"
 )
 
 // WindowOpen is the credential's check that does not extend the window.
@@ -27,6 +30,15 @@ func (r *rig) itemSet(body string) featuretest.Result {
 }
 
 func (r *rig) stored(item string) *itemspec.ItemWays { return r.it.ways[[2]string{agent, item}] }
+
+// reveal turns on "May be shown to agents" for the item (as staging agents
+// and tests that read values must, §10.11 "Migration").
+func (r *rig) reveal(item string) {
+	if r.it.ways == nil {
+		r.it.ways = map[[2]string]*itemspec.ItemWays{}
+	}
+	r.it.ways[[2]string{agent, item}] = &itemspec.ItemWays{Version: 1, Ways: []string{itemspec.WayUse, itemspec.WayReveal}}
+}
 
 func syncKinds(h *featuretest.Host) []string {
 	var out []string
@@ -201,6 +213,149 @@ func TestItemList(t *testing.T) {
 	r.it.incl = map[string]map[string]bool{}
 	if res := featuretest.Call(r.f, r.h, t0, vault.KindApp, "leash.item.list", `{"agent_id":"dev-agent"}`); !bytes.Equal(res.Obj(t)["items"], []byte("[]")) {
 		t.Fatalf("withdrawn listed: %s", res.Body)
+	}
+}
+
+// decideS is decide, also returning the session (its refusal and flags).
+func (r *rig) decideS(now time.Time, body string) (vault.AgentDecision, *vault.Session) {
+	in := &envelope.Inner{ID: "01JB2Z6V9K3M4N5P6Q7R8S9T0V", Type: "agent.request", TS: now, Body: json.RawMessage(body)}
+	from, _ := r.h.Device(agent)
+	s := vault.NewSession(context.Background(), r.h, from, now, in)
+	return r.f.AgentDecision(s, "agent.request", json.RawMessage(body)), s
+}
+
+func (r *rig) refusedCount() int {
+	n := 0
+	for _, a := range r.h.Activities {
+		if a.Kind == KindRefused || a.Kind == KindRefused+".summary" {
+			n++
+		}
+	}
+	return n
+}
+
+// §10.11 (0.42.0): item.get only with reveal. Without it: way_not_allowed
+// {ways}, counted as refused, with the scope's cooldown. With it: the
+// windows count it and it is always referred, flagged history, within the
+// referral cap. A use is unaffected; an item no rule includes stays
+// forbidden (nothing said about its settings).
+func TestRevealDecision(t *testing.T) {
+	r := newRig(t)
+	gid := r.rule(t, Auto, 0, 3, r.wifi)
+	get := `{"op":"item.get","item_id":"` + r.wifi + `"}`
+	r.h.Reset()
+	d, s := r.decideS(t0, get)
+	if d != vault.AgentDeny || s.AgentRefusal() == nil || s.AgentRefusal().Code != "way_not_allowed" || string(s.AgentRefusal().Body) != `{"ways":["use"]}` {
+		t.Fatalf("without reveal: %v %+v", d, s.AgentRefusal())
+	}
+	if !r.h.HasActivity(KindRefused) {
+		t.Fatal("not counted as refused")
+	}
+	if c := r.f.d.Agents[agent].Cool[ScopeItems]; c == nil || !t0.Before(c.Until) {
+		t.Fatal("no cooldown")
+	}
+	// The cooldown throttles the next items.read request, a use included.
+	use := `{"op":"item.use","item_id":"` + r.wifi + `","field_id":"f1","action":"hmac-sha256","data":"aGk="}`
+	if d, _ := r.decideS(t0.Add(500*time.Millisecond), use); d != vault.AgentDeny {
+		t.Fatalf("use within the cooldown: %v", d)
+	}
+	// Other ways allowed, still no reveal: the answer names them.
+	r.it.ways = map[[2]string]*itemspec.ItemWays{{agent, r.wifi}: {Version: 1, Ways: []string{itemspec.WayUse, itemspec.WayProxy},
+		Proxy: &itemspec.ProxyWays{Hosts: []string{"api.example.com"}, Header: "X"}}}
+	if _, s := r.decideS(t0.Add(time.Hour), get); s.AgentRefusal() == nil || string(s.AgentRefusal().Body) != `{"ways":["use","proxy"]}` {
+		t.Fatalf("ways named: %+v", s.AgentRefusal())
+	}
+	// A use needs no reveal.
+	if d, _ := r.decideS(t0.Add(2*time.Hour), use); d != vault.AgentAllow {
+		t.Fatalf("use: %v", d)
+	}
+	// An item no rule includes: forbidden, no refusal named.
+	if d, s := r.decideS(t0.Add(3*time.Hour), `{"op":"item.get","item_id":"`+r.bank+`"}`); d != vault.AgentDeny || s.AgentRefusal() != nil {
+		t.Fatalf("not included: %v %+v", d, s.AgentRefusal())
+	}
+	// With reveal: referred every time, flagged; the windows count it.
+	r.reveal(r.wifi)
+	now := t0.Add(5 * time.Hour)
+	g := r.f.d.Grants[gid]
+	for i := 0; i < 5; i++ {
+		d, s := r.decideS(now.Add(time.Duration(i)*time.Second), get)
+		if d != vault.AgentAsk || strings.Join(s.ApprovalFlags(), ",") != FlagHistory || s.AgentRefusal() != nil {
+			t.Fatalf("reveal %d: %v %v", i, d, s.ApprovalFlags())
+		}
+	}
+	if g.HourN != 3 {
+		t.Fatalf("windows: %d counted, want 3 (per_hour)", g.HourN)
+	}
+	if !r.h.HasActivity("leash.rate_limited") {
+		t.Fatal("past per_hour not recorded")
+	}
+	// A use is still allowed without approval within its windows (a new
+	// hour).
+	if d, s := r.decideS(now.Add(time.Hour+time.Minute), use); d != vault.AgentAllow || s.ApprovalFlags() != nil {
+		t.Fatalf("use after reveals: %v", d)
+	}
+	// The referral cap applies to reveals.
+	r2 := newRig(t)
+	r2.rule(t, Auto, 0, 3600, r2.wifi)
+	r2.reveal(r2.wifi)
+	for i := 0; i < MaxReferralsPerHour; i++ {
+		if d, _ := r2.decideS(t0.Add(time.Duration(i)*time.Second), get); d != vault.AgentAsk {
+			t.Fatalf("referral %d: %v", i, d)
+		}
+	}
+	if d, _ := r2.decideS(t0.Add(time.Minute), get); d != vault.AgentDeny || !r2.h.HasActivity("leash.referrals_limited") {
+		t.Fatalf("past the cap: %v", d)
+	}
+}
+
+// §10.11 (0.42.0): an approved reveal is checked again when it runs; if
+// reveal was turned off meanwhile, way_not_allowed and nothing is read.
+func TestRevealCheckedAtApproval(t *testing.T) {
+	r := newRig(t)
+	r.rule(t, Auto, 0, 60, r.wifi)
+	r.reveal(r.wifi)
+	get := `{"op":"item.get","item_id":"` + r.wifi + `"}`
+	if d, _ := r.decideS(t0, get); d != vault.AgentAsk {
+		t.Fatal("not referred")
+	}
+	from, _ := r.h.Device(agent)
+	if !r.f.AgentCovered(vault.NewSession(context.Background(), r.h, from, t0, nil), "agent.request", json.RawMessage(get)) {
+		t.Fatal("not covered at approval")
+	}
+	delete(r.it.ways, [2]string{agent, r.wifi})
+	res := featuretest.Call(r.f, r.h, t0, vault.KindAgent, "agent.request", get)
+	if res.Code != "way_not_allowed" || string(res.Body) != `{"ways":["use"]}` || strings.Contains(string(res.Body), "hunter22") || r.it.used[r.wifi] != 0 {
+		t.Fatalf("after reveal turned off: %q %s used=%d", res.Code, res.Body, r.it.used[r.wifi])
+	}
+	r.reveal(r.wifi)
+	if res := featuretest.Call(r.f, r.h, t0, vault.KindAgent, "agent.request", get); !res.OK() || !strings.Contains(string(res.Body), "hunter22") {
+		t.Fatalf("with reveal: %q", res.Code)
+	}
+}
+
+// §10.11: the catalog gives each item's ways, programs ({program, env,
+// path?}: never the hash) and hosts (never header or prefix).
+func TestCatalogWays(t *testing.T) {
+	r := newRig(t)
+	r.rule(t, Auto, 0, 60, r.wifi, r.bank)
+	sha := strings.Repeat("ab", 32)
+	r.it.ways = map[[2]string]*itemspec.ItemWays{{agent, r.wifi}: {Version: 2, Ways: []string{itemspec.WayUse, itemspec.WayRun, itemspec.WayProxy},
+		Run:   &itemspec.RunWays{Each: true, Programs: []itemspec.Program{{Program: "git", SHA256: sha, Path: "/usr/bin/git", Env: []string{"GH_HOST"}}}},
+		Proxy: &itemspec.ProxyWays{Hosts: []string{"api.example.com"}, Header: "X-Secret-Header", Prefix: "Tok "}}}
+	res := featuretest.Call(r.f, r.h, t0, vault.KindAgent, "agent.request", `{"op":"catalog"}`)
+	if !res.OK() {
+		t.Fatal(res.Code)
+	}
+	body := string(res.Body)
+	wantWifi := `"ways":["use","run","proxy"],"programs":[{"program":"git","path":"/usr/bin/git","env":["GH_HOST"]}],"hosts":["api.example.com"]}`
+	wantBank := `"labels":[{"field_id":"f1","label":"Password","kind":"password"},{"field_id":"f2","label":"Address","kind":"address"}],"ways":["use"]}`
+	if !strings.Contains(body, wantWifi) || !strings.Contains(body, wantBank) {
+		t.Fatalf("catalog: %s", body)
+	}
+	for _, never := range []string{sha, "X-Secret-Header", "Tok ", "hunter22", "s3cret", `"version"`, "updated_at", "each"} {
+		if strings.Contains(body, never) {
+			t.Fatalf("catalog shows %q: %s", never, body)
+		}
 	}
 }
 

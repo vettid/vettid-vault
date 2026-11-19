@@ -536,7 +536,8 @@ func TestOverlapAgents(t *testing.T) {
 		s := vault.NewSession(context.TODO(), e.h, vault.PeerInfo{ID: "dev-agent", Kind: vault.KindAgent}, e.clk.T, nil)
 		return e.set.Leash.AgentDecision(s, "agent.request", json.RawMessage(js(req)))
 	}
-	get := map[string]any{"op": "item.get", "item_id": doc}
+	// (0.42.0: a reveal is always referred; a use tests the windows.)
+	get := map[string]any{"op": "item.use", "item_id": doc, "field_id": "f1", "action": "hmac-sha256", "data": "aGk="}
 	if d := decide(get); d != vault.AgentAllow {
 		t.Fatalf("first read: %v", d)
 	}

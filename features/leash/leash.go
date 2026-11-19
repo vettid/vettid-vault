@@ -85,7 +85,7 @@ type AgentItems interface {
 	// AgentIncluding returns the ids of the rules that include the item
 	// (none if one of them has no use left; 0.23.0).
 	AgentIncluding(agent string, rules []itemspec.AgentRule, itemID string) []string
-	AgentCatalog(agent string, rules []itemspec.AgentRule) []itemspec.Meta
+	AgentCatalog(agent string, rules []itemspec.AgentRule) []itemspec.AgentEntry
 	AgentRead(agent string, rules []itemspec.AgentRule, itemID string, fields []string) ([]byte, bool)
 	AgentFieldValue(agent string, rules []itemspec.AgentRule, itemID, fieldID string) (string, bool)
 	// The ways to use a secret (0.42.0): the settings of an item the rules
@@ -688,21 +688,24 @@ func (f *Feature) AgentDecision(s *vault.Session, typ string, body json.RawMessa
 		gs = f.matching(agent, scope, conn, item, now)
 	}
 	if len(gs) == 0 {
-		if st.Cool == nil {
-			st.Cool = map[string]*Cooldown{}
-		}
-		c := st.Cool[scope]
-		if c == nil {
-			c = &Cooldown{}
-			st.Cool[scope] = c
-		}
-		d := CooldownBase << min(c.Step, 16)
-		if d > CooldownMax {
-			d = CooldownMax
-		}
-		c.Step++
-		c.Until, c.Last = now.Add(d), now
+		coolDown(st, scope, now)
 		return f.refuse(s, agent, st, KindRefused, scope)
+	}
+	// (0.42.0) Ways to use a secret: an item.get of an item whose settings
+	// do not hold reveal is answered way_not_allowed {ways} and counted as
+	// refused, with its cooldown; one that does is decided as an items.read
+	// request and then always referred, flagged history (§10.11).
+	reveal := false
+	if typ == "agent.request" && scope == ScopeItems && item != "" {
+		if r, err := ParseRequest(body); err == nil && r.Op == "item.get" {
+			w, _ := f.items.AgentWays(agent, rulesOf(gs), item)
+			if !w.Has(itemspec.WayReveal) {
+				coolDown(st, scope, now)
+				s.RefuseAgentWith(wayNotAllowed(w))
+				return f.refuse(s, agent, st, KindRefused, scope)
+			}
+			reveal = true
+		}
 	}
 	delete(st.Cool, scope)
 	if scope == ScopeItems && item != "" {
@@ -731,8 +734,10 @@ func (f *Feature) AgentDecision(s *vault.Session, typ string, body json.RawMessa
 				g.HourN++
 				g.DayN++
 			}
-			f.note(s, agent, st, vault.Activity{Kind: KindAllowed, Ref: gs[0].ID})
-			return vault.AgentAllow
+			if !reveal {
+				f.note(s, agent, st, vault.Activity{Kind: KindAllowed, Ref: gs[0].ID})
+				return vault.AgentAllow
+			}
 		}
 		gs = nil // referred
 	}
@@ -767,7 +772,29 @@ func (f *Feature) AgentDecision(s *vault.Session, typ string, body json.RawMessa
 		return f.refuse(s, agent, st, KindThrottled, scope)
 	}
 	st.Referred++
+	if reveal {
+		s.FlagApproval([]string{FlagHistory})
+	}
 	return vault.AgentAsk
+}
+
+// coolDown starts or extends a scope's refusal cooldown (§10.11): 1 s,
+// then doubling after each further refusal, up to CooldownMax.
+func coolDown(st *AgentState, scope string, now time.Time) {
+	if st.Cool == nil {
+		st.Cool = map[string]*Cooldown{}
+	}
+	c := st.Cool[scope]
+	if c == nil {
+		c = &Cooldown{}
+		st.Cool[scope] = c
+	}
+	d := CooldownBase << min(c.Step, 16)
+	if d > CooldownMax {
+		d = CooldownMax
+	}
+	c.Step++
+	c.Until, c.Last = now.Add(d), now
 }
 
 // AgentCovered implements vault.AgentCoverage: whether a grant still
@@ -1305,14 +1332,19 @@ func (f *Feature) request(s *vault.Session, body []byte) (json.RawMessage, error
 	switch r.Op {
 	case "catalog":
 		arr := []byte{'['}
-		for i, m := range f.items.AgentCatalog(agent, rules) {
+		for i, e := range f.items.AgentCatalog(agent, rules) {
 			if i > 0 {
 				arr = append(arr, ',')
 			}
-			arr = append(arr, m.JSON()...)
+			arr = append(arr, catalogEntry(e)...)
 		}
 		return strictjson.NewBuilder().Raw("items", append(arr, ']')).Bytes(), nil
 	case "item.get":
+		// (0.42.0) Checked again here: the settings may have changed while
+		// the request waited for the app (§10.11). Not counted again.
+		if w, _ := f.items.AgentWays(agent, rules, r.ItemID); !w.Has(itemspec.WayReveal) {
+			return nil, wayNotAllowed(w)
+		}
 		content, ok := f.items.AgentRead(agent, rules, r.ItemID, r.Fields)
 		if !ok {
 			return nil, errNotFound

@@ -16,6 +16,32 @@ import (
 // inclusions of the item, so they go when the item is withdrawn from every
 // rule of the agent); this feature parses, checks and enforces them.
 
+// Approval flags the vault sets (approval.pending{flags}, §10.11, 0.42.0).
+// item.run's (shell, inline_code, unbound_program, program_unrecorded,
+// program_changed) come with item.run (AGENT-PLAN AV10).
+const FlagHistory = "history" // an item.get: the agent's app may keep the value in its history
+
+// wayNotAllowed is the answer to a request of a way the item's settings do
+// not hold: way_not_allowed with the ways they do (§10.11).
+func wayNotAllowed(w *itemspec.ItemWays) error {
+	return &vault.HandlerError{Code: "way_not_allowed", Body: strictjson.NewBuilder().Raw("ways", itemspec.StrList(w.WayList())).Bytes()}
+}
+
+// catalogEntry is one item of the catalog (§10.11): its metadata, its
+// ways and, when present, its programs ({program, env, path?}: the pinned
+// path, never the hash) and hosts (never header or prefix).
+func catalogEntry(e itemspec.AgentEntry) []byte {
+	b := strictjson.NewBuilder().String("item_id", e.Meta.ItemID).String("name", e.Meta.Name).String("category", e.Meta.Category).
+		Raw("labels", itemspec.LabelsJSON(e.Meta.Labels)).Raw("ways", itemspec.StrList(e.Ways.WayList()))
+	if p := e.Ways.CatalogPrograms(); p != nil {
+		b.Raw("programs", p)
+	}
+	if h := e.Ways.CatalogHosts(); h != nil {
+		b.Raw("hosts", h)
+	}
+	return b.Bytes()
+}
+
 // windowChecker is the credential feature's check of the unlock window
 // that does not extend it (credential.Feature.WindowOpen).
 type windowChecker interface {

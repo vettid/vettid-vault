@@ -248,6 +248,11 @@ func (s *Session) RefuseAgentWith(err error) {
 // another decision.
 func (s *Session) FlagApproval(flags []string) { s.approvalFlags = append([]string(nil), flags...) }
 
+// AgentRefusal and ApprovalFlags return what RefuseAgentWith and
+// FlagApproval set (nil if nothing): for tests of an AgentPolicy.
+func (s *Session) AgentRefusal() *HandlerError { return s.agentRefusal }
+func (s *Session) ApprovalFlags() []string     { return append([]string(nil), s.approvalFlags...) }
+
 // CacheResponseAs makes the answer to the request being handled cached (§8.2: a retransmission is answered from
 // the cache, not executed again) with body instead of the body the handler returns, which is sent once as it is.
 // For an answer that holds something the vault must not keep in its state (VAULT-MESSAGING §10.10, 0.90.15: a TURN

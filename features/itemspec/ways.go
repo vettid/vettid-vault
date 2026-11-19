@@ -78,6 +78,13 @@ type AgentItemWays struct {
 	Ways   *ItemWays
 }
 
+// AgentEntry is one item of an agent's catalog: its metadata and its
+// settings (nil: absent).
+type AgentEntry struct {
+	Meta Meta
+	Ways *ItemWays
+}
+
 // Has reports whether w allows way; absent settings allow only use.
 func (w *ItemWays) Has(way string) bool {
 	if w == nil {

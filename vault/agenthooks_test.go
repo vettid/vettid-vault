@@ -2,6 +2,7 @@ package vault
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -156,5 +157,27 @@ func TestAgentApprovalFlags(t *testing.T) {
 	defer d.m.mu.Unlock()
 	if len(d.m.st.Held) != n {
 		t.Fatal("refused request held")
+	}
+}
+
+// Flags are an agent request's only: a desktop's held step-up request never
+// carries any, whatever is passed.
+func TestApprovalFlagsAgentsOnly(t *testing.T) {
+	d := newDevFixture(t)
+	desk := d.addDevice(t, "desk1", KindDesktop, 0x72)
+	rid, _ := envelope.NewULID(time.Now())
+	d.m.mu.Lock()
+	d.m.hold(desk.peer, &envelope.Inner{ID: rid, Type: "settings.set", TS: time.Now(), Body: []byte(`{}`)},
+		"desk1/"+rid, false, []string{"history"}, time.Now())
+	var held *HeldRequest
+	for _, h := range d.m.st.Held {
+		held = h
+	}
+	d.m.mu.Unlock()
+	if held == nil || held.Flags != nil {
+		t.Fatalf("desktop hold: %+v", held)
+	}
+	if body := approvalPendingBody(held, desk.peer, &envelope.Inner{Type: "settings.set", Body: []byte(`{}`)}); strings.Contains(string(body), "flags") {
+		t.Fatalf("desktop approval.pending: %s", body)
 	}
 }

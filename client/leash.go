@@ -45,6 +45,43 @@ func (d *Device) LeashGrantList(ctx context.Context, agentID string) ([]json.Raw
 	return o.Array("grants")
 }
 
+// LeashItemSet sets the ways an agent may use an item its rules include
+// (leash.item.set, §10.11, 0.42.0): ways is the item_ways members (ways,
+// run?, proxy?); version 0 for an item without settings. A widening needs
+// the credential's unlock window.
+func (d *Device) LeashItemSet(ctx context.Context, agentID, itemID string, version uint64, ways map[string]any) (strictjson.Object, error) {
+	body := map[string]any{"agent_id": agentID, "item_id": itemID}
+	if version > 0 {
+		body["version"] = version
+	}
+	for k, v := range ways {
+		body[k] = v
+	}
+	return d.Op(ctx, "leash.item.set", body)
+}
+
+// LeashReveal turns on "May be shown to agents" for an item without
+// settings (ways use and reveal), as tests and staging agents that read
+// values must (§10.11 "Migration").
+func (d *Device) LeashReveal(ctx context.Context, agentID, itemID string) error {
+	_, err := d.LeashItemSet(ctx, agentID, itemID, 0, map[string]any{"ways": []string{"use", "reveal"}})
+	return err
+}
+
+// LeashItemList lists the ways of each item an agent's rules include
+// (leash.item.list; itemID "" for all).
+func (d *Device) LeashItemList(ctx context.Context, agentID, itemID string) ([]json.RawMessage, error) {
+	body := map[string]any{"agent_id": agentID}
+	if itemID != "" {
+		body["item_id"] = itemID
+	}
+	o, err := d.Op(ctx, "leash.item.list", body)
+	if err != nil {
+		return nil, err
+	}
+	return o.Array("items")
+}
+
 // AgentRequest sends an agent.request (an agent within its access
 // session). A referred request waits for an app's decision (§6.8): the
 // response arrives when the app decides, so ctx should allow up to the

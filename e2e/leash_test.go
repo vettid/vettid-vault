@@ -149,12 +149,43 @@ func TestLeashAgent(t *testing.T) {
 	}
 	cat, err := agent.AgentRequest(ctx, "catalog", nil)
 	if err != nil || !cat.OK() || !strings.Contains(string(cat.Body()), wifi) || strings.Contains(string(cat.Body()), bank) ||
-		strings.Contains(string(cat.Body()), crit) || strings.Contains(string(cat.Body()), "agent ok") {
+		strings.Contains(string(cat.Body()), crit) || strings.Contains(string(cat.Body()), "agent ok") ||
+		!strings.Contains(string(cat.Body()), `"ways":["use"]`) {
 		t.Fatalf("catalog: %v %s", err, cat.Body())
 	}
-	get, err := agent.AgentRequest(ctx, "item.get", map[string]any{"item_id": wifi})
-	if err != nil || !get.OK() || !strings.Contains(string(get.Body()), `"value":"hunter22"`) {
-		t.Fatalf("item.get: %v %+v", err, get)
+	// (0.42.0) Ways to use a secret: an included item starts at ["use"], so
+	// a reveal is refused with the ways it allows.
+	if rr, err := agent.AgentRequest(ctx, "item.get", map[string]any{"item_id": wifi}); err != nil || rr.ErrorCode() != "way_not_allowed" ||
+		string(rr.Body()) != `{"ways":["use"]}` {
+		t.Fatalf("item.get without reveal: %v %+v", err, rr)
+	}
+	if err := a.app.LeashReveal(ctx, agent.DeviceID(), wifi); err != nil {
+		t.Fatal(err)
+	}
+	if l, err := a.app.LeashItemList(ctx, agent.DeviceID(), wifi); err != nil || len(l) != 1 || !strings.Contains(string(l[0]), `"ways":["use","reveal"]`) {
+		t.Fatalf("leash.item.list: %v %s", err, l)
+	}
+	time.Sleep(1100 * time.Millisecond) // past the refusal cooldown
+	// With reveal, every reveal is referred to the app, flagged history.
+	type res struct {
+		r   *client.Response
+		err error
+	}
+	gotGet := make(chan res, 1)
+	go func() {
+		rr, err := agent.AgentRequest(ctxT(t, 60*time.Second), "item.get", map[string]any{"item_id": wifi})
+		gotGet <- res{rr, err}
+	}()
+	apg := waitEvent(t, a.app, "approval.pending", has("type", "agent.request"))
+	if !strings.Contains(string(apg.Body), `"flags":["history"]`) {
+		t.Fatalf("reveal approval: %s", apg.Body)
+	}
+	if result, err := a.app.ApprovalDecide(ctx, field(t, apg.Body, "approval_id"), true); err != nil || result != "ok" {
+		t.Fatalf("decide reveal: %q %v", result, err)
+	}
+	get := <-gotGet
+	if get.err != nil || !get.r.OK() || !strings.Contains(string(get.r.Body()), `"value":"hunter22"`) {
+		t.Fatalf("item.get: %v %+v", get.err, get.r)
 	}
 	for _, id := range []string{bank, crit} { // not included / critical: never
 		if rr, err := agent.AgentRequest(ctx, "item.get", map[string]any{"item_id": id}); err != nil || rr.ErrorCode() != "forbidden" {
@@ -169,10 +200,6 @@ func TestLeashAgent(t *testing.T) {
 	}
 
 	// Referred to the app (an ask grant), approved, then answered.
-	type res struct {
-		r   *client.Response
-		err error
-	}
 	done := make(chan res, 1)
 	go func() {
 		rr, err := agent.Request(ctxT(t, 60*time.Second), "profile.get", json.RawMessage(`{}`))
@@ -237,7 +264,10 @@ func TestLeashAgent(t *testing.T) {
 		t.Fatal(err)
 	}
 	time.Sleep(1100 * time.Millisecond)
-	if rr, err := agent.AgentRequest(ctx, "item.get", map[string]any{"item_id": wifi}); err != nil || !rr.OK() {
+	// Included again: readable through a use (its earlier settings went
+	// with the deleted rule, so a reveal would be refused).
+	if rr, err := agent.AgentRequest(ctx, "item.use", map[string]any{"item_id": wifi, "field_id": "f1", "action": "hmac-sha256",
+		"data": base64.StdEncoding.EncodeToString([]byte("x"))}); err != nil || !rr.OK() {
 		t.Fatalf("after approval: %v %+v", err, rr)
 	}
 

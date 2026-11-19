@@ -631,15 +631,20 @@ func TestAgentRules(t *testing.T) {
 	agentCall := func(req map[string]any) featuretest.Result {
 		b := js(req)
 		s := vault.NewSession(context.TODO(), e.h, vault.PeerInfo{ID: "dev-agent", Kind: vault.KindAgent}, e.clk.T, nil)
-		if dec := e.set.Leash.AgentDecision(s, "agent.request", json.RawMessage(b)); dec != vault.AgentAllow {
+		if dec := e.set.Leash.AgentDecision(s, "agent.request", json.RawMessage(b)); dec == vault.AgentDeny {
 			return featuretest.Result{Code: "forbidden"}
 		}
-		return e.call("agent", "agent.request", b)
+		return e.call("agent", "agent.request", b) // a referral approved at once
+	}
+	// Reading values needs reveal (0.42.0, §10.11 "Migration").
+	reveal := func() {
+		e.ok(e.call("app", "leash.item.set", js(map[string]any{"agent_id": "dev-agent", "item_id": doc, "ways": []string{"use", "reveal"}})))
 	}
 	cat := e.ok(agentCall(map[string]any{"op": "catalog"}))
 	if !bytes.Contains(cat["items"], []byte(doc)) || bytes.Contains(cat["items"], []byte("Never")) || bytes.Contains(cat["items"], []byte("agent ok")) {
 		t.Fatalf("catalog: %s", cat["items"])
 	}
+	reveal()
 	g := e.ok(agentCall(map[string]any{"op": "item.get", "item_id": doc, "fields": []string{"f1"}}))
 	if !bytes.Contains(g["fields"], []byte("contents")) || bytes.Contains(g["fields"], []byte("tok")) {
 		t.Fatalf("item.get: %s", g["fields"])
@@ -665,6 +670,9 @@ func TestAgentRules(t *testing.T) {
 	rid, _ = o.String("rule_id")
 	e.code(agentCall(map[string]any{"op": "item.get", "item_id": doc}), "forbidden")
 	e.ok(e.call("app", "share.decide", js(map[string]any{"rule_id": rid, "items": []string{doc}, "approve": true})))
+	// Included again after the revoke: the settings started at ["use"].
+	e.code(e.call("agent", "agent.request", js(map[string]any{"op": "item.get", "item_id": doc})), "way_not_allowed")
+	reveal()
 	e.ok(agentCall(map[string]any{"op": "item.get", "item_id": doc}))
 	// A tag merge cannot touch an agent rule (its tags are signed).
 	e.code(e.call("app", "tag.merge", `{"version":0,"from":["agent ok"],"into":"other"}`), "in_use")

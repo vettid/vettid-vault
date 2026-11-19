@@ -113,11 +113,11 @@ func (f *fakeItems) AgentIncluded(agent string, rules []itemspec.AgentRule, item
 	return ""
 }
 
-func (f *fakeItems) AgentCatalog(agent string, rules []itemspec.AgentRule) []itemspec.Meta {
-	var out []itemspec.Meta
+func (f *fakeItems) AgentCatalog(agent string, rules []itemspec.AgentRule) []itemspec.AgentEntry {
+	var out []itemspec.AgentEntry
 	for id, it := range f.items {
 		if f.AgentIncluded(agent, rules, id) != "" {
-			out = append(out, itemspec.MetaOf(it, nil))
+			out = append(out, itemspec.AgentEntry{Meta: itemspec.MetaOf(it, nil), Ways: f.ways[[2]string{agent, id}].Clone()})
 		}
 	}
 	return out
@@ -479,8 +479,9 @@ func TestAuditSummaries(t *testing.T) {
 // agent's share rules include; reads allowed within the rule's limits.
 func TestAgentRequest(t *testing.T) {
 	r := newRig(t)
+	// (0.42.0 reveals are always referred: here approved at once.)
 	call := func(body string) featuretest.Result {
-		if d := r.decide(t0, "agent.request", body); d != vault.AgentAllow {
+		if d := r.decide(t0, "agent.request", body); d == vault.AgentDeny {
 			return featuretest.Result{Code: "forbidden"}
 		}
 		return featuretest.Call(r.f, r.h, t0, vault.KindAgent, "agent.request", body)
@@ -489,6 +490,7 @@ func TestAgentRequest(t *testing.T) {
 		t.Fatalf("catalog without a rule: %q", res.Code)
 	}
 	gid := r.rule(t, Ask, 3, 60, r.wifi)
+	r.reveal(r.wifi)
 	res := call(`{"op":"catalog"}`)
 	if !res.OK() || !strings.Contains(string(res.Body), r.wifi) || strings.Contains(string(res.Body), r.bank) ||
 		strings.Contains(string(res.Body), "hunter22") || strings.Contains(string(res.Body), "zz-tag") {
@@ -596,9 +598,10 @@ func TestAgentRules(t *testing.T) {
 		t.Fatalf("stale: %v", err)
 	}
 	// Reads of an included item are allowed whatever the mode (inclusion
-	// was the member's decision), within per_hour; then referred.
+	// was the member's decision), within per_hour; then referred. (A
+	// reveal, item.get, is referred every time since 0.42.0.)
 	r.it.incl[id] = map[string]bool{r.wifi: true}
-	body := `{"op":"item.get","item_id":"` + r.wifi + `"}`
+	body := `{"op":"item.use","item_id":"` + r.wifi + `","field_id":"f1","action":"hmac-sha256","data":"aGk="}`
 	for i := 0; i < 2; i++ {
 		if d := r.decide(t0.Add(time.Duration(i)*time.Second), "agent.request", body); d != vault.AgentAllow {
 			t.Fatalf("read %d: %v", i, d)

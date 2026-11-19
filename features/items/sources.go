@@ -239,14 +239,14 @@ func (f *Feature) AgentIncluding(agent string, rules []itemspec.AgentRule, itemI
 }
 
 // AgentCatalog lists the items the agent's rules include (with a use
-// left), metadata only.
-func (f *Feature) AgentCatalog(agent string, rules []itemspec.AgentRule) []itemspec.Meta {
+// left): metadata only, and (0.42.0) the agent's settings for each.
+func (f *Feature) AgentCatalog(agent string, rules []itemspec.AgentRule) []itemspec.AgentEntry {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	var out []itemspec.Meta
+	var out []itemspec.AgentEntry
 	for _, it := range f.sortedItems() {
 		if incs, _ := f.agentIncls(agent, rules, it.ID); len(incs) > 0 {
-			out = append(out, itemspec.MetaOf(it, nil))
+			out = append(out, itemspec.AgentEntry{Meta: itemspec.MetaOf(it, nil), Ways: settle(incs).Clone()})
 		}
 	}
 	return out

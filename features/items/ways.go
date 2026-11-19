@@ -59,10 +59,25 @@ func (f *Feature) agentCopies(agent, itemID string, inForce map[string]bool, ski
 	return out
 }
 
+// settle is waysOf that also makes "absent" stored: when the copies differ
+// it clears all of them, so a wider copy can never come back later when
+// the others go (fail secure).
+func settle(incs []*Inclusion) *itemspec.ItemWays {
+	w := waysOf(incs)
+	if w == nil {
+		for _, inc := range incs {
+			inc.Ways = nil
+		}
+	}
+	return w
+}
+
 // copyWays gives each of an agent's new inclusions (rule, item) the
 // settings the agent's other inclusions of the item kept through the
-// change; with none, or copies that differ, it starts at ["use"].
-func (f *Feature) copyWays(s *vault.Session, added [][2]string) {
+// change, or else those the same change withdrew (carried, by agent and
+// item: a move between the agent's rules); with none, or copies that
+// differ, it starts at ["use"].
+func (f *Feature) copyWays(s *vault.Session, added [][2]string, carried map[[2]string]*itemspec.ItemWays) {
 	if len(added) == 0 {
 		return
 	}
@@ -78,7 +93,11 @@ func (f *Feature) copyWays(s *vault.Session, added [][2]string) {
 		if inc == nil || inc.State != StateIncluded || inc.Agent == "" {
 			continue
 		}
-		inc.Ways = waysOf(f.agentCopies(inc.Agent, k[1], inForce, fresh)).Clone()
+		if kept := f.agentCopies(inc.Agent, k[1], inForce, fresh); len(kept) > 0 {
+			inc.Ways = settle(kept).Clone()
+		} else {
+			inc.Ways = carried[[2]string{inc.Agent, k[1]}].Clone()
+		}
 	}
 }
 
@@ -106,7 +125,7 @@ func (f *Feature) flushWays(s *vault.Session) {
 		if i > 0 && gone[i-1] == k {
 			continue
 		}
-		if waysOf(f.agentCopies(k[0], k[1], inForce, nil)) != nil {
+		if settle(f.agentCopies(k[0], k[1], inForce, nil)) != nil {
 			continue // still set through another rule
 		}
 		s.SyncEvent("leash.item.changed", strictjson.NewBuilder().String("agent_id", k[0]).String("item_id", k[1]).Bytes())
@@ -126,7 +145,7 @@ func (f *Feature) AgentWays(agent string, rules []itemspec.AgentRule, itemID str
 	if len(incs) == 0 {
 		return nil, false
 	}
-	return waysOf(incs).Clone(), true
+	return settle(incs).Clone(), true
 }
 
 // AgentSetWays stores the agent's settings for an item on every inclusion
@@ -152,7 +171,7 @@ func (f *Feature) AgentWaysList(agent string, rules []itemspec.AgentRule) []item
 	var out []itemspec.AgentItemWays
 	for _, it := range f.sortedItems() {
 		if incs, _ := f.agentIncls(agent, rules, it.ID); len(incs) > 0 {
-			out = append(out, itemspec.AgentItemWays{ItemID: it.ID, Ways: waysOf(incs).Clone()})
+			out = append(out, itemspec.AgentItemWays{ItemID: it.ID, Ways: settle(incs).Clone()})
 		}
 	}
 	return out

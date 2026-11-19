@@ -373,6 +373,10 @@ func (f *Feature) apply(s *vault.Session, plan []action, reason string) {
 	var pendOrder, inclOrder []string
 	pend, incl := map[string]*batch{}, map[string]*batch{}
 	var agentIncl [][2]string // (rule, item) newly included for an agent
+	// The copies of the agent's settings this plan withdraws, per (agent,
+	// item): a plan that moves an item from one of the agent's rules to
+	// another never leaves it without a rule, so they carry over (§10.11).
+	withdrawn := map[[2]string][]*Inclusion{}
 	for _, a := range plan {
 		m := f.st.Incl[a.rule.ID]
 		if m == nil {
@@ -391,6 +395,10 @@ func (f *Feature) apply(s *vault.Session, plan []action, reason string) {
 					f.grants.RevokeRuleGrant(s, inc.GrantID)
 				}
 				s.Record(a.rule.activity("share.withdrawn", id))
+			}
+			if inc.State == StateIncluded && inc.Agent != "" {
+				k := [2]string{inc.Agent, id}
+				withdrawn[k] = append(withdrawn[k], inc)
 			}
 			f.noteWaysGone(inc, id)
 			delete(m, id)
@@ -424,10 +432,14 @@ func (f *Feature) apply(s *vault.Session, plan []action, reason string) {
 		}
 	}
 	// After the whole plan: an agent's new inclusion takes the settings the
-	// agent's other inclusions of the item kept through it (§10.11), else
-	// it starts at ["use"]; then the settings whose last copy went are
-	// announced.
-	f.copyWays(s, agentIncl)
+	// agent's other inclusions of the item kept through it, or else those
+	// the plan moved it from (§10.11), else it starts at ["use"]; then the
+	// settings whose last copy went are announced.
+	carried := map[[2]string]*itemspec.ItemWays{}
+	for k, incs := range withdrawn {
+		carried[k] = waysOf(incs)
+	}
+	f.copyWays(s, agentIncl, carried)
 	f.flushWays(s)
 	for _, rid := range inclOrder {
 		b := incl[rid]

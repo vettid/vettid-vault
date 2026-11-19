@@ -38,14 +38,14 @@ func TestCopyWaysOnlyFromRulesInForce(t *testing.T) {
 	}
 	f.agents = inForce{"new", "new2"}
 	s := vault.NewSession(context.Background(), featuretest.NewHost(), vault.PeerInfo{}, time.Now(), nil)
-	f.copyWays(s, [][2]string{{"new", "it"}, {"new2", "it"}})
+	f.copyWays(s, [][2]string{{"new", "it"}, {"new2", "it"}}, nil)
 	if f.st.Incl["new"]["it"].Ways != nil || f.st.Incl["new2"]["it"].Ways != nil {
 		t.Fatal("copied from a rule not in force or from the same change")
 	}
 	// With the old rule in force, its settings are taken.
 	f.st.Incl["new"]["it"].Ways = nil
 	f.agents = inForce{"gone", "new"}
-	f.copyWays(s, [][2]string{{"new", "it"}})
+	f.copyWays(s, [][2]string{{"new", "it"}}, nil)
 	if !f.st.Incl["new"]["it"].Ways.Equal(wide) || f.st.Incl["new"]["it"].Ways == wide {
 		t.Fatal("not copied (deep) from a rule in force")
 	}

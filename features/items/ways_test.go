@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/vettid/vettid-vault/features/itemspec"
 	"github.com/vettid/vettid-vault/vault"
@@ -151,6 +152,13 @@ func TestWaysMissedCopyFailsSecure(t *testing.T) {
 	if l := e.listed(doc); l != `{"agent_id":"dev-agent","item_id":"`+doc+`","ways":["use"]}` {
 		t.Fatalf("differing copies: %s", l)
 	}
+	// Reading them made "absent" stored: the wider copy is cleared, so it
+	// cannot come back when the others go (review finding 2).
+	for _, c := range e.copies(doc) {
+		if c != nil {
+			t.Fatal("a differing copy kept")
+		}
+	}
 	// A third rule copies nothing from copies that differ.
 	e.rule(agentRule("c"))
 	if cs := e.copies(doc); len(cs) != 3 || cs[2] != nil {
@@ -162,6 +170,63 @@ func TestWaysMissedCopyFailsSecure(t *testing.T) {
 	e.allEqual(doc)
 	if cs := e.copies(doc); len(cs) != 3 || !cs[0].Has(itemspec.WayReveal) {
 		t.Fatal("not repaired")
+	}
+}
+
+// §10.11 "Settings exist while at least one rule of the agent includes the
+// item": a change that moves the item from one of the agent's auto rules
+// to another never leaves it without one, so the settings carry over and
+// nothing is announced (review finding 1). A move to an ask rule leaves it
+// pending, included nowhere: the settings go.
+func TestWaysMoveBetweenRules(t *testing.T) {
+	e := newEnv(t)
+	e.createCredential()
+	e.unlock()
+	doc := e.put("secret", "Doc", []string{"a"}, field{Label: "Token", Kind: "password", Value: "tok"})
+	e.rule(agentRule("a"))
+	e.rule(agentRule("b"))
+	e.setWays(doc, 0, "use", "reveal")
+	e.h.Reset()
+	e.retag(doc, "b") // out of a, into b, in one change
+	if cs := e.copies(doc); len(cs) != 1 || !cs[0].Has(itemspec.WayReveal) || cs[0].Version != 1 {
+		t.Fatalf("after the move: %v", cs)
+	}
+	if n, _ := e.itemChanged(doc); n != 0 || e.auditedChanged(doc) != 0 {
+		t.Fatal("a move announced as a deletion")
+	}
+	// To an ask rule: pending only, so the settings go.
+	ask := agentRule("c")
+	ask["mode"] = "ask"
+	e.rule(ask)
+	e.h.Reset()
+	e.retag(doc, "c")
+	if len(e.copies(doc)) != 0 {
+		t.Fatal("settings while only pending")
+	}
+	if _, del := e.itemChanged(doc); del != 1 {
+		t.Fatal("not announced")
+	}
+}
+
+// An agent rule that expires takes the settings with it; the end is
+// announced when this feature next handles a request.
+func TestWaysRuleExpiry(t *testing.T) {
+	e := newEnv(t)
+	e.createCredential()
+	e.unlock()
+	doc := e.put("secret", "Doc", []string{"a"}, field{Label: "Token", Kind: "password", Value: "tok"})
+	r := agentRule("a")
+	r["expires_at"] = e.clk.T.Add(time.Hour).Format("2006-01-02T15:04:05.000Z")
+	e.rule(r)
+	e.setWays(doc, 0, "use", "reveal")
+	e.clk.Advance(2 * time.Hour)
+	e.h.Reset()
+	e.ok(e.call("app", "item.list", `{}`))
+	if len(e.copies(doc)) != 0 || e.set.Items.AnyWays(doc) {
+		t.Fatal("settings outlived the expired rule")
+	}
+	if _, del := e.itemChanged(doc); del != 1 {
+		t.Fatal("expiry not announced")
 	}
 }
 

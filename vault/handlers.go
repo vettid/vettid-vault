@@ -450,6 +450,9 @@ type PeerInfo struct {
 	Alias string
 	// PeerKind is a connection's stored peer_kind ("service" or "", §6.4).
 	PeerKind string
+	// SessionExpires is when a desktop's or an agent's access session
+	// ends (§6.8); zero when it has none.
+	SessionExpires time.Time
 }
 
 // IsService reports whether the peer is a service connection (§6.4).
@@ -462,6 +465,9 @@ func info(p *Peer) PeerInfo {
 	i := PeerInfo{ID: p.ID, Kind: p.Kind, Name: p.Name, State: p.State, IK: append([]byte(nil), p.IK...), Profile: p.Profile, Recovering: p.Recovering, PeerKind: p.PeerKind}
 	if p.Meta != nil {
 		i.Alias = p.Meta.Alias
+	}
+	if needsAccess(p.Kind) && p.Access != nil {
+		i.SessionExpires = p.Access.Expires
 	}
 	return i
 }

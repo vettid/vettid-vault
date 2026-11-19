@@ -139,6 +139,10 @@ func approvalPendingBody(h *HeldRequest, p *Peer, in *envelope.Inner) []byte {
 		}
 		b.Raw("flags", append(arr, ']'))
 	}
+	if h.PreviousSHA256 != "" {
+		// (0.85.3) the pin a program_changed run differs from (§10.11).
+		b.String("previous_sha256", h.PreviousSHA256).String("previous_path", h.PreviousPath)
+	}
 	return b.Bytes()
 }
 
@@ -297,7 +301,12 @@ func (m *Manager) endAccess(ctx context.Context, p *Peer, notify bool, reason, e
 // a retransmission then is a duplicate, and forgotten when it is answered
 // (heldKey), so that a later one is executed again; no answer to it is
 // cached, errors included.
-func (m *Manager) hold(p *Peer, in *envelope.Inner, key string, volatile bool, flags []string, now time.Time) {
+//
+// For an agent, a holds what the LEASH policy set (flags, the previous
+// pin, its note); for anyone else it is ignored. It returns the new
+// approval's id, or the error code the request was answered with instead
+// (limit, internal).
+func (m *Manager) hold(p *Peer, in *envelope.Inner, key string, volatile bool, a Approval, now time.Time) (id, code string) {
 	rkey := key
 	if volatile {
 		rkey = volatileKey
@@ -310,21 +319,32 @@ func (m *Manager) hold(p *Peer, in *envelope.Inner, key string, volatile bool, f
 	}
 	if n >= MaxHeldPerDevice {
 		m.respondErrorBody(p, in, rkey, "limit", "", limitBody("held_approvals", MaxHeldPerDevice, -1), now)
-		return
+		return "", "limit"
 	}
 	c := *in
 	c.Seq = 0 // kept without the session's seq, like cached responses
 	raw, err := c.Marshal(envelope.ModeSealed)
 	if err != nil {
 		m.respondError(p, in, rkey, "internal", "", now)
-		return
+		return "", "internal"
 	}
 	if volatile {
 		m.st.SeenInner[key] = now
 	}
 	h := &HeldRequest{ID: m.newID(now), DeviceID: p.ID, Key: key, Inner: raw, Created: now, Expires: now.Add(ApprovalTTL)}
-	if p.Kind == KindAgent && len(flags) > 0 {
-		h.Flags = append([]string(nil), flags...) // set by the LEASH policy (§10.11, 0.42.0)
+	if p.Kind == KindAgent {
+		// Set by the LEASH policy (§10.11: 0.42.0 flags, 0.85.3 the
+		// previous pin); the note is the policy's own.
+		a = a.clone()
+		if len(a.Flags) > 0 {
+			h.Flags = a.Flags
+		}
+		if a.PreviousSHA256 != "" {
+			h.PreviousSHA256, h.PreviousPath = a.PreviousSHA256, a.PreviousPath
+		}
+		if len(a.Note) > 0 {
+			h.Note = a.Note
+		}
 	}
 	m.st.Held[h.ID] = h
 	exp := envelope.FormatTS(h.Expires)
@@ -333,6 +353,7 @@ func (m *Manager) hold(p *Peer, in *envelope.Inner, key string, volatile bool, f
 		String("exp", exp).Bytes(), now)
 	m.record(Activity{Kind: "approval.pending", DeviceID: p.ID, Ref: h.ID, Feed: true, Priority: "high"}, now)
 	m.dirty = true
+	return h.ID, ""
 }
 
 // answerHeld sends the held request's requester an error response.
@@ -414,7 +435,10 @@ func (m *Manager) runHeld(ctx context.Context, h *HeldRequest, now time.Time) st
 	case !m.credentialReady():
 		code = "credential_required"
 	}
-	s := &Session{m: m, peer: p, host: managerHost{m}, from: info(p), ctx: ctx, now: now, inner: in}
+	s := &Session{m: m, peer: p, host: managerHost{m}, from: info(p), ctx: ctx, now: now, inner: in, approved: true}
+	if p.Kind == KindAgent {
+		s.heldNote = append(json.RawMessage(nil), h.Note...)
+	}
 	if code == "" && p.Kind == KindAgent && (te.spec.AgentPolicy || !te.allows(KindAgent)) && !m.agentCovered(s, te, in) {
 		code = "forbidden" // no grant covers it any more (§6.8, §10.11)
 	}
@@ -428,10 +452,22 @@ func (m *Manager) runHeld(ctx context.Context, h *HeldRequest, now time.Time) st
 	}
 	body, herr := te.handler.Handle(ctx, s, in)
 	var he *HandlerError
+	var ra *ReferAgainError
 	switch {
 	case herr == nil:
 		m.respondCached(p, in, key, body, s.cacheBody, now) // the handler's cached form too (CacheResponseAs)
 		return "ok"
+	case errors.As(herr, &ra) && p.Kind == KindAgent:
+		// (§10.11, 0.85.3) Held again, the same request byte for byte,
+		// under a new approval; this one was decided once and is gone.
+		// Nothing is answered to the agent yet.
+		volatile := te.spec.Volatile && te.spec.Request && in.Re == ""
+		id, code := m.hold(p, in, h.Key, volatile, ra.Approval, now)
+		if code != "" {
+			return code
+		}
+		m.st.Held[id].Inner = append([]byte(nil), h.Inner...) // as approved, not re-encoded
+		return "referred"
 	case errors.As(herr, &he):
 		m.respondErrorBody(p, in, key, he.Code, he.Message, he.Body, now)
 		return he.Code

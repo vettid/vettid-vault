@@ -224,11 +224,47 @@ type Session struct {
 	epoch *handshake.Epoch
 	// cacheBody, if set, is the body the request's answer is cached with instead of the one sent (CacheResponseAs).
 	cacheBody json.RawMessage
-	// agentRefusal and approvalFlags are set by the AgentPolicy while it
-	// decides an agent's request (RefuseAgentWith, FlagApproval).
-	agentRefusal  *HandlerError
-	approvalFlags []string
+	// agentRefusal and approval are set by the AgentPolicy while it decides
+	// an agent's request (RefuseAgentWith, FlagApproval, ApprovalPrevious,
+	// NoteApproval).
+	agentRefusal *HandlerError
+	approval     Approval
+	// approved is set while an app-approved held request runs (runHeld),
+	// heldNote to the note its referral was held with (HeldNote).
+	approved bool
+	heldNote json.RawMessage
 }
+
+// Approval is what an agent request's referral is held with besides the
+// request (VAULT-MESSAGING §10.11, 0.42.0 and 0.85.3): the flags and the
+// previous pin the approval shows (approval.pending{flags,
+// previous_sha256, previous_path}), and the policy's own note, which the
+// app never sees and the handler reads back when the approval runs it.
+type Approval struct {
+	Flags          []string
+	PreviousSHA256 string
+	PreviousPath   string
+	Note           json.RawMessage
+}
+
+func (a Approval) clone() Approval {
+	a.Flags = append([]string(nil), a.Flags...)
+	a.Note = append(json.RawMessage(nil), a.Note...)
+	return a
+}
+
+// ReferAgainError is what a handler running an approved agent request
+// returns to have the request held again for a new approval instead of
+// answered (§10.11 0.85.3: a run whose pin no longer matches the one now
+// recorded is referred again; the value is never sent on the old one).
+type ReferAgainError struct{ Approval Approval }
+
+func (e *ReferAgainError) Error() string { return "referred again" }
+
+// ReferAgain returns a ReferAgainError for a. Only a handler running an
+// app-approved agent request (Approved) may return it; anywhere else the
+// request is answered internal.
+func ReferAgain(a Approval) error { return &ReferAgainError{Approval: a.clone()} }
 
 // RefuseAgentWith names the error an AgentDeny decision is answered with,
 // instead of forbidden (VAULT-MESSAGING §10.11, 0.42.0: way_not_allowed
@@ -246,12 +282,37 @@ func (s *Session) RefuseAgentWith(err error) {
 // the request for (approval.pending{flags}, §10.11, 0.42.0). Only an
 // AgentPolicy calls it, during AgentDecision; it changes nothing for
 // another decision.
-func (s *Session) FlagApproval(flags []string) { s.approvalFlags = append([]string(nil), flags...) }
+func (s *Session) FlagApproval(flags []string) { s.approval.Flags = append([]string(nil), flags...) }
+
+// ApprovalPrevious sets the previous pin the approval of an AgentAsk
+// decision shows (approval.pending{previous_sha256, previous_path},
+// §10.11, 0.85.3: program_changed). Only an AgentPolicy calls it, during
+// AgentDecision.
+func (s *Session) ApprovalPrevious(sha256, path string) {
+	s.approval.PreviousSHA256, s.approval.PreviousPath = sha256, path
+}
+
+// NoteApproval keeps note with the request an AgentAsk decision holds, for
+// the handler to read back (HeldNote) when an app approves it: what the
+// policy decided it under. It is never sent to anyone. Only an
+// AgentPolicy calls it, during AgentDecision.
+func (s *Session) NoteApproval(note json.RawMessage) {
+	s.approval.Note = append(json.RawMessage(nil), note...)
+}
 
 // AgentRefusal and ApprovalFlags return what RefuseAgentWith and
-// FlagApproval set (nil if nothing): for tests of an AgentPolicy.
+// FlagApproval set (nil if nothing), and HeldApproval all that a referral
+// would be held with: for tests of an AgentPolicy.
 func (s *Session) AgentRefusal() *HandlerError { return s.agentRefusal }
-func (s *Session) ApprovalFlags() []string     { return append([]string(nil), s.approvalFlags...) }
+func (s *Session) ApprovalFlags() []string     { return append([]string(nil), s.approval.Flags...) }
+func (s *Session) HeldApproval() Approval      { return s.approval.clone() }
+
+// Approved reports whether the request being handled is a held request an
+// app approved (approval.decide), as opposed to one sent and allowed at
+// once. HeldNote returns the note its referral was held with (nil if
+// none, or if not Approved).
+func (s *Session) Approved() bool            { return s.approved }
+func (s *Session) HeldNote() json.RawMessage { return append(json.RawMessage(nil), s.heldNote...) }
 
 // CacheResponseAs makes the answer to the request being handled cached (§8.2: a retransmission is answered from
 // the cache, not executed again) with body instead of the body the handler returns, which is sent once as it is.

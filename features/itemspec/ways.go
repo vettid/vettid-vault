@@ -498,18 +498,25 @@ func IsAbsProgram(p string) bool {
 // and paragraph separators (Zl, Zp), which could make the program shown
 // on the phone read as another (the bounds are not in the spec).
 func ValidProgram(p string) bool {
-	if p == "" || len(p) > MaxProgram || !utf8.ValidString(p) {
+	if p == "" || len(p) > MaxProgram || !utf8.ValidString(p) || !showable(p) {
 		return false
-	}
-	for _, r := range p {
-		if r < 0x20 || r == 0x7f || r >= 0x80 && r < 0xa0 || unicode.In(r, unicode.Cf, unicode.Zl, unicode.Zp) {
-			return false
-		}
 	}
 	if IsAbsProgram(p) {
 		return strings.TrimRight(LastElement(p), " .") != ""
 	}
 	return !strings.ContainsAny(p, "/:"+string(rune(backslash))) && strings.Trim(p, " .") != ""
+}
+
+// showable reports whether p has none of the characters a path shown on
+// the phone may not hold: control characters (C0, DEL, C1), format
+// characters (Unicode Cf) and line and paragraph separators (Zl, Zp).
+func showable(p string) bool {
+	for _, r := range p {
+		if r < 0x20 || r == 0x7f || r >= 0x80 && r < 0xa0 || unicode.In(r, unicode.Cf, unicode.Zl, unicode.Zp) {
+			return false
+		}
+	}
+	return true
 }
 
 // LastElement is a path's last element (after the last / or \).

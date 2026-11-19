@@ -66,9 +66,9 @@ func (f *Feature) itemSet(s *vault.Session, body []byte) (json.RawMessage, error
 	}
 	now := s.Now()
 	rules := f.itemRules(agentID, now)
-	cur, ok := f.items.AgentWays(agentID, rules, itemID)
+	cur, ok := f.items.AgentMemberWays(agentID, rules, itemID)
 	if !ok {
-		return nil, errNotFound // no rule of the agent includes the item
+		return nil, errNotFound // no rule of the agent includes the item (a use left or not)
 	}
 	if hasVer != (cur != nil) || cur != nil && cur.Version != ver {
 		return nil, errConflict

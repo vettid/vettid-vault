@@ -89,9 +89,12 @@ type AgentItems interface {
 	AgentRead(agent string, rules []itemspec.AgentRule, itemID string, fields []string) ([]byte, bool)
 	AgentFieldValue(agent string, rules []itemspec.AgentRule, itemID, fieldID string) (string, bool)
 	// The ways to use a secret (0.42.0): the settings of an item the rules
-	// include (nil: absent, ["use"]; ok false if none includes it), stored
-	// on every inclusion of it, and listed per included item.
+	// include (nil: absent, ["use"]; ok false if none includes it), for the
+	// agent's requests (an item with no use left is not included) and for
+	// the member (it is), stored on every inclusion of it, and listed per
+	// included item (with or without a use left).
 	AgentWays(agent string, rules []itemspec.AgentRule, itemID string) (*itemspec.ItemWays, bool)
+	AgentMemberWays(agent string, rules []itemspec.AgentRule, itemID string) (*itemspec.ItemWays, bool)
 	AgentSetWays(agent string, rules []itemspec.AgentRule, itemID string, w *itemspec.ItemWays) bool
 	AgentWaysList(agent string, rules []itemspec.AgentRule) []itemspec.AgentItemWays
 }

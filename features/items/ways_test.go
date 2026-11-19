@@ -230,6 +230,35 @@ func TestWaysRuleExpiry(t *testing.T) {
 	}
 }
 
+// An item with no use left stays included for the member: its settings can
+// still be listed and narrowed (default b), while the agent's requests do
+// not reach it.
+func TestWaysNoUseLeft(t *testing.T) {
+	e := newEnv(t)
+	e.createCredential()
+	e.unlock()
+	doc := e.put("secret", "Doc", []string{"a"}, field{Label: "Token", Kind: "password", Value: "tok"})
+	r := agentRule("a")
+	r["uses"] = 1
+	e.rule(r)
+	e.setWays(doc, 0, "use", "reveal")
+	use := js(map[string]any{"op": "item.use", "item_id": doc, "field_id": "f1", "action": "hmac-sha256", "data": "aGk="})
+	s := vault.NewSession(context.TODO(), e.h, vault.PeerInfo{ID: agentID, Kind: vault.KindAgent}, e.clk.T, nil)
+	if d := e.set.Leash.AgentDecision(s, "agent.request", []byte(use)); d != vault.AgentAllow {
+		t.Fatalf("first use: %v", d)
+	}
+	e.ok(e.call("agent", "agent.request", use))
+	e.code(e.call("agent", "agent.request", use), "forbidden") // no use left
+	if l := e.listed(doc); !strings.Contains(l, `"ways":["use","reveal"]`) {
+		t.Fatalf("not listed with no use left: %s", l)
+	}
+	e.ok(e.call("app", "credential.lock", `{}`))
+	e.setWays(doc, 1, "use") // narrowing: no window needed
+	if cs := e.copies(doc); len(cs) != 1 || cs[0].Has(itemspec.WayReveal) || cs[0].Version != 2 {
+		t.Fatalf("narrowed: %v", cs)
+	}
+}
+
 // A rule revoked through leash (its inclusions linger in this feature
 // until the next change): a new rule never copies from it, and the
 // settings' end is announced when the lingering inclusion goes.

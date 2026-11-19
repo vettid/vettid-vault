@@ -125,9 +125,34 @@ func TestParseWaysRefuses(t *testing.T) {
 		"prefix control":         `{"ways":["use","proxy"],"proxy":{"hosts":["a.example"],"header":"X","prefix":"a\nb"}}`,
 		"prefix non-ASCII":       `{"ways":["use","proxy"],"proxy":{"hosts":["a.example"],"header":"X","prefix":"` + "\xc3\xa9" + `"}}`,
 	}
+	// Characters that could make the program shown read as another: DEL, C1,
+	// format (Cf: bidirectional overrides and isolates, zero width) and
+	// line or paragraph separators (Zl, Zp).
+	for name, r := range map[string]rune{"DEL": 0x7f, "C1 NEL": 0x85, "RLO": 0x202e, "LRI": 0x2066, "ZWSP": 0x200b,
+		"ZWJ": 0x200d, "BOM": 0xfeff, "LS": 0x2028, "PS": 0x2029} {
+		cases["program with "+name] = `{"ways":["use","run"],"run":{"programs":[{"program":` + js("/usr/bin/g"+string(r)+"it") + `}]}}`
+	}
+	// Bindings Windows reads as the same file (folded / and trailing dots).
+	cases["drive / and \\ alike"] = `{"ways":["use","run"],"run":{"programs":[{"program":"C:/x/git.exe"},{"program":` + js(win("c:", "x", "git")) + `}]}}`
+	cases["trailing dot"] = `{"ways":["use","run"],"run":{"programs":[{"program":"git.exe."},{"program":"git"}]}}`
+	cases["trailing space on abs"] = `{"ways":["use","run"],"run":{"programs":[{"program":"git"},{"program":` + js(win("C:", "x", "git.exe ")) + `}]}}`
+	// Hosts that name this computer or its network.
+	for _, h := range []string{"localhost", "api", "a.localhost", "x.y.localhost", "localhost:8443"} {
+		cases["host "+h] = `{"ways":["use","proxy"],"proxy":{"hosts":[` + js(h) + `],"header":"X"}}`
+	}
 	for name, body := range cases {
 		if _, err := parseWays(t, body, nil); err == nil {
 			t.Errorf("%s: accepted", name)
+		}
+	}
+	// Still accepted: a name like localhost inside a longer one, non-ASCII
+	// letters in a path.
+	for _, body := range []string{
+		`{"ways":["use","proxy"],"proxy":{"hosts":["localhost.example.com","mylocalhost.org"],"header":"X"}}`,
+		`{"ways":["use","run"],"run":{"programs":[{"program":` + js("/home/j"+string(rune(0xf8))+"rn/bin/tool") + `}]}}`,
+	} {
+		if _, err := parseWays(t, body, nil); err != nil {
+			t.Errorf("%s refused", body)
 		}
 	}
 }
@@ -220,14 +245,49 @@ func TestWidens(t *testing.T) {
 		"proxy dropped":   `{"ways":["use","run"],"run":{"programs":[{"program":"git"},{"program":"/usr/bin/gh"}]}}`,
 		"all dropped":     `{"ways":["use"]}`,
 		"host default":    `{"ways":["use","run","proxy"],"run":{"programs":[{"program":"git"},{"program":"/usr/bin/gh"}]},"proxy":{"hosts":["api.example.com:443"],"header":"Authorization","prefix":"Bearer "}}`,
-		// Not widenings by the spec's list: the value still goes only to
-		// the bound hosts.
-		"header changed": `{"ways":["use","run","proxy"],"run":{"programs":[{"program":"git"},{"program":"/usr/bin/gh"}]},"proxy":{"hosts":["api.example.com"],"header":"X-Api-Key"}}`,
+		// The prefix is not a widening (printable ASCII, bound hosts), nor
+		// the header's case.
+		"prefix changed": `{"ways":["use","run","proxy"],"run":{"programs":[{"program":"git"},{"program":"/usr/bin/gh"}]},"proxy":{"hosts":["api.example.com"],"header":"Authorization","prefix":"Token "}}`,
+		"header case":    `{"ways":["use","run","proxy"],"run":{"programs":[{"program":"git"},{"program":"/usr/bin/gh"}]},"proxy":{"hosts":["api.example.com"],"header":"authorization","prefix":"Bearer "}}`,
+		// An absolute entry for the bare name's file narrows.
+		"bare made absolute": `{"ways":["use","run","proxy"],"run":{"programs":[{"program":"/usr/bin/git","env":["GH_HOST"]},{"program":"/usr/bin/gh"}]},"proxy":{"hosts":["api.example.com"],"header":"Authorization","prefix":"Bearer "}}`,
 	}
 	for name, body := range narrow {
 		if Widens(cur, w(body)) {
 			t.Errorf("%s: a widening", name)
 		}
+	}
+	// Changes that widen besides the spec's list (erratum): a header of
+	// another name; an absolute entry made bare; a bare entry made absolute
+	// with an env name the bare one did not list.
+	for name, body := range map[string]string{
+		"header changed":   `{"ways":["use","run","proxy"],"run":{"programs":[{"program":"git"},{"program":"/usr/bin/gh"}]},"proxy":{"hosts":["api.example.com"],"header":"X-Api-Key"}}`,
+		"absolute to bare": `{"ways":["use","run","proxy"],"run":{"programs":[{"program":"git"},{"program":"gh"}]},"proxy":{"hosts":["api.example.com"],"header":"Authorization"}}`,
+		"absolute + env":   `{"ways":["use","run","proxy"],"run":{"programs":[{"program":"/usr/bin/git","env":["GH_HOST","GH_REPO"]},{"program":"/usr/bin/gh"}]},"proxy":{"hosts":["api.example.com"],"header":"Authorization"}}`,
+	} {
+		if !Widens(cur, w(body)) {
+			t.Errorf("%s: not a widening", name)
+		}
+	}
+	// Binding an unbound item narrows, unless an entry lists env names (an
+	// unbound item allows none).
+	unbound := &ItemWays{Version: 1, Ways: []string{WayUse, WayRun}, Run: &RunWays{Each: true, Programs: []Program{}}}
+	bind := func(body string) *ItemWays {
+		t.Helper()
+		v, err := parseWays(t, body, unbound)
+		if err != nil {
+			t.Fatalf("%s: %v", body, err)
+		}
+		return v
+	}
+	if Widens(unbound, bind(`{"ways":["use","run"],"run":{"programs":[{"program":"git"},{"program":"/usr/bin/gh"}]}}`)) {
+		t.Fatal("binding widens")
+	}
+	if !Widens(unbound, bind(`{"ways":["use","run"],"run":{"programs":[{"program":"git","env":["GH_HOST"]}]}}`)) {
+		t.Fatal("binding with env does not widen")
+	}
+	if !Widens(unbound, bind(`{"ways":["use","run"],"run":{"programs":[{"program":"git"}],"each":false}}`)) {
+		t.Fatal("binding with each false does not widen")
 	}
 	// From absent settings (["use"]): any other way widens, use alone not.
 	if Widens(nil, w(`{"ways":["use"]}`)) || !Widens(nil, w(`{"ways":["use","reveal"]}`)) {

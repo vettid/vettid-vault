@@ -496,20 +496,57 @@ func IsAbsProgram(p string) bool {
 // UTF-8 without control characters, nor format characters (Unicode Cf:
 // bidirectional overrides and isolates, zero-width characters) or line
 // and paragraph separators (Zl, Zp), which could make the program shown
-// on the phone read as another (the bounds are not in the spec).
+// on the phone read as another (the bounds are not in the spec). An
+// absolute path is also a clean one (cleanPath).
 func ValidProgram(p string) bool {
-	if p == "" || len(p) > MaxProgram || !utf8.ValidString(p) {
+	if p == "" || len(p) > MaxProgram || !utf8.ValidString(p) || !showable(p) {
 		return false
 	}
+	if IsAbsProgram(p) {
+		return cleanPath(p, false) && strings.TrimRight(LastElement(p), " .") != ""
+	}
+	return !strings.ContainsAny(p, "/:"+string(rune(backslash))) && strings.Trim(p, " .") != ""
+}
+
+// cleanPath reports whether an absolute path p (IsAbsProgram) names its
+// file the one way (the spec is silent): after its root ("/", or "X:\" or
+// "X:/"), no empty element (a doubled or trailing separator), no "." or
+// ".." element, and no ":" (on Windows a ":" after the drive names a
+// stream of a file, "cmd.exe::$DATA"; refused on every system, so the
+// vault needs no knowledge of the connector's). root allows the root
+// itself ("/", "C:\"), as a cwd may be.
+func cleanPath(p string, root bool) bool {
+	rest := p[1:]
+	if p[0] != '/' {
+		rest = p[3:] // "X:\" or "X:/"
+	}
+	if rest == "" {
+		return root
+	}
+	start := 0
+	for i := 0; i <= len(rest); i++ {
+		if i < len(rest) && rest[i] != '/' && rest[i] != backslash {
+			continue
+		}
+		e := rest[start:i]
+		if e == "" || e == "." || e == ".." || strings.Contains(e, ":") {
+			return false
+		}
+		start = i + 1
+	}
+	return true
+}
+
+// showable reports whether p has none of the characters a path shown on
+// the phone may not hold: control characters (C0, DEL, C1), format
+// characters (Unicode Cf) and line and paragraph separators (Zl, Zp).
+func showable(p string) bool {
 	for _, r := range p {
 		if r < 0x20 || r == 0x7f || r >= 0x80 && r < 0xa0 || unicode.In(r, unicode.Cf, unicode.Zl, unicode.Zp) {
 			return false
 		}
 	}
-	if IsAbsProgram(p) {
-		return strings.TrimRight(LastElement(p), " .") != ""
-	}
-	return !strings.ContainsAny(p, "/:"+string(rune(backslash))) && strings.Trim(p, " .") != ""
+	return true
 }
 
 // LastElement is a path's last element (after the last / or \).

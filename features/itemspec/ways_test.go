@@ -221,7 +221,7 @@ func TestWidens(t *testing.T) {
 		"all dropped":     `{"ways":["use"]}`,
 		"host default":    `{"ways":["use","run","proxy"],"run":{"programs":[{"program":"git"},{"program":"/usr/bin/gh"}]},"proxy":{"hosts":["api.example.com:443"],"header":"Authorization","prefix":"Bearer "}}`,
 		// Not widenings by the spec's list: the value still goes only to
-		// the bound hosts (lead's note, GC #14226).
+		// the bound hosts.
 		"header changed": `{"ways":["use","run","proxy"],"run":{"programs":[{"program":"git"},{"program":"/usr/bin/gh"}]},"proxy":{"hosts":["api.example.com"],"header":"X-Api-Key"}}`,
 	}
 	for name, body := range narrow {

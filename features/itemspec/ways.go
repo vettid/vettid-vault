@@ -391,7 +391,7 @@ func parseProxy(raw []byte) (*ProxyWays, error) {
 //
 // A change of the proxy's header or prefix is not a widening: the value
 // still goes only to the item's bound hosts, which an added host would
-// widen (lead's note, GC #14226; the spec lists the widenings and these
+// widen (the spec lists the widenings, and these
 // are not among them).
 func Widens(cur, next *ItemWays) bool {
 	for _, way := range next.WayList() {

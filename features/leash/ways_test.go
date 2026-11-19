@@ -304,9 +304,10 @@ func TestRevealDecision(t *testing.T) {
 	}
 }
 
-// §10.11: a change of the proxy's header or prefix is not a widening (the
-// value still goes only to the bound hosts), so it
-// needs no unlock window; adding a host does.
+// A change of the proxy's header name is a widening (some hosts echo or log
+// a header), so outside the unlock window it is credential_locked and
+// changes nothing; a change of its case or of the prefix is not, nor needs
+// the window; an added host is a widening.
 func TestItemSetProxyHeaderOutsideWindow(t *testing.T) {
 	r := newRig(t)
 	r.rule(t, Auto, 0, 60, r.wifi)
@@ -314,14 +315,24 @@ func TestItemSetProxyHeaderOutsideWindow(t *testing.T) {
 		t.Fatal(res.Code)
 	}
 	r.w.open = false
-	if res := r.itemSet(`{"agent_id":"dev-agent","item_id":"` + r.wifi + `","version":1,"ways":["use","proxy"],"proxy":{"hosts":["api.example.com"],"header":"X-Api-Key"}}`); !res.OK() {
+	if res := r.itemSet(`{"agent_id":"dev-agent","item_id":"` + r.wifi + `","version":1,"ways":["use","proxy"],"proxy":{"hosts":["api.example.com"],"header":"X-Api-Key"}}`); res.Code != "credential_locked" {
 		t.Fatalf("header change outside the window: %q", res.Code)
 	}
-	if w := r.stored(r.wifi); w.Proxy.Header != "X-Api-Key" || w.Proxy.Prefix != "" || w.Version != 2 {
+	if w := r.stored(r.wifi); w.Proxy.Header != "Authorization" || w.Version != 1 {
+		t.Fatalf("a refused header change was stored: %+v", w.Proxy)
+	}
+	if res := r.itemSet(`{"agent_id":"dev-agent","item_id":"` + r.wifi + `","version":1,"ways":["use","proxy"],"proxy":{"hosts":["api.example.com"],"header":"authorization","prefix":"Token "}}`); !res.OK() {
+		t.Fatalf("case and prefix outside the window: %q", res.Code)
+	}
+	if w := r.stored(r.wifi); w.Proxy.Header != "authorization" || w.Proxy.Prefix != "Token " || w.Version != 2 {
 		t.Fatalf("stored: %+v", w.Proxy)
 	}
-	if res := r.itemSet(`{"agent_id":"dev-agent","item_id":"` + r.wifi + `","version":2,"ways":["use","proxy"],"proxy":{"hosts":["api.example.com","b.example.com"],"header":"X-Api-Key"}}`); res.Code != "credential_locked" {
+	if res := r.itemSet(`{"agent_id":"dev-agent","item_id":"` + r.wifi + `","version":2,"ways":["use","proxy"],"proxy":{"hosts":["api.example.com","b.example.com"],"header":"authorization"}}`); res.Code != "credential_locked" {
 		t.Fatalf("host added outside the window: %q", res.Code)
+	}
+	r.w.open = true
+	if res := r.itemSet(`{"agent_id":"dev-agent","item_id":"` + r.wifi + `","version":2,"ways":["use","proxy"],"proxy":{"hosts":["api.example.com"],"header":"X-Api-Key"}}`); !res.OK() {
+		t.Fatalf("header change in the window: %q", res.Code)
 	}
 }
 

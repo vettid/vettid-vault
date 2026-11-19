@@ -159,6 +159,9 @@ func (f *Feature) recordEvidence(s *vault.Session, r *record) []byte {
 	if r.RejectReason != "" {
 		e.String("reason", r.RejectReason)
 	}
+	if r.NotEligible {
+		e.Bool("not_eligible", true) // 0.90.20: the proof is the pinned status refusal
+	}
 	if r.Site != "" {
 		e.String("site", r.Site)
 	}
@@ -277,12 +280,19 @@ func compactEvidence(c *compact) []byte {
 		e.Bool("evicted", true)
 	}
 	e.Base64("ik", c.ServiceIK).Base64("proposal_hash", c.Hash).Base64("record_tag", c.Tag).String("outcome", c.Outcome)
+	if c.NotEligible {
+		e.Bool("not_eligible", true)
+	}
 	if len(c.BallotSig) > 0 {
 		e.Raw("ballot", ballotEvidence(c.VK, c.ChoiceID, c.BallotSig, c.MsgMS, c.ReceiptSig))
 	}
 	e.Raw("refusals", arrOfB64(c.Refusals.bodies())).Raw("refusal_codes", arrOfStrings(c.Refusals.codes()))
 	// An evicted record exports its refusals and no status answers; a
 	// released one exports both.
+	if c.NotEligible && !c.Released {
+		// (0.90.20) An evicted record of a member left off the roster keeps its proof.
+		e.Raw("status_answers", arrOfB64(c.StatusAnswers.bodies())).Raw("status_answer_codes", arrOfStrings(c.StatusAnswers.codes()))
+	}
 	if c.Released {
 		unverifiableV1(e, c.Refusals.bodies(), c.StatusAnswers.bodies())
 	} else {

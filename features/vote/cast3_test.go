@@ -264,10 +264,10 @@ func svcBal2(c *cenv, v *votetest.Vote) *votewire.Ballot {
 func TestStatusForAProposalNotHeld(t *testing.T) {
 	c := newCastEnv(t)
 	v := c.svc.NewVote(votetest.VoteSpec{ID: lid(7), Opens: c.now.Add(-time.Hour), Closes: c.now.Add(time.Hour)})
-	if !c.f.RequestProposal(c.session(), "svc", v.ID, v.Doc) {
+	if !c.f.RequestProposal(c.session(), "svc", v.ID, c.sitePublished(v)) {
 		t.Fatal("not asked")
 	}
-	if c.f.RequestProposal(c.session(), "svc", v.ID, v.Doc) {
+	if c.f.RequestProposal(c.session(), "svc", v.ID, c.sitePublished(v)) {
 		t.Error("asked twice within the hour")
 	}
 	ids := c.statuses()
@@ -275,7 +275,7 @@ func TestStatusForAProposalNotHeld(t *testing.T) {
 	ssig, _ := c.statusSigBy(c.svc.IK, v, nil)
 	other := c.svc.NewVote(votetest.VoteSpec{ID: v.ID, Opens: c.now.Add(-time.Hour), Closes: c.now.Add(2 * time.Hour)})
 	_ = other
-	c.f.pend[ids[0]] = pendRef{conn: "svc", id: v.ID, kind: "status", want: []byte("other bytes")}
+	c.f.pend[ids[0]] = pendRef{conn: "svc", id: v.ID, kind: "status", site: &SiteProposal{Proposal: []byte("other bytes")}}
 	c.respond(ids[0], "vote.status", &envelope.Inner{Status: envelope.StatusOK, Body: c.statusBody(v, nil, 0, nil, ssig)})
 	if c.rec(v.ID) != nil {
 		t.Fatal("kept despite other site bytes")
@@ -284,7 +284,7 @@ func TestStatusForAProposalNotHeld(t *testing.T) {
 	// build the body without.
 	c.now = c.now.Add(2 * time.Hour)
 	v2 := c.svc.NewVote(votetest.VoteSpec{ID: lid(8), Opens: c.now.Add(-time.Hour), Closes: c.now.Add(time.Hour)})
-	c.f.RequestProposal(c.session(), "svc", v2.ID, v2.Doc)
+	c.f.RequestProposal(c.session(), "svc", v2.ID, c.sitePublished(v2))
 	ids = c.statuses()
 	ssig2, _ := c.statusSigBy(c.svc.IK, v2, nil)
 	nob := c.statusFields(strictjson.NewBuilder().String("proposal_id", v2.ID)).Base64("proposal", v2.Doc).Base64("proposal_sig", v2.Sig).Base64("record_secret", v2.Secret).
@@ -306,7 +306,7 @@ func TestStatusForAProposalNotHeld(t *testing.T) {
 	// With a bundle in the answer: kept as a proposal.
 	v3 := c.svc.NewVote(votetest.VoteSpec{ID: lid(9), Opens: c.now.Add(-time.Hour), Closes: c.now.Add(time.Hour)})
 	c.now = c.now.Add(time.Second)
-	c.f.RequestProposal(c.session(), "svc", v3.ID, v3.Doc)
+	c.f.RequestProposal(c.session(), "svc", v3.ID, c.sitePublished(v3))
 	ids = c.statuses()
 	ssig3, _ := c.statusSigBy(c.svc.IK, v3, nil)
 	c.respond(ids[len(ids)-1], "vote.status", &envelope.Inner{Status: envelope.StatusOK, Body: c.statusBody(v3, nil, 0, nil, ssig3)})

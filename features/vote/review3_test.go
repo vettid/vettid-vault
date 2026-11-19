@@ -33,7 +33,7 @@ func (c *cenv) checkingSite(n int) *votetest.Vote {
 	c.t.Helper()
 	v := c.svc.NewVote(votetest.VoteSpec{ID: lid(n), Opens: c.now.Add(-time.Hour), Closes: c.now.Add(time.Hour)})
 	c.now = c.now.Add(time.Second)
-	if !c.f.RequestProposal(c.session(), "svc", v.ID, v.Doc) {
+	if !c.f.RequestProposal(c.session(), "svc", v.ID, c.sitePublished(v)) {
 		c.t.Fatal("not asked")
 	}
 	ids := c.statuses()
@@ -227,10 +227,10 @@ func TestExtensionRevivesWaitingClosed(t *testing.T) {
 func TestUnheldStatusIsVerified(t *testing.T) {
 	c := newCastEnv(t)
 	v := c.svc.NewVote(votetest.VoteSpec{ID: lid(5), Opens: c.now.Add(-time.Hour), Closes: c.now.Add(time.Hour)})
-	if c.f.RequestProposal(c.session(), "svc", v.ID, nil) {
+	if c.f.RequestProposal(c.session(), "svc", v.ID, SiteProposal{}) {
 		t.Error("asked without the site's bytes")
 	}
-	if !c.f.RequestProposal(c.session(), "svc", v.ID, v.Doc) {
+	if !c.f.RequestProposal(c.session(), "svc", v.ID, c.sitePublished(v)) {
 		t.Fatal("not asked")
 	}
 	ids := c.statuses()
@@ -242,7 +242,7 @@ func TestUnheldStatusIsVerified(t *testing.T) {
 	// An answer for a proposal signed by another service: nothing kept.
 	other := votetest.NewService(c.env.auth)
 	w := other.NewVote(votetest.VoteSpec{ID: lid(6), Opens: c.now.Add(-time.Hour), Closes: c.now.Add(time.Hour)})
-	c.f.RequestProposal(c.session(), "svc", w.ID, w.Doc)
+	c.f.RequestProposal(c.session(), "svc", w.ID, c.sitePublished(w))
 	ids = c.statuses()
 	ssig, _ := c.statusSigBy(other.IK, w, nil)
 	body := c.statusFields(strictjson.NewBuilder().String("proposal_id", w.ID)).Base64("proposal", w.Doc).Base64("proposal_sig", w.Sig).Base64("record_secret", w.Secret).

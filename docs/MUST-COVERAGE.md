@@ -1414,3 +1414,14 @@ The member vault's side. The service vault's side is vettid/service-vault. `svcF
 | 10.19.5 | The other-proposal evidence needs the service's `proposal_sig` and the same id; a status whose `proposal_id` is not its proposal's keeps no record | `vote.TestV2OtherProposalNeedsTheServicesSignatureAndTheID`, `vote.TestV2IntakeStatusTiesTheIDToTheProposal` |
 | 10.19.5 | At most 4,096 requests' times are kept, the oldest first deposit going first | `vault.TestDepositTimesBoundedByRequests` |
 | 10.19.9 | An evicted record's `vote.evidence` marks its v1 refusals in `unverifiable_v1`; a released record's its refusals and status answers | `vote.TestV2CompactEvidenceMarksV1` |
+
+## A member left off a vote's roster (§10.19.4, §10.19.6, §10.19.8; VAULT-MESSAGING 0.90.20)
+
+| § | Must | Test |
+|---|---|---|
+| 10.19.4 | A signed `not_eligible` for a site proposal not held, timed, under the hash of the site's proposal, with an empty `record_tag` and the site's proposal, signature and bundle checking out, makes a `not_eligible` record: the refusal pinned with its code, `vote.refused` audited, `vote.problem` once, no tag or voting key, no `vote.open` or `vote.closing` item, nothing asked again | `vote.TestNotHeldNotEligibleIsKept` |
+| 10.19.4 | The zero hash, another hash, `unknown_proposal`, an untimed answer, a non-empty `record_tag`, an unsigned refusal, another connection, a bad `proposal_sig`, a missing or foreign bundle and a site proposal of another id keep nothing | `vote.TestNotHeldRefusalsThatKeepNothing`, `vote.TestNotHeldSiteProposalOfAnotherID` |
+| 10.19.8 | `vote.get` gives `not_eligible: true` and `cannot_cast: "not_eligible"`; `vote.cast` answers `not_eligible` | `vote.TestNotHeldNotEligibleIsKept` |
+| 10.19.6 | `vote.evidence` carries `not_eligible`, the site's proposal and the refusal with its code; past the close no results check is due and submitted results are not judged | `vote.TestNotHeldNotEligibleIsKept`, `vote.TestNotHeldRecordIsInert` |
+| 10.19.2 | (Owner decision 2026-11-19) At most 16 `not_eligible` records per connection, the oldest evicted to a compact record that keeps the refusal (exported with its code) and is not asked about again; they never count toward the 16 problems, the 32 or the 16 not closed, nor in the problems notice; with the vault's 128 full a proposal admitted evicts the oldest such record, a new one evicts the oldest of another connection, and none is kept over 128 other records | `vote.TestNotHeldOwnLimit`, `vote.TestNotHeldVaultBound` |
+| 10.19.4 | A later `vote.proposal` with a record proof for a `not_eligible` id is the conflict, `vote.problem` once more; a second `not_eligible` keeps the one record; a site proposal of another service or a refusal signed by another key keeps nothing | `vote.TestNotHeldThenAProposal`, `vote.TestNotHeldSecondRefusal`, `vote.TestNotHeldOtherKeys` |

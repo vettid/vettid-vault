@@ -158,7 +158,7 @@ func (f *Feature) recheck(s *vault.Session) {
 
 func (f *Feature) recheckOne(s *vault.Session, r *record) {
 	now := s.Now()
-	if r.RejectReason != "" || (r.Reason != ReasonServiceList && r.Reason != ReasonTrustRoot && r.Reason != ReasonClock) {
+	if r.inert() || (r.Reason != ReasonServiceList && r.Reason != ReasonTrustRoot && r.Reason != ReasonClock) {
 		return
 	}
 	var notAfter time.Time

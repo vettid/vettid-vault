@@ -82,6 +82,9 @@ func ts(sec int64) string { return envelope.FormatTS(time.Unix(sec, 0)) }
 // window ("" when none): the checks of §10.19.5 in their order.
 func (f *Feature) castBlock(s *vault.Session, r *record, pinned []byte) string {
 	now := s.Now()
+	if r.NotEligible {
+		return "not_eligible"
+	}
 	switch r.state(now) {
 	case StateChecking:
 		return "checking"
@@ -167,6 +170,9 @@ func (f *Feature) summary(s *vault.Session, r *record, pinned []byte) *strictjso
 	}
 	if r.SelfConflict {
 		b.Bool("self_conflict", true)
+	}
+	if r.NotEligible {
+		b.Bool("not_eligible", true) // 0.90.20: the service signed that the member is not on the roster
 	}
 	block := f.castBlock(s, r, pinned)
 	b.Bool("can_cast", block == "")

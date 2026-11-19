@@ -54,7 +54,7 @@ type CheckOutcome struct {
 // tickCheck marks the results check pending when it is due and gives up
 // seven days after (§10.19.6).
 func (f *Feature) tickCheck(s *vault.Session, r *record, now time.Time) {
-	if r.RejectReason != "" || r.Reason != "" || r.Restore || !r.closed(now) {
+	if r.inert() || r.Reason != "" || r.Restore || !r.closed(now) {
 		return
 	}
 	if r.Check == "" && !now.Before(r.dueAt()) {
@@ -227,7 +227,7 @@ func (f *Feature) SubmitResults(s *vault.Session, conn, id string, in ResultsSub
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	r := f.get(conn, id)
-	if r == nil || r.RejectReason != "" {
+	if r == nil || r.inert() {
 		return CheckOutcome{}, errNotFound
 	}
 	now := s.Now()

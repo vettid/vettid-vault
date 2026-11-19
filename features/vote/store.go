@@ -252,7 +252,14 @@ type record struct {
 
 	Reason       string `json:"reason,omitempty"`        // checking
 	RejectReason string `json:"reject_reason,omitempty"` // rejected
-	OpenFeed     bool   `json:"open_feed,omitempty"`     // vote.open made
+	// NotEligible (0.90.20, owner decision 2026-11-18): a proposal the vault
+	// was never sent, listed on the votes site, for which the service signed
+	// not_eligible under the hash of the site's proposal (the member is not
+	// on its roster). Kept from the site's checked documents, with no tag
+	// and no voting key: it is shown and its evidence exported, never cast,
+	// asked about or checked against results.
+	NotEligible bool `json:"not_eligible,omitempty"`
+	OpenFeed    bool `json:"open_feed,omitempty"` // vote.open made
 
 	// A different proposal under the same id (one copy, as evidence).
 	Conflict *evidence `json:"conflict,omitempty"`
@@ -375,6 +382,7 @@ type compact struct {
 	SiteCopy      *evidence       `json:"site_copy,omitempty"`
 	StatusAnswers keptAnswers     `json:"status_answers,omitempty"`
 	Other         *svcBallot      `json:"other,omitempty"`
+	NotEligible   bool            `json:"not_eligible,omitempty"` // 0.90.20 (record.NotEligible)
 	RejectReason  string          `json:"reject_reason,omitempty"`
 	// (0.88.12) the own-vk ballots of self_unrecorded or self_conflict (the
 	// first and the latest), and a receipt kept aside that was never taken.
@@ -473,7 +481,7 @@ func (r *record) dueAt() time.Time {
 
 // checkPending reports a check that is due and not yet settled.
 func (r *record) checkPending(now time.Time) bool {
-	if r.RejectReason != "" || r.Reason != "" || r.Restore {
+	if r.inert() || r.Reason != "" || r.Restore {
 		return false
 	}
 	return r.Check == CheckPending || r.Check == "" && !now.Before(r.dueAt()) && r.closed(now)
@@ -482,7 +490,7 @@ func (r *record) checkPending(now time.Time) bool {
 // problem reports whether the record is in the problem set (§10.19.2):
 // (0.88.12) self_unrecorded and self_conflict included.
 func (r *record) problem() bool {
-	return r.capProblem() || r.SelfUnrecorded || r.SelfConflict
+	return r.capProblem() || r.SelfUnrecorded || r.SelfConflict || r.NotEligible
 }
 
 // capProblem reports whether the record is a problem that counts toward the
@@ -490,6 +498,13 @@ func (r *record) problem() bool {
 // problem is self_unrecorded or self_conflict is not the service's doing
 // and does not.
 func (r *record) capProblem() bool {
+	// (0.90.20, owner decision 2026-11-19) A record of a proposal the member
+	// is not on the roster of has its own limit (admitNotEligible) and never
+	// counts toward the 16: a vote the member may cast is never refused
+	// because of one.
+	if r.NotEligible {
+		return false
+	}
 	// A gave_up check never saw results that verify, so it is never clean
 	// (0.83.6): a service must not withhold its results and then evict it.
 	if r.RejectReason != "" || r.Check == CheckFailed || r.Check == CheckGaveUp || r.RefusalProblem || r.ConflictEv {
@@ -539,6 +554,9 @@ func (r *record) release() *compact {
 	if r.RejectReason != "" {
 		c.Outcome, c.RejectReason = "released:rejected", r.RejectReason
 	}
+	if r.NotEligible {
+		c.Outcome = "released:not_eligible"
+	}
 	c.Site, c.SiteCopy, c.StatusAnswers, c.Other = r.Site, r.SiteCopy, r.StatusAnswers, r.Other
 	c.Self, c.SelfLatest = r.Self, r.SelfLatest
 	if r.Ballot != nil {
@@ -547,7 +565,7 @@ func (r *record) release() *compact {
 	if r.Closes == 0 {
 		c.ClosedAt = r.KeptMS / 1000
 	}
-	if r.Site != SiteMatches || r.RejectReason != "" {
+	if r.Site != SiteMatches || r.RejectReason != "" || r.NotEligible {
 		c.Proposal, c.ProposalSig, c.Bundle = r.Proposal, r.ProposalSig, r.Bundle
 	}
 	return c
@@ -570,7 +588,18 @@ func (r *record) digest() []byte {
 }
 
 func (r *record) toCompact() *compact {
-	c := &compact{Conn: r.Conn, ID: r.ID, Hash: r.Hash, Tag: r.Tag, ServiceIK: r.ServiceIK, ClosedAt: r.Closes, Outcome: "closed"}
+	c := &compact{Conn: r.Conn, ID: r.ID, Hash: r.Hash, Tag: r.Tag, ServiceIK: r.ServiceIK, ClosedAt: r.Closes, Outcome: "closed",
+		NotEligible: r.NotEligible}
+	if r.NotEligible {
+		// (0.90.20) The pinned refusal is the member's proof: it stays with
+		// the compact record (the proposal is public on the site, by its hash).
+		c.Outcome = "not_eligible"
+		for _, x := range r.StatusAnswers {
+			if x.Pinned {
+				c.StatusAnswers = append(c.StatusAnswers, x)
+			}
+		}
+	}
 	if r.Check != "" {
 		c.Outcome = r.Check
 	}
@@ -644,11 +673,71 @@ func (f *Feature) admit(rec *record, now time.Time) *limitHit {
 			return nil
 		}
 		v := f.oldestEvictable(conn, now)
+		if v == nil && hit.max == votewire.MaxProposals {
+			// (0.90.20) The vault's bound full: a record of a proposal
+			// some member was left off goes before a vote is refused.
+			v = f.oldestNotEligible("")
+		}
 		if v == nil {
 			return hit
 		}
 		f.evict(v)
 	}
+}
+
+// admitNotEligible makes room for rec, a record of a proposal the member is
+// not on the roster of (VAULT-MESSAGING 0.90.20 §10.19.4): at most
+// MaxNotEligiblePerConnection per connection, and within the vault's bound
+// of MaxProposals, the oldest such record going first (to a compact one, so
+// the proposal is not asked about again). It never evicts any other record:
+// with the vault's bound full of others, rec is not kept.
+func (f *Feature) admitNotEligible(rec *record) bool {
+	for {
+		n := 0
+		for _, r := range f.forConn(rec.Conn) {
+			if r.NotEligible {
+				n++
+			}
+		}
+		var v *record
+		switch {
+		case n >= votewire.MaxNotEligiblePerConnection:
+			v = f.oldestNotEligible(rec.Conn)
+		case len(f.st.Records) >= votewire.MaxProposals:
+			v = f.oldestNotEligible("")
+		default:
+			return true
+		}
+		if v == nil {
+			return false
+		}
+		f.evict(v)
+	}
+}
+
+// oldestNotEligible is the oldest NotEligible record of the connection (""
+// for any connection), or nil.
+func (f *Feature) oldestNotEligible(conn string) *record {
+	var best *record
+	for _, r := range f.st.Records {
+		if r.NotEligible && (conn == "" || r.Conn == conn) &&
+			(best == nil || r.KeptMS < best.KeptMS || r.KeptMS == best.KeptMS && key(r.Conn, r.ID) < key(best.Conn, best.ID)) {
+			best = r
+		}
+	}
+	return best
+}
+
+// settled reports whether the connection holds a compact record of id: a
+// record the vault had and evicted or the member released. The proposal is
+// not asked about again (a released record would come back).
+func (f *Feature) settled(conn, id string) bool {
+	for _, c := range f.st.Compact[conn] {
+		if c.ID == id {
+			return true
+		}
+	}
+	return false
 }
 
 func (f *Feature) oldestEvictable(conn string, now time.Time) *record {
@@ -768,3 +857,7 @@ func (k keptAnswers) codes() []string {
 	}
 	return out
 }
+
+// inert reports whether nothing is sent, asked or checked for the record:
+// a rejected proposal, or one the member is not on the roster of.
+func (r *record) inert() bool { return r.RejectReason != "" || r.NotEligible }

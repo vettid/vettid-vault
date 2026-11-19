@@ -504,6 +504,12 @@ func (c *cenv) statusBody(v *votetest.Vote, ballot *votewire.RowBallot, msgMS ui
 	return b.Base64("status_sig", statusSig).Bytes()
 }
 
+// sitePublished is v as the votes site publishes it: its bytes, signature
+// and anchor bundle.
+func (c *cenv) sitePublished(v *votetest.Vote) SiteProposal {
+	return SiteProposal{Proposal: v.Doc, Sig: v.Sig, Bundle: c.auth0Bundle(v)}
+}
+
 // auth0Bundle is the proposal's anchor bundle: made once per proposal, as
 // the service publishes one and sends it in every status answer.
 func (c *cenv) auth0Bundle(v *votetest.Vote) []byte {

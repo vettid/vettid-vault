@@ -93,9 +93,13 @@ const (
 	MaxPerConnection         = 32
 	MaxOpenPerConnection     = 16
 	MaxProblemsPerConnection = 16
-	MaxCompactPerConnection  = 512
-	CompactRetentionDays     = 365
-	MaxRefusalsKept          = 8
+	// MaxNotEligiblePerConnection bounds a connection's records of proposals
+	// the member is not on the roster of (VAULT-MESSAGING 0.90.20; owner
+	// decision 2026-11-19): their own limit, the oldest going first.
+	MaxNotEligiblePerConnection = 16
+	MaxCompactPerConnection     = 512
+	CompactRetentionDays        = 365
+	MaxRefusalsKept             = 8
 )
 
 // Errors are fixed sentinels (VAULT-MESSAGING §13.6): none echoes input.

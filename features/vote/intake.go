@@ -298,6 +298,13 @@ func (f *Feature) intake(s *vault.Session, conn string, msg *votewire.ProposalMs
 		if old.Conflict == nil {
 			old.Conflict = &evidence{Proposal: msg.Proposal, Sig: msg.ProposalSig, Bundle: msg.Bundle, AtMS: now.UnixMilli()}
 			old.ChangedMS = now.UnixMilli()
+			if old.NotEligible {
+				// (0.90.20) The service sends the proposal with a record proof
+				// after signing that the member is not on its roster: kept as
+				// evidence, and said once.
+				f.feed(s, "vote.problem", conn, id, "high")
+				f.event(s, old, "problem")
+			}
 		}
 		f.audit(s, "vote.proposal_conflict", conn, id)
 		return nil, errBad
@@ -403,7 +410,7 @@ func (f *Feature) onExtended(s *vault.Session, in *envelope.Inner) (json.RawMess
 // checks either way.
 func (f *Feature) extend(s *vault.Session, conn string, m *votewire.ExtendedMsg) (json.RawMessage, error) {
 	r := f.st.Records[key(conn, m.ProposalID)]
-	if r == nil || r.RejectReason != "" {
+	if r == nil || r.inert() {
 		return nil, errNotFound
 	}
 	fail := func(reason string) (json.RawMessage, error) {

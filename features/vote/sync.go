@@ -316,7 +316,7 @@ func (f *Feature) syncEntry(s *vault.Session, id, serviceID string, d *syncDocum
 	for _, r := range f.recordsOf(id) {
 		held = true
 		_ = f.siteDocument(s, r.Conn, id, d.doc)
-		if r = f.get(r.Conn, id); r != nil && r.RejectReason == "" {
+		if r = f.get(r.Conn, id); r != nil && !r.inert() {
 			for _, m := range d.exts {
 				if n := extN(m); int64(len(r.Exts)) >= n && (n < 1 || r.Exts[n-1].Verified) {
 					continue // held already, with its bundle (one adopted from the results is verified here, review fix 1)
@@ -335,7 +335,7 @@ func (f *Feature) syncEntry(s *vault.Session, id, serviceID string, d *syncDocum
 	conns := f.serviceConnections(s, serviceID, d.doc.Proposal)
 	asked := false
 	for _, c := range conns {
-		asked = f.requestProposal(s, c, id, d.doc.Proposal) || asked
+		asked = f.requestProposal(s, c, id, SiteProposal{Proposal: d.doc.Proposal, Sig: d.doc.Sig, Bundle: d.doc.Bundle}) || asked
 	}
 	if asked {
 		return "kept"

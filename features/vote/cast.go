@@ -35,10 +35,10 @@ var sendOffsets = []time.Duration{time.Minute, 5 * time.Minute, 30 * time.Minute
 
 // pendRef is a request this feature sent and awaits an answer to.
 type pendRef struct {
-	conn, id string // the record
-	kind     string // "cast" or "status"
-	want     []byte // a status request for a proposal not held: the site's bytes it must equal
-	restore  bool   // the record was waiting for the answer to a restore when the request was sent
+	conn, id string        // the record
+	kind     string        // "cast" or "status"
+	site     *SiteProposal // a status request for a proposal not held: the site's documents (its bytes the answer must equal)
+	restore  bool          // the record was waiting for the answer to a restore when the request was sent
 	atMS     int64
 }
 
@@ -95,6 +95,9 @@ func (f *Feature) cast(s *vault.Session, conn, id, choice string, pinned, owed [
 	r := f.get(conn, id)
 	if r == nil || r.RejectReason != "" {
 		return CastResult{}, errNotFound
+	}
+	if r.NotEligible {
+		return CastResult{}, vault.NewError("not_eligible", "")
 	}
 	switch r.state(now) {
 	case StateChecking:
@@ -248,7 +251,14 @@ func (f *Feature) sendBallot(s *vault.Session, r *record) {
 }
 
 // askStatus sends vote.status for a record.
-func (f *Feature) askStatus(s *vault.Session, conn, id string, want []byte) bool {
+// SiteProposal is a proposal as the votes site publishes it: the bytes,
+// proposal_sig and the anchor bundle (vote.site.sync's document).
+type SiteProposal struct {
+	Proposal, Sig []byte
+	Bundle        json.RawMessage
+}
+
+func (f *Feature) askStatus(s *vault.Session, conn, id string, site *SiteProposal) bool {
 	restore := false
 	if r := f.get(conn, id); r != nil {
 		restore = r.Restore
@@ -261,7 +271,7 @@ func (f *Feature) askStatus(s *vault.Session, conn, id string, want []byte) bool
 	if err != nil {
 		return false
 	}
-	f.pend[reqID] = pendRef{conn: conn, id: id, kind: "status", want: want, restore: restore, atMS: s.Now().UnixMilli()}
+	f.pend[reqID] = pendRef{conn: conn, id: id, kind: "status", site: site, restore: restore, atMS: s.Now().UnixMilli()}
 	return true
 }
 
@@ -976,7 +986,7 @@ func (f *Feature) statusAnswer(s *vault.Session, ref pendRef, in *envelope.Inner
 		// A proposal the vault was not sent (the site's index has it): the
 		// answer is checked as a vote.proposal would be, and its bytes must
 		// equal the site's.
-		if len(ref.want) > 0 && !eq(a.Proposal, ref.want) {
+		if ref.site != nil && !eq(a.Proposal, ref.site.Proposal) {
 			return
 		}
 		f.intakeStatus(s, ref, a, in.Body)
@@ -1257,7 +1267,11 @@ func (f *Feature) foreign(s *vault.Session, r *record, b *ballot, sb *svcBallot,
 // statusRefusal: a signed not_eligible or unknown_proposal is kept as
 // evidence and shown (decision 7).
 func (f *Feature) statusRefusal(s *vault.Session, r *record, ref pendRef, in *envelope.Inner) {
-	if r == nil || in.Error == nil {
+	if in.Error == nil {
+		return
+	}
+	if r == nil {
+		f.notHeldRefusal(s, ref, in)
 		return
 	}
 	code := in.Error.Code
@@ -1363,6 +1377,56 @@ func timed(s *vault.Session, re string, ms uint64) bool {
 	return false
 }
 
+// notHeldRefusal handles a refusal to the vote.status asked for a proposal
+// on the votes site that the vault does not hold (VAULT-MESSAGING 0.90.20
+// §10.19.4, owner decision 2026-11-18). A signed not_eligible, timed at a
+// deposit of the request, under the hash of the site's proposal, which is
+// checked as on arrival (steps 2, 3 and 6: the document, the service's
+// key and signature, the anchor; not the tag, which a member left off the
+// roster does not have), is kept as a record of its own: NotEligible, the
+// refusal pinned as evidence, vote.problem once. Anything else keeps
+// nothing: the zero hash proves nothing, and the proposal is asked about
+// again by the schedule.
+func (f *Feature) notHeldRefusal(s *vault.Session, ref pendRef, in *envelope.Inner) {
+	site := ref.site
+	if site == nil || in.Error.Code != "not_eligible" || f.get(ref.conn, ref.id) != nil {
+		return
+	}
+	rf, err := votewire.ParseRefusal(in.Body)
+	if err != nil || !timed(s, in.Re, rf.MsgMS) || !eq(rf.ProposalHash, votewire.H(site.Proposal)) {
+		return
+	}
+	p, err := votewire.ParseProposal(site.Proposal)
+	if err != nil || p.ProposalID != ref.id || !isConnKey(s, ref.conn, p.Service) ||
+		votewire.VerifyProposal(p.Service, site.Proposal, site.Sig) != nil ||
+		rf.Verify(p.Service, ref.id, "vote.status", in.Error.Code, votewire.H([]byte(ref.id)), ownConnections(s), nil) != nil {
+		return
+	}
+	notAfter := time.Time{}
+	if s.RelayTimeKnown() {
+		notAfter = s.RelayTime().Add(AnchorAhead)
+	}
+	if f.anchor(s, ref.conn, [][]byte{p.Service, s.From().IK}, site.Proposal, site.Bundle, notAfter) != anchorOK {
+		return
+	}
+	now := s.Now()
+	r := &record{Conn: ref.conn, ID: ref.id, ServiceIK: append([]byte{}, s.From().IK...), Proposal: site.Proposal, ProposalSig: site.Sig,
+		Bundle: site.Bundle, Hash: votewire.H(site.Proposal), NotEligible: true,
+		ReceivedMS: s.RelayTime().UnixMilli(), NoRelay: !s.RelayTimeKnown(), KeptMS: now.UnixMilli(), ChangedMS: now.UnixMilli(),
+		Opens: p.OpensAt, Closes: p.ClosesAt, OrigClose: p.ClosesAt, Title: p.Title, Signer: p.Service}
+	if !f.admitNotEligible(r) {
+		return
+	}
+	request := votewire.H([]byte(ref.id))
+	r.StatusAnswers, _ = r.keep(r.StatusAnswers, in.Error.Code, request, in.Body)
+	r.StatusAnswers[0].Pinned = true
+	r.RefusalProblem = true
+	f.st.Records[key(ref.conn, ref.id)] = r
+	f.audit(s, "vote.refused", ref.conn, ref.id+":not_eligible")
+	f.feed(s, "vote.problem", ref.conn, ref.id, "high")
+	f.event(s, r, "problem")
+}
+
 // intakeStatus keeps a proposal from a status answer (§10.19.4 "A proposal
 // the vault was never sent"): steps 2 to 6 on the answer's members, a
 // missing bundle leaving it `checking` (site) until the site's arrives.
@@ -1386,7 +1450,7 @@ func (f *Feature) intakeStatus(s *vault.Session, ref pendRef, a *votewire.Status
 	msg := &votewire.ProposalMsg{Proposal: a.Proposal, ProposalSig: a.ProposalSig, Bundle: a.Bundle, RecordSecret: a.RecordSecret, RecordProof: a.RecordProof}
 	_, _ = f.intake(s, conn, msg)
 	r := f.get(conn, a.ProposalID)
-	if r == nil || r.RejectReason != "" || r.Ballot != nil || r.ServiceBallot != nil {
+	if r == nil || r.inert() || r.Ballot != nil || r.ServiceBallot != nil {
 		return
 	}
 	r.StatusAnswers, _ = r.keep(r.StatusAnswers, "", nil, body)
@@ -1409,22 +1473,22 @@ func (f *Feature) intakeStatus(s *vault.Session, ref pendRef, a *votewire.Status
 // the vault does not hold (vote.status, §10.19.4): at most once an hour per
 // proposal. The answer must carry exactly siteBytes, the site's proposal.
 // It reports whether the request was sent.
-func (f *Feature) RequestProposal(s *vault.Session, conn, id string, siteBytes []byte) bool {
+func (f *Feature) RequestProposal(s *vault.Session, conn, id string, site SiteProposal) bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return f.requestProposal(s, conn, id, siteBytes)
+	return f.requestProposal(s, conn, id, site)
 }
 
-func (f *Feature) requestProposal(s *vault.Session, conn, id string, siteBytes []byte) bool {
+func (f *Feature) requestProposal(s *vault.Session, conn, id string, site SiteProposal) bool {
 	k := key(conn, id)
 	now := s.Now()
-	if f.st.Records[k] != nil || !votewire.ValidProposalID(id) || len(siteBytes) == 0 {
+	if f.st.Records[k] != nil || f.settled(conn, id) || !votewire.ValidProposalID(id) || len(site.Proposal) == 0 {
 		return false
 	}
 	if at, ok := f.asked[k]; ok && now.Sub(time.UnixMilli(at)) < StatusEvery {
 		return false
 	}
-	if !f.askStatus(s, conn, id, siteBytes) {
+	if !f.askStatus(s, conn, id, &site) {
 		return false
 	}
 	f.asked[k] = now.UnixMilli()
@@ -1437,7 +1501,7 @@ func (f *Feature) Check(s *vault.Session, conn, id string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	r := f.get(conn, id)
-	if r == nil || r.RejectReason != "" {
+	if r == nil || r.inert() {
 		return errNotFound
 	}
 	now := s.Now()
@@ -1461,7 +1525,7 @@ func (f *Feature) Confirm(s *vault.Session, conn, id string, mine bool) (string,
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	r := f.get(conn, id)
-	if r == nil || r.RejectReason != "" {
+	if r == nil || r.inert() {
 		return "", errNotFound
 	}
 	sb := r.ServiceBallot
@@ -1525,7 +1589,7 @@ func (f *Feature) tick(s *vault.Session, owed map[string][]byte) {
 	}
 	sort.Strings(keys)
 	for _, k := range keys {
-		if r := f.st.Records[k]; r != nil && r.RejectReason == "" {
+		if r := f.st.Records[k]; r != nil && !r.inert() {
 			f.tickRecord(s, r, now)
 		}
 	}
@@ -1659,7 +1723,7 @@ func (f *Feature) markRestore(s *vault.Session) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	for _, r := range f.st.Records {
-		if r.RejectReason != "" || (r.Ballot != nil && r.Ballot.State == BallotRecorded) {
+		if r.inert() || (r.Ballot != nil && r.Ballot.State == BallotRecorded) {
 			continue
 		}
 		r.Restore, r.AskMS, r.ChangedMS = true, 0, s.Now().UnixMilli()

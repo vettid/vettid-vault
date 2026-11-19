@@ -349,7 +349,7 @@ func TestV2IntakeStatusTiesTheIDToTheProposal(t *testing.T) {
 		if !guard {
 			asked = w.ID // control: the same answer under its own id is kept
 		}
-		c.f.RequestProposal(c.session(), "svc", asked, w.Doc)
+		c.f.RequestProposal(c.session(), "svc", asked, c.sitePublished(w))
 		ids := c.statuses()
 		sig, _ := c.statusSigBy(c.svc.IK, w, nil)
 		body := bytes.Replace(c.statusBody(w, nil, 0, nil, sig), []byte(`"proposal_id":"`+w.ID+`"`), []byte(`"proposal_id":"`+asked+`"`), 1)

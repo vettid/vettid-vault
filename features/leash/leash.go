@@ -62,7 +62,8 @@ const (
 const ScopeItems = leashwire.ScopeItems
 
 // opScope maps agent.request operations to their scope.
-var opScope = map[string]string{"catalog": ScopeItems, "item.get": ScopeItems, "item.use": ScopeItems, "item.run": ScopeItems}
+var opScope = map[string]string{"catalog": ScopeItems, "item.get": ScopeItems, "item.use": ScopeItems, "item.run": ScopeItems,
+	"item.proxy": ScopeItems}
 
 // Delegable are the owner types a grant may give an agent (§10.11).
 // connScoped are those whose body carries connection_id, which a grant's
@@ -181,7 +182,8 @@ const (
 	KindThrottled = "leash.throttled" // never written singly
 	KindRead      = "leash.item.read"
 	KindUsed      = "leash.item.used"
-	KindRun       = "leash.item.run" // (0.42.0)
+	KindRun       = "leash.item.run"   // (0.42.0)
+	KindProxy     = "leash.item.proxy" // (0.42.0)
 )
 
 // Cooldown is one scope's refusal backoff.
@@ -449,6 +451,9 @@ type Request struct {
 	Data    []byte
 	// Run is an item.run's request (0.42.0, §10.11); FieldID is its field.
 	Run *itemspec.Run
+	// Proxy is an item.proxy's request (0.42.0, §10.11); FieldID is its
+	// field.
+	Proxy *itemspec.ProxyRequest
 }
 
 // ParseRequest parses an agent.request body strictly.
@@ -498,6 +503,12 @@ func ParseRequest(body []byte) (*Request, error) {
 			return nil, errBad
 		}
 		r.FieldID = r.Run.FieldID
+	}
+	if r.Op == "item.proxy" {
+		if r.Proxy, err = itemspec.ParseProxyRequest(o); err != nil {
+			return nil, errBad
+		}
+		r.FieldID = r.Proxy.FieldID
 	}
 	return r, nil
 }
@@ -713,7 +724,14 @@ func (f *Feature) AgentDecision(s *vault.Session, typ string, body json.RawMessa
 	// as refused, with the cooldown; otherwise it is decided as an
 	// items.read request and referred when the settings say so (each,
 	// unbound, no pin match, a shell or an interpreter), with its flags.
+	//
+	// An item.proxy (0.42.0) for an item whose settings do not hold proxy
+	// is answered way_not_allowed, and one for a host the item does not
+	// bind bad_request, each counted as refused with the cooldown;
+	// otherwise it is decided as an items.read request and always
+	// referred, held with a note of the header and prefix.
 	reveal := false
+	var proxy *proxyNote
 	var run *itemspec.RunJudgement
 	var runVersion uint64
 	if typ == "agent.request" && scope == ScopeItems && item != "" {
@@ -734,9 +752,19 @@ func (f *Feature) AgentDecision(s *vault.Session, typ string, body json.RawMessa
 				return f.refuse(s, agent, st, KindRefused, scope)
 			}
 			run, runVersion = &j, w.Version
+		} else if err == nil && r.Op == "item.proxy" {
+			w, _ := f.items.AgentWays(agent, rulesOf(gs), item)
+			j := itemspec.JudgeProxy(w, r.Proxy)
+			if j.Refusal != "" {
+				coolDown(st, scope, now)
+				s.RefuseAgentWith(proxyRefusal(j, w))
+				return f.refuse(s, agent, st, KindRefused, scope)
+			}
+			n := proxyNoteOf(j)
+			proxy = &n
 		}
 	}
-	refer := reveal || run != nil && run.Refer
+	refer := reveal || run != nil && run.Refer || proxy != nil
 	delete(st.Cool, scope)
 	if refer && st.Referred >= MaxReferralsPerHour {
 		gs = nil // past the referral cap it is throttled below: nothing counted in the windows
@@ -809,6 +837,9 @@ func (f *Feature) AgentDecision(s *vault.Session, typ string, body json.RawMessa
 	}
 	if run != nil {
 		holdRun(s, *run, runVersion)
+	}
+	if proxy != nil {
+		s.NoteApproval(proxy.raw())
 	}
 	return vault.AgentAsk
 }
@@ -1388,6 +1419,8 @@ func (f *Feature) request(s *vault.Session, body []byte) (json.RawMessage, error
 		return agentContent(content), nil
 	case "item.run":
 		return f.itemRun(s, agent, rules, r)
+	case "item.proxy":
+		return f.itemProxy(s, agent, rules, r)
 	case "item.use":
 		value, ok := f.items.AgentFieldValue(agent, rules, r.ItemID, r.FieldID)
 		if !ok {

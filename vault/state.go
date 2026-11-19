@@ -773,6 +773,9 @@ type HeldRequest struct {
 	Inner    []byte    `json:"inner"`
 	Created  time.Time `json:"created"`
 	Expires  time.Time `json:"expires"`
+	// Flags are an agent request's approval flags (approval.pending{flags},
+	// §10.11, 0.42.0), set by the LEASH policy when it referred the request.
+	Flags []string `json:"flags,omitempty"`
 }
 
 // PeerRelay is a peer's relay address.

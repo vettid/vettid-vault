@@ -224,7 +224,29 @@ type Session struct {
 	epoch *handshake.Epoch
 	// cacheBody, if set, is the body the request's answer is cached with instead of the one sent (CacheResponseAs).
 	cacheBody json.RawMessage
+	// agentRefusal and approvalFlags are set by the AgentPolicy while it
+	// decides an agent's request (RefuseAgentWith, FlagApproval).
+	agentRefusal  *HandlerError
+	approvalFlags []string
 }
+
+// RefuseAgentWith names the error an AgentDeny decision is answered with,
+// instead of forbidden (VAULT-MESSAGING §10.11, 0.42.0: way_not_allowed
+// with its body). Only an AgentPolicy calls it, during AgentDecision; an
+// error that is not a *HandlerError is ignored (the answer stays
+// forbidden). It changes nothing for another decision.
+func (s *Session) RefuseAgentWith(err error) {
+	var he *HandlerError
+	if errors.As(err, &he) {
+		s.agentRefusal = he
+	}
+}
+
+// FlagApproval sets the flags of the approval an AgentAsk decision holds
+// the request for (approval.pending{flags}, §10.11, 0.42.0). Only an
+// AgentPolicy calls it, during AgentDecision; it changes nothing for
+// another decision.
+func (s *Session) FlagApproval(flags []string) { s.approvalFlags = append([]string(nil), flags...) }
 
 // CacheResponseAs makes the answer to the request being handled cached (§8.2: a retransmission is answered from
 // the cache, not executed again) with body instead of the body the handler returns, which is sent once as it is.

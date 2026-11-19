@@ -725,21 +725,28 @@ func (m *Manager) dispatch(ctx context.Context, p *Peer, in *envelope.Inner, ep 
 		}
 	}
 	ask := false
+	var refusal *HandlerError
+	var flags []string
 	if p.Kind == KindAgent && m.hasAccess(p, now) && (!allowed || te.spec.AgentPolicy) {
 		// LEASH hook (§6.8, §10.11): the agent's policy may allow an owner
 		// type or refer it to the owner, and decides every agent.request;
-		// app-only types never.
+		// app-only types never. A refusal may name its error (0.42.0:
+		// way_not_allowed), and a referral its approval's flags.
 		switch m.agentDecision(s, te, in) {
 		case AgentAllow:
 			allowed = true
 		case AgentAsk:
 			allowed, ask = true, true
+			flags = s.approvalFlags
 		default:
 			allowed = false
+			refusal = s.agentRefusal
 		}
 	}
 	if !allowed {
-		if te.spec.Request {
+		if te.spec.Request && refusal != nil {
+			m.respondErrorBody(p, in, rkey, refusal.Code, refusal.Message, refusal.Body, now)
+		} else if te.spec.Request {
 			m.respondError(p, in, rkey, "forbidden", "", now)
 		} else {
 			m.audit(now, "forbidden_type", p.ID)
@@ -773,7 +780,7 @@ func (m *Manager) dispatch(ctx context.Context, p *Peer, in *envelope.Inner, ep 
 	}
 	if ask {
 		if te.spec.Request && !eph {
-			m.hold(p, in, key, volatile, now)
+			m.hold(p, in, key, volatile, flags, now)
 		} else {
 			m.audit(now, "approval_required", p.ID)
 		}

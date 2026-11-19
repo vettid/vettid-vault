@@ -500,6 +500,44 @@ func TestUnlockWindow(t *testing.T) {
 	}
 }
 
+// WindowOpen (for leash.item.set's widening, §10.11) says what UseKey
+// would find, and never extends the window.
+func TestWindowOpenDoesNotExtend(t *testing.T) {
+	e := newEnv(t)
+	blob := e.create()
+	if e.f.WindowOpen(e.clk.T) {
+		t.Fatal("open before any unlock")
+	}
+	e.h.Set.CredentialUnlockTTL = 60
+	blob = blobOf(t, e.ok(e.unlock(blob, pw)))
+	for _, d := range []time.Duration{10 * time.Second, 40 * time.Second, 59 * time.Second} {
+		if !e.f.WindowOpen(e.clk.T.Add(d)) {
+			t.Fatalf("closed at %v", d)
+		}
+	}
+	// Asked within the window many times, it still ends 60 s after the unlock.
+	if e.f.WindowOpen(e.clk.T.Add(61 * time.Second)) {
+		t.Fatal("WindowOpen extended the window")
+	}
+	if _, ok := e.f.UseKey(e.clk.T.Add(61*time.Second), time.Minute); ok {
+		t.Fatal("UseKey after the window")
+	}
+	e.ok(e.unlock(blob, pw))
+	// A credential alarm (§3.5.9) closes it, as for UseKey.
+	e.f.st.Alarm = &Alarm{ID: "01JB2Z6V9K3M4N5P6Q7R8S9T0V", State: AlarmFrozen, At: e.clk.T}
+	if e.f.WindowOpen(e.clk.T) {
+		t.Fatal("open during an alarm")
+	}
+	e.f.st.Alarm = nil
+	if !e.f.WindowOpen(e.clk.T) {
+		t.Fatal("the test's window is not open")
+	}
+	e.ok(e.raw("app", "credential.lock", `{}`))
+	if e.f.WindowOpen(e.clk.T) {
+		t.Fatal("open after credential.lock")
+	}
+}
+
 // §3.5.5, §10.6, §15 item 23 (0.15.2): there is no credential.delete; the
 // holder's credential.reset{credential, utk_id, sealed{pin, password,
 // new_password}} verifies the blob, the PIN and the current password as an

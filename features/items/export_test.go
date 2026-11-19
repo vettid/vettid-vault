@@ -1,9 +1,46 @@
 package items
 
 import (
+	"time"
+
 	"github.com/vettid/vettid-vault/features/credential"
 	"github.com/vettid/vettid-vault/features/itemspec"
 )
+
+// WaysCopies returns the settings on the agent's inclusions of the item
+// under its rules in force, in rule order (§10.11; the copies, kept equal).
+func (f *Feature) WaysCopies(agent, item string, now time.Time) []*itemspec.ItemWays {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []*itemspec.ItemWays
+	for _, inc := range f.agentCopies(agent, item, f.agentRuleIDs(now), nil) {
+		out = append(out, inc.Ways)
+	}
+	return out
+}
+
+// DropWaysCopies removes the copy from every inclusion but the first, as a
+// path that missed it would leave them.
+func (f *Feature) DropWaysCopies(agent, item string, now time.Time) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, inc := range f.agentCopies(agent, item, f.agentRuleIDs(now), nil)[1:] {
+		inc.Ways = nil
+	}
+}
+
+// AnyWays reports whether any inclusion of the item, in force or not,
+// holds settings.
+func (f *Feature) AnyWays(item string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, m := range f.st.Incl {
+		if inc := m[item]; inc != nil && inc.Ways != nil {
+			return true
+		}
+	}
+	return false
+}
 
 // OpenSealed decrypts a critical item's ciphertext with a credential
 // entry (tests of the envelope encryption).

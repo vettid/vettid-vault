@@ -152,6 +152,11 @@ type Inclusion struct {
 	GrantID string    `json:"grant_id,omitempty"`
 	Used    uint64    `json:"used,omitempty"` // agent reads (uses)
 	At      time.Time `json:"at"`
+	// Ways are the agent's settings for the item (§10.11, 0.42.0; nil:
+	// absent, ["use"]): a copy on each of the agent's inclusions of the
+	// item, kept equal (ways.go). They go with the inclusion, so an item
+	// withdrawn from every rule of the agent loses them.
+	Ways *itemspec.ItemWays `json:"ways,omitempty"`
 }
 
 // TagInfo is a tag's registry entry (§10.8).
@@ -224,6 +229,10 @@ type Feature struct {
 	agents AgentRules
 	guard  ItemGuard
 	st     state
+	// waysGone are the (agent, item) pairs whose inclusions holding
+	// settings went during the change being made; flushWays announces
+	// those that lost their last copy (ways.go). Not stored.
+	waysGone [][2]string
 	// peerFeatures are the names advertised to service connections.
 	peerFeatures []string
 	// coreMissingNoted: profile.core_missing was audited for the core now missing (once, not at every retry).
@@ -867,6 +876,11 @@ func (f *Feature) finish(s *vault.Session, ch *change, kind string) {
 		s.Record(vault.Activity{Kind: kind, Ref: ch.after.ID, Audit: true})
 	} else {
 		id := ch.before.ID
+		// The plan above withdrew every live inclusion of the deleted item,
+		// and apply announced the agents' settings that went with them
+		// (§10.11); what is left here (declines, inclusions of rules no
+		// longer in force, which expire dropped before this request) holds
+		// none.
 		for rid, m := range f.st.Incl {
 			delete(m, id)
 			if len(m) == 0 {

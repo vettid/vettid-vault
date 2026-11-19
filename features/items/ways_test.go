@@ -136,7 +136,7 @@ func TestWaysCopiesKeptEqual(t *testing.T) {
 	}
 }
 
-// Lead's note (GC #14226): a missed copy fails secure. Copies that differ
+// A missed copy fails secure. Copies that differ
 // count as absent (["use"]), never the wider one; a new inclusion does not
 // copy from them; a set without version makes them equal again.
 func TestWaysMissedCopyFailsSecure(t *testing.T) {
@@ -153,7 +153,7 @@ func TestWaysMissedCopyFailsSecure(t *testing.T) {
 		t.Fatalf("differing copies: %s", l)
 	}
 	// Reading them made "absent" stored: the wider copy is cleared, so it
-	// cannot come back when the others go (review finding 2).
+	// cannot come back when the others go.
 	for _, c := range e.copies(doc) {
 		if c != nil {
 			t.Fatal("a differing copy kept")
@@ -176,7 +176,7 @@ func TestWaysMissedCopyFailsSecure(t *testing.T) {
 // §10.11 "Settings exist while at least one rule of the agent includes the
 // item": a change that moves the item from one of the agent's auto rules
 // to another never leaves it without one, so the settings carry over and
-// nothing is announced (review finding 1). A move to an ask rule leaves it
+// nothing is announced. A move to an ask rule leaves it
 // pending, included nowhere: the settings go.
 func TestWaysMoveBetweenRules(t *testing.T) {
 	e := newEnv(t)

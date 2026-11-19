@@ -245,6 +245,8 @@ type Approval struct {
 	PreviousSHA256 string
 	PreviousPath   string
 	Note           json.RawMessage
+	// replaces is the approval a re-referral replaces (set by runHeld only).
+	replaces string
 }
 
 func (a Approval) clone() Approval {

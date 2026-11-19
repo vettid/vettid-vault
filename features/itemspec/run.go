@@ -57,11 +57,14 @@ var ErrRun = errors.New("itemspec: bad item.run")
 // ParseRun parses an item.run request's members other than op and
 // item_id (§10.11): field_id; program, an absolute path (the one the
 // connector resolved); sha256, 64 lowercase hex digits; argv, 1–64
-// strings of at most 4,096 bytes each and 32,768 in all; cwd, an absolute
-// path; how, env, stdin or file; name, required for env and file, and
+// strings of at most 4,096 bytes each and 32,768 in all, none holding NUL
+// (no process could receive it, so what runs would differ from what the
+// approval shows; other characters the app shows escaped); cwd, a clean
+// absolute path; how, env, stdin or file; name, required for env and file, and
 // absent for stdin (the spec is silent; a name with stdin would be shown
 // for nothing); env, 0–32 further variables whose names follow the name
-// rule and differ from name, with values of at most 4,096 bytes. The name
+// rule and differ from name, with values of at most 4,096 bytes and no
+// NUL. The name
 // rule is checked here (bad_request); whether a name is allowed is the
 // caller's (env_not_allowed).
 func ParseRun(o strictjson.Object) (*Run, error) {
@@ -83,7 +86,7 @@ func ParseRun(o strictjson.Object) (*Run, error) {
 	total := 0
 	for _, raw := range args {
 		a, err := strictjson.AsString(raw)
-		if err != nil || len(a) > MaxRunArg {
+		if err != nil || len(a) > MaxRunArg || strings.IndexByte(a, 0) >= 0 {
 			return nil, ErrRun
 		}
 		total += len(a)
@@ -112,7 +115,7 @@ func ParseRun(o strictjson.Object) (*Run, error) {
 		}
 		for n, rv := range env {
 			v, err := strictjson.AsString(rv)
-			if err != nil || !ValidEnvName(n) || n == r.Name || len(v) > MaxRunEnvValue {
+			if err != nil || !ValidEnvName(n) || n == r.Name || len(v) > MaxRunEnvValue || strings.IndexByte(v, 0) >= 0 {
 				return nil, ErrRun
 			}
 			r.Env = append(r.Env, EnvVar{n, v})
@@ -134,11 +137,11 @@ func validSHA256(s string) bool {
 	return true
 }
 
-// validCwd: an absolute path (as for a program, the root itself
-// included), at most MaxProgram bytes of UTF-8, with no character
-// ValidProgram refuses (the bounds are not in the spec).
+// validCwd: a clean absolute path (cleanPath; the root itself included),
+// at most MaxProgram bytes of UTF-8, with no character ValidProgram
+// refuses (the bounds are not in the spec).
 func validCwd(p string) bool {
-	return IsAbsProgram(p) && len(p) <= MaxProgram && utf8.ValidString(p) && showable(p)
+	return IsAbsProgram(p) && len(p) <= MaxProgram && utf8.ValidString(p) && showable(p) && cleanPath(p, true)
 }
 
 // MatchProgram returns the entry of programs a run's program matches

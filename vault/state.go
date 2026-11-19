@@ -784,6 +784,9 @@ type HeldRequest struct {
 	PreviousSHA256 string          `json:"previous_sha256,omitempty"`
 	PreviousPath   string          `json:"previous_path,omitempty"`
 	Note           json.RawMessage `json:"note,omitempty"`
+	// Replaces is the approval this one replaces, when an approved agent
+	// request was referred again (approval.pending{replaces}).
+	Replaces string `json:"replaces,omitempty"`
 }
 
 // PeerRelay is a peer's relay address.

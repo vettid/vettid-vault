@@ -61,7 +61,11 @@ func TestParseRunAccepts(t *testing.T) {
 			}
 			m["argv"] = a
 		},
-		func(m map[string]any) { m["argv"] = []any{"git", "-c", "a\nb\x01"} }, // shown escaped, not refused
+		func(m map[string]any) { m["argv"] = []any{"git", "-c", "a\nb\x01"} },               // shown escaped, not refused
+		func(m map[string]any) { m["argv"] = []any{"git", "\u202eevil", "a\u200bb"} },       // likewise
+		func(m map[string]any) { m["cwd"] = "C:/" },                                         // a drive's root
+		func(m map[string]any) { m["cwd"] = "/home/a.b/..x/.y" },                            // dots inside elements
+		func(m map[string]any) { m["program"] = win("C:", "Program Files (x86)", "x.exe") }, // spaces and brackets
 		func(m map[string]any) {
 			env := map[string]any{}
 			for i := 0; i < MaxRunEnv; i++ {
@@ -81,10 +85,11 @@ func TestParseRunRefuses(t *testing.T) {
 	for i := range long {
 		long[i] = "a"
 	}
-	over := make([]any, 9)
+	over := make([]any, 9) // 8 × 4,096 + 1 = 32,769
 	for i := range over {
 		over[i] = strings.Repeat("a", MaxRunArgTotal/8)
 	}
+	over[8] = "a"
 	envOver := map[string]any{}
 	for i := 0; i <= MaxRunEnv; i++ {
 		envOver["V"+strings.Repeat("_", i)] = "v"
@@ -129,6 +134,18 @@ func TestParseRunRefuses(t *testing.T) {
 		"env too many":        func(m map[string]any) { m["env"] = envOver },
 		"env repeats name":    func(m map[string]any) { m["env"] = map[string]any{"TOKEN": "x"} },
 		"env with stdin name": func(m map[string]any) { m["how"] = "stdin"; m["env"] = map[string]any{"TOKEN": "x"} },
+		"argv NUL":            func(m map[string]any) { m["argv"] = []any{"git", "a\x00b"} },
+		"env value NUL":       func(m map[string]any) { m["env"] = map[string]any{"A": "x\x00"} },
+		"program dot-dot":     func(m map[string]any) { m["program"] = "/usr/bin/../../tmp/x/git" },
+		"program dot":         func(m map[string]any) { m["program"] = "/usr/./bin/git" },
+		"program empty elem":  func(m map[string]any) { m["program"] = "/usr//bin/git" },
+		"program stream":      func(m map[string]any) { m["program"] = win("C:", "Windows", "System32", "cmd.exe::$DATA") },
+		"program colon":       func(m map[string]any) { m["program"] = "/opt/a:b/git" },
+		"drive dot-dot":       func(m map[string]any) { m["program"] = win("C:", "x", "..", "git.exe") },
+		"cwd dot-dot":         func(m map[string]any) { m["cwd"] = "/home/a/../b" },
+		"cwd trailing":        func(m map[string]any) { m["cwd"] = "/home/a/" },
+		"cwd empty elem":      func(m map[string]any) { m["cwd"] = win("C:", "", "x") },
+		"cwd stream":          func(m map[string]any) { m["cwd"] = "C:/x:y" },
 	}
 	for name, edit := range cases {
 		if r, err := parseRunReq(t, runBody(edit)); err == nil && name != "env with stdin name" {
@@ -243,6 +260,12 @@ func TestJudgeRun(t *testing.T) {
 			RunJudgement{Refer: true, Flags: []string{FlagUnboundProgram}}},
 		{"a shell's -c is not inline_code", bound(false), runOf("/bin/sh", hashA, []string{"sh", "-c", "x"}),
 			RunJudgement{Refer: true, Flags: []string{FlagShell, FlagUnboundProgram}}},
+		{"inline code past the first argument", bound(false), runOf("/usr/bin/python3", hashA, []string{"python3", "-u", "-W", "x", "-c", "x"}),
+			RunJudgement{Refer: true, Flags: []string{FlagInlineCode, FlagUnboundProgram}}},
+		{"run settings without the run way", &ItemWays{Version: 2, Ways: []string{WayUse, WayReveal}, Run: &RunWays{Programs: []Program{pinned}}},
+			runOf("/usr/bin/git", hashA, git), RunJudgement{Refusal: "way_not_allowed"}},
+		{"the run way without run settings", &ItemWays{Version: 2, Ways: []string{WayUse, WayRun}}, runOf("/usr/bin/git", hashA, git),
+			RunJudgement{Refusal: "way_not_allowed"}},
 	}
 	for _, c := range cases {
 		got := JudgeRun(c.w, c.r)

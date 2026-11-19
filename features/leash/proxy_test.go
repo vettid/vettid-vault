@@ -49,15 +49,32 @@ func proxyRig(t *testing.T) *rig {
 // heldNote is what an item.proxy for wifi on api.example.com is held with.
 const heldNote = `{"host":"api.example.com","header":"Authorization","prefix":"Bearer "}`
 
+// onlyGrant is the rig's one grant (proxyRig makes one rule).
+func (r *rig) onlyGrant(t *testing.T) *Grant {
+	t.Helper()
+	if len(r.f.d.Grants) != 1 {
+		t.Fatalf("%d grants", len(r.f.d.Grants))
+	}
+	for _, g := range r.f.d.Grants {
+		return g
+	}
+	return nil
+}
+
 // §10.11: an item.proxy is always referred, even under an auto rule
 // within its windows, held with a note of the host, header and prefix;
-// sent to the handler without an approval it is forbidden, nothing read.
+// it is counted in the rule's hour and day windows (decided as an
+// items.read request); sent to the handler without an approval it is
+// forbidden, nothing read.
 func TestProxyAlwaysReferred(t *testing.T) {
 	r := proxyRig(t)
 	body := proxyBody(r.wifi, "f1", "api.example.com", "")
 	d, s := r.decideS(t0, body)
 	if d != vault.AgentAsk {
 		t.Fatalf("decided %v", d)
+	}
+	if g := r.onlyGrant(t); g.HourN != 1 || g.DayN != 1 {
+		t.Fatalf("windows %d/%d", g.HourN, g.DayN)
 	}
 	if a := s.HeldApproval(); string(a.Note) != heldNote || len(a.Flags) != 0 || a.PreviousSHA256 != "" {
 		t.Fatalf("held with %+v", a)
@@ -73,6 +90,9 @@ func TestProxyAlwaysReferred(t *testing.T) {
 	rc.f.agent(vault.NewSession(context.Background(), rc.h, vault.PeerInfo{}, t0, nil), agent).Referred = MaxReferralsPerHour
 	if d, _ := rc.decideS(t0, proxyBody(rc.wifi, "f1", "api.example.com", "")); d != vault.AgentDeny || !rc.h.HasActivity("leash.referrals_limited") {
 		t.Fatalf("past the cap: %v", d)
+	}
+	if g := rc.onlyGrant(t); g.HourN != 0 || g.DayN != 0 {
+		t.Fatalf("past the cap, windows %d/%d", g.HourN, g.DayN)
 	}
 }
 
@@ -205,8 +225,9 @@ func TestProxyHeaderSafeValue(t *testing.T) {
 }
 
 // §10.11: settings that change while a proxy waits. A host no longer
-// bound, or the way dropped, is refused at approval; a header or prefix
-// the approval did not show is referred again as a new approval (never the
+// bound, or the way dropped, is refused at approval; a host spelling,
+// header or prefix the approval did not show is referred again as a new
+// approval (never the
 // value on the old one); an approval with no note is forbidden.
 func TestProxyChangedWhileHeld(t *testing.T) {
 	body := func(r *rig) string { return proxyBody(r.wifi, "f1", "api.example.com", "") }
@@ -215,20 +236,23 @@ func TestProxyChangedWhileHeld(t *testing.T) {
 	if _, err := r.approved(t0, body(r), json.RawMessage(heldNote)); codeOf(err) != "bad_request" {
 		t.Fatalf("host dropped: %v", err)
 	}
-	for _, c := range []struct{ name, header, prefix string }{
-		{"header", "X-Api-Key", "Bearer "},
-		{"header case", "authorization", "Bearer "},
-		{"prefix", "Authorization", "Token "},
+	for _, c := range []struct{ name, host, header, prefix string }{
+		{"header", "api.example.com", "X-Api-Key", "Bearer "},
+		{"header case", "api.example.com", "authorization", "Bearer "},
+		{"prefix", "api.example.com", "Authorization", "Token "},
+		// The same bound host, spelled with its port: the answer names the
+		// settings' spelling, so the approval is shown it again.
+		{"host respelled", "api.example.com:443", "Authorization", "Bearer "},
 	} {
 		r := proxyRig(t)
-		r.setProxy(r.wifi, 4, c.header, c.prefix, "api.example.com")
+		r.setProxy(r.wifi, 4, c.header, c.prefix, c.host)
 		_, err := r.approved(t0, body(r), json.RawMessage(heldNote))
 		var ra *vault.ReferAgainError
 		if !errors.As(err, &ra) {
 			t.Fatalf("%s: %v", c.name, err)
 		}
 		var n proxyNote
-		if json.Unmarshal(ra.Approval.Note, &n) != nil || n.Header != c.header || n.Prefix != c.prefix {
+		if json.Unmarshal(ra.Approval.Note, &n) != nil || n.Host != c.host || n.Header != c.header || n.Prefix != c.prefix {
 			t.Fatalf("%s: new note %s", c.name, ra.Approval.Note)
 		}
 		if r.it.used[r.wifi] != 0 || r.f.d.Agents[agent].Referred != 1 {

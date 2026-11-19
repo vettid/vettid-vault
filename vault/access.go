@@ -126,8 +126,20 @@ func sessionPendingBody(r *AccessRequest, p *Peer) []byte {
 // approvalPendingBody is the body of the approval.pending event (§6.8)
 // and of the `approval` entry of pending.list (§10.4.2).
 func approvalPendingBody(h *HeldRequest, p *Peer, in *envelope.Inner) []byte {
-	return strictjson.NewBuilder().String("approval_id", h.ID).String("device_id", p.ID).
-		String("role", p.Kind).String("name", p.Name).String("type", in.Type).Raw("body", in.Body).String("exp", envelope.FormatTS(h.Expires)).Bytes()
+	b := strictjson.NewBuilder().String("approval_id", h.ID).String("device_id", p.ID).
+		String("role", p.Kind).String("name", p.Name).String("type", in.Type).Raw("body", in.Body).String("exp", envelope.FormatTS(h.Expires))
+	if len(h.Flags) > 0 {
+		// (0.42.0) the warnings the vault sets for an agent's request (§10.11).
+		arr := []byte{'['}
+		for i, f := range h.Flags {
+			if i > 0 {
+				arr = append(arr, ',')
+			}
+			arr = append(arr, strictjson.MarshalString(f)...)
+		}
+		b.Raw("flags", append(arr, ']'))
+	}
+	return b.Bytes()
 }
 
 // grantAccess starts or extends p's access session.
@@ -285,7 +297,7 @@ func (m *Manager) endAccess(ctx context.Context, p *Peer, notify bool, reason, e
 // a retransmission then is a duplicate, and forgotten when it is answered
 // (heldKey), so that a later one is executed again; no answer to it is
 // cached, errors included.
-func (m *Manager) hold(p *Peer, in *envelope.Inner, key string, volatile bool, now time.Time) {
+func (m *Manager) hold(p *Peer, in *envelope.Inner, key string, volatile bool, flags []string, now time.Time) {
 	rkey := key
 	if volatile {
 		rkey = volatileKey
@@ -311,6 +323,9 @@ func (m *Manager) hold(p *Peer, in *envelope.Inner, key string, volatile bool, n
 		m.st.SeenInner[key] = now
 	}
 	h := &HeldRequest{ID: m.newID(now), DeviceID: p.ID, Key: key, Inner: raw, Created: now, Expires: now.Add(ApprovalTTL)}
+	if p.Kind == KindAgent && len(flags) > 0 {
+		h.Flags = append([]string(nil), flags...) // set by the LEASH policy (§10.11, 0.42.0)
+	}
 	m.st.Held[h.ID] = h
 	exp := envelope.FormatTS(h.Expires)
 	m.notifyApps("approval.pending", approvalPendingBody(h, p, in), now)

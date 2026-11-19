@@ -110,21 +110,7 @@ func (f *Feature) itemRun(s *vault.Session, agent string, rules []itemspec.Agent
 			return nil, errForbidden // a held run without its note: never run unseen
 		}
 		if j.RecordsPin() && !n.shows(j) {
-			// A new referral: past the cap it is throttled as in AgentDecision
-			// (referrals_limited once, a throttled refusal counted). It is
-			// counted before the runtime holds it; should the hold be refused
-			// (limit), the count errs towards the cap.
-			st := f.agent(s, agent)
-			if st.Referred >= MaxReferralsPerHour {
-				if !st.RefLimited {
-					st.RefLimited = true
-					s.Record(vault.Activity{Kind: "leash.referrals_limited", DeviceID: agent, Audit: true, Feed: true, Priority: "high"})
-				}
-				f.refuse(s, agent, st, KindThrottled, ScopeItems)
-				return nil, errForbidden
-			}
-			st.Referred++
-			return nil, vault.ReferAgain(noteOf(j, w.Version).approval())
+			return nil, f.referAgain(s, agent, noteOf(j, w.Version).approval())
 		}
 		if j.RecordsPin() {
 			// The member's approval records the pin even if the field is
@@ -158,4 +144,24 @@ func (f *Feature) recordPin(s *vault.Session, agent string, rules []itemspec.Age
 		Uint("version", next.Version).Bytes())
 	s.Record(vault.Activity{Kind: "leash.item.changed", DeviceID: agent, Ref: r.ItemID, Audit: true})
 	return nil
+}
+
+// referAgain refers an approved agent request again as a new approval
+// held with a (vault.ReferAgain). It is a new referral: past the cap it
+// is throttled as in AgentDecision (referrals_limited once, a throttled
+// refusal counted) and answered forbidden. It is counted before the
+// runtime holds it; should the hold be refused (limit), the count errs
+// towards the cap.
+func (f *Feature) referAgain(s *vault.Session, agent string, a vault.Approval) error {
+	st := f.agent(s, agent)
+	if st.Referred >= MaxReferralsPerHour {
+		if !st.RefLimited {
+			st.RefLimited = true
+			s.Record(vault.Activity{Kind: "leash.referrals_limited", DeviceID: agent, Audit: true, Feed: true, Priority: "high"})
+		}
+		f.refuse(s, agent, st, KindThrottled, ScopeItems)
+		return errForbidden
+	}
+	st.Referred++
+	return vault.ReferAgain(a)
 }

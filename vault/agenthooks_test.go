@@ -160,24 +160,24 @@ func TestAgentApprovalFlags(t *testing.T) {
 	}
 }
 
-// Flags are an agent request's only: a desktop's held step-up request never
-// carries any, whatever is passed.
+// Flags, the previous pin and the note are an agent request's only: a
+// desktop's held step-up request never carries any, whatever is passed.
 func TestApprovalFlagsAgentsOnly(t *testing.T) {
 	d := newDevFixture(t)
 	desk := d.addDevice(t, "desk1", KindDesktop, 0x72)
 	rid, _ := envelope.NewULID(time.Now())
 	d.m.mu.Lock()
 	d.m.hold(desk.peer, &envelope.Inner{ID: rid, Type: "settings.set", TS: time.Now(), Body: []byte(`{}`)},
-		"desk1/"+rid, false, []string{"history"}, time.Now())
+		"desk1/"+rid, false, Approval{Flags: []string{"history"}, PreviousSHA256: "ab", PreviousPath: "/x", Note: json.RawMessage(`{"v":1}`)}, time.Now())
 	var held *HeldRequest
 	for _, h := range d.m.st.Held {
 		held = h
 	}
 	d.m.mu.Unlock()
-	if held == nil || held.Flags != nil {
+	if held == nil || held.Flags != nil || held.PreviousSHA256 != "" || held.PreviousPath != "" || held.Note != nil {
 		t.Fatalf("desktop hold: %+v", held)
 	}
-	if body := approvalPendingBody(held, desk.peer, &envelope.Inner{Type: "settings.set", Body: []byte(`{}`)}); strings.Contains(string(body), "flags") {
+	if body := approvalPendingBody(held, desk.peer, &envelope.Inner{Type: "settings.set", Body: []byte(`{}`)}); strings.Contains(string(body), "flags") || strings.Contains(string(body), "previous") {
 		t.Fatalf("desktop approval.pending: %s", body)
 	}
 }

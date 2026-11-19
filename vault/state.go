@@ -776,6 +776,17 @@ type HeldRequest struct {
 	// Flags are an agent request's approval flags (approval.pending{flags},
 	// §10.11, 0.42.0), set by the LEASH policy when it referred the request.
 	Flags []string `json:"flags,omitempty"`
+	// PreviousSHA256 and PreviousPath are the recorded pin a program_changed
+	// approval shows (approval.pending{previous_sha256, previous_path},
+	// §10.11, 0.85.3); Note is the policy's own record of what it decided
+	// the request under, read back by the handler when an app approves it
+	// (Session.HeldNote), never sent. All three are an agent request's only.
+	PreviousSHA256 string          `json:"previous_sha256,omitempty"`
+	PreviousPath   string          `json:"previous_path,omitempty"`
+	Note           json.RawMessage `json:"note,omitempty"`
+	// Replaces is the approval this one replaces, when an approved agent
+	// request was referred again (approval.pending{replaces}).
+	Replaces string `json:"replaces,omitempty"`
 }
 
 // PeerRelay is a peer's relay address.

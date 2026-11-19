@@ -44,6 +44,9 @@ type fakeItems struct {
 	// ways are the settings per agent and item (the real feature keeps a
 	// copy per inclusion).
 	ways map[[2]string]*itemspec.ItemWays
+	// failSet makes AgentSetWays find no inclusion (as if the item were
+	// withdrawn between the read and the write).
+	failSet bool
 }
 
 func (f *fakeItems) AgentWays(agent string, rules []itemspec.AgentRule, item string) (*itemspec.ItemWays, bool) {
@@ -71,7 +74,7 @@ func (f *fakeItems) AgentMemberWays(agent string, rules []itemspec.AgentRule, it
 }
 
 func (f *fakeItems) AgentSetWays(agent string, rules []itemspec.AgentRule, item string, w *itemspec.ItemWays) bool {
-	if !f.memberIncluded(agent, rules, item) {
+	if f.failSet || !f.memberIncluded(agent, rules, item) {
 		return false
 	}
 	if f.ways == nil {

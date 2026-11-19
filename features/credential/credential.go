@@ -355,6 +355,16 @@ func (f *Feature) endWindow() {
 	f.key, f.keyExp = nil, time.Time{}
 }
 
+// WindowOpen reports whether the unlock window is open, as UseKey would
+// find it, without using the key or extending the window (§3.5.3): for a
+// change that needs the member present but signs nothing (a widening
+// leash.item.set, §10.11).
+func (f *Feature) WindowOpen(now time.Time) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.key != nil && now.Before(f.keyExp) && f.st.Alarm == nil
+}
+
 // UseKey returns the credential key while the unlock window is open and
 // extends the window (§3.5.3). Features that sign with the credential key
 // call it; ok is false outside the window.

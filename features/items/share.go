@@ -372,6 +372,7 @@ func (f *Feature) apply(s *vault.Session, plan []action, reason string) {
 	}
 	var pendOrder, inclOrder []string
 	pend, incl := map[string]*batch{}, map[string]*batch{}
+	var agentIncl [][2]string // (rule, item) newly included for an agent
 	for _, a := range plan {
 		m := f.st.Incl[a.rule.ID]
 		if m == nil {
@@ -391,6 +392,7 @@ func (f *Feature) apply(s *vault.Session, plan []action, reason string) {
 				}
 				s.Record(a.rule.activity("share.withdrawn", id))
 			}
+			f.noteWaysGone(inc, id)
 			delete(m, id)
 		case opPend:
 			m[id] = &Inclusion{State: StatePending, Conn: a.rule.Conn, Agent: a.rule.Agent, At: t}
@@ -404,6 +406,9 @@ func (f *Feature) apply(s *vault.Session, plan []action, reason string) {
 		case opInclude:
 			m[id] = &Inclusion{State: StateIncluded, Conn: a.rule.Conn, Agent: a.rule.Agent, At: t}
 			s.Record(a.rule.activity("share.included", id))
+			if a.rule.Agent != "" {
+				agentIncl = append(agentIncl, [2]string{a.rule.ID, id})
+			}
 			if readable(&a.rule, a.item) {
 				b := incl[a.rule.ID]
 				if b == nil {
@@ -418,6 +423,12 @@ func (f *Feature) apply(s *vault.Session, plan []action, reason string) {
 			delete(f.st.Incl, a.rule.ID)
 		}
 	}
+	// After the whole plan: an agent's new inclusion takes the settings the
+	// agent's other inclusions of the item kept through it (§10.11), else
+	// it starts at ["use"]; then the settings whose last copy went are
+	// announced.
+	f.copyWays(s, agentIncl)
+	f.flushWays(s)
 	for _, rid := range inclOrder {
 		b := incl[rid]
 		f.issue(s, &b.rule, b.items)
@@ -516,11 +527,15 @@ func (f *Feature) expire(s *vault.Session) {
 			known[r.ID] = true
 		}
 	}
-	for id := range f.st.Incl {
+	for _, id := range sortedKeys(f.st.Incl) {
 		if !known[id] {
+			for _, item := range sortedKeys(f.st.Incl[id]) {
+				f.noteWaysGone(f.st.Incl[id][item], item)
+			}
 			delete(f.st.Incl, id)
 		}
 	}
+	f.flushWays(s)
 }
 
 // withdrawRule withdraws every item of a rule and forgets its declines.
@@ -534,8 +549,10 @@ func (f *Feature) withdrawRule(s *vault.Session, r *ruleView) {
 			}
 			s.Record(r.activity("share.withdrawn", id))
 		}
+		f.noteWaysGone(inc, id)
 	}
 	delete(f.st.Incl, r.ID)
+	f.flushWays(s)
 }
 
 // --- share.rule.* (§10.12) ---
@@ -1092,10 +1109,12 @@ func (f *Feature) decide(s *vault.Session, body []byte) (json.RawMessage, error)
 			}
 			s.Record(d.rule.activity("share.withdrawn", d.item))
 		}
+		f.noteWaysGone(inc, d.item)
 		f.st.Incl[d.rule.ID][d.item] = &Inclusion{State: StateDeclined, Conn: d.rule.Conn, Agent: d.rule.Agent, At: t}
 		s.Record(d.rule.activity("share.declined", d.item))
 		note(d.rule.ID, d.item, 1)
 	}
+	f.flushWays(s)
 	sort.Strings(order)
 	for _, id := range order {
 		e := perRule[id]

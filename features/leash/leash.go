@@ -88,6 +88,12 @@ type AgentItems interface {
 	AgentCatalog(agent string, rules []itemspec.AgentRule) []itemspec.Meta
 	AgentRead(agent string, rules []itemspec.AgentRule, itemID string, fields []string) ([]byte, bool)
 	AgentFieldValue(agent string, rules []itemspec.AgentRule, itemID, fieldID string) (string, bool)
+	// The ways to use a secret (0.42.0): the settings of an item the rules
+	// include (nil: absent, ["use"]; ok false if none includes it), stored
+	// on every inclusion of it, and listed per included item.
+	AgentWays(agent string, rules []itemspec.AgentRule, itemID string) (*itemspec.ItemWays, bool)
+	AgentSetWays(agent string, rules []itemspec.AgentRule, itemID string, w *itemspec.ItemWays) bool
+	AgentWaysList(agent string, rules []itemspec.AgentRule) []itemspec.AgentItemWays
 }
 
 // KeyUser gives access to the credential key during the unlock window
@@ -234,6 +240,9 @@ func (f *Feature) Types() []vault.TypeSpec {
 		{Type: "leash.agent.resume", Request: true, From: apps},
 		{Type: "leash.status.get", Request: true, From: agents},
 		{Type: "agent.request", Request: true, From: agents, AgentPolicy: true},
+		// The ways to use a secret (0.42.0, §10.11).
+		{Type: "leash.item.set", Request: true, From: apps},
+		{Type: "leash.item.list", Request: true, From: owners},
 	}
 }
 
@@ -1234,6 +1243,10 @@ func (f *Feature) Handle(_ context.Context, s *vault.Session, in *envelope.Inner
 		return f.listJSON(agent), nil
 	case "agent.request":
 		return f.request(s, in.Body)
+	case "leash.item.set":
+		return f.itemSet(s, in.Body)
+	case "leash.item.list":
+		return f.itemList(s, in.Body)
 	case "leash.status.get":
 		// A fresh status statement for one of the agent's own grants
 		// (§10.11): none for a revoked, expired or suspended one.

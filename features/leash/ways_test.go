@@ -298,15 +298,14 @@ func TestRevealDecision(t *testing.T) {
 	if d, _ := r2.decideS(t0.Add(time.Minute), get); d != vault.AgentDeny || !r2.h.HasActivity("leash.referrals_limited") {
 		t.Fatalf("past the cap: %v", d)
 	}
-	// A reveal throttled by the cap uses nothing of the windows (review
-	// finding 3).
+	// A reveal throttled by the cap uses nothing of the windows.
 	if g2.HourN != counted || g2.HourN != MaxReferralsPerHour {
 		t.Fatalf("windows counted a throttled reveal: %d, before %d", g2.HourN, counted)
 	}
 }
 
 // §10.11: a change of the proxy's header or prefix is not a widening (the
-// value still goes only to the bound hosts; lead's note, GC #14226), so it
+// value still goes only to the bound hosts), so it
 // needs no unlock window; adding a host does.
 func TestItemSetProxyHeaderOutsideWindow(t *testing.T) {
 	r := newRig(t)

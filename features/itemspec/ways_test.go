@@ -264,6 +264,13 @@ func TestWidens(t *testing.T) {
 		"header changed":   `{"ways":["use","run","proxy"],"run":{"programs":[{"program":"git"},{"program":"/usr/bin/gh"}]},"proxy":{"hosts":["api.example.com"],"header":"X-Api-Key"}}`,
 		"absolute to bare": `{"ways":["use","run","proxy"],"run":{"programs":[{"program":"git"},{"program":"gh"}]},"proxy":{"hosts":["api.example.com"],"header":"Authorization"}}`,
 		"absolute + env":   `{"ways":["use","run","proxy"],"run":{"programs":[{"program":"/usr/bin/git","env":["GH_HOST","GH_REPO"]},{"program":"/usr/bin/gh"}]},"proxy":{"hosts":["api.example.com"],"header":"Authorization"}}`,
+		// The bare git replaced by a name that matches it only loosely: a
+		// narrowing needs the exact last element.
+		"bare to /opt/x/GIT":       `{"ways":["use","run","proxy"],"run":{"programs":[{"program":"/opt/x/GIT","env":["GH_HOST"]},{"program":"/usr/bin/gh"}]},"proxy":{"hosts":["api.example.com"],"header":"Authorization"}}`,
+		"bare to /usr/bin/git.exe": `{"ways":["use","run","proxy"],"run":{"programs":[{"program":"/usr/bin/git.exe","env":["GH_HOST"]},{"program":"/usr/bin/gh"}]},"proxy":{"hosts":["api.example.com"],"header":"Authorization"}}`,
+		"bare to git.":             `{"ways":["use","run","proxy"],"run":{"programs":[{"program":"git.","env":["GH_HOST"]},{"program":"/usr/bin/gh"}]},"proxy":{"hosts":["api.example.com"],"header":"Authorization"}}`,
+		"bare to git with a space": `{"ways":["use","run","proxy"],"run":{"programs":[{"program":"git ","env":["GH_HOST"]},{"program":"/usr/bin/gh"}]},"proxy":{"hosts":["api.example.com"],"header":"Authorization"}}`,
+		"bare to GIT":              `{"ways":["use","run","proxy"],"run":{"programs":[{"program":"GIT","env":["GH_HOST"]},{"program":"/usr/bin/gh"}]},"proxy":{"hosts":["api.example.com"],"header":"Authorization"}}`,
 	} {
 		if !Widens(cur, w(body)) {
 			t.Errorf("%s: not a widening", name)
@@ -297,6 +304,19 @@ func TestWidens(t *testing.T) {
 	cur.Run.Each = false
 	if Widens(cur, w(`{"ways":["use","run","proxy"],"run":{"programs":[{"program":"git","env":["GH_HOST"]},{"program":"/usr/bin/gh"}]},"proxy":{"hosts":["api.example.com"],"header":"Authorization"}}`)) {
 		t.Fatal("each true widens")
+	}
+}
+
+// ProgramKey folds / only in a drive path (a letter, then a colon).
+func TestProgramKey(t *testing.T) {
+	if ProgramKey("C:/x/Git.EXE. ") != ProgramKey(win("c:", "x", "git")) {
+		t.Fatal("drive path not folded")
+	}
+	if ProgramKey("/:/a/b") == ProgramKey(win("/:", "a", "b")) {
+		t.Fatal("a POSIX path folded as a drive path")
+	}
+	if ProgramKey("/usr/bin/git") == ProgramKey(win("", "usr", "bin", "git")) {
+		t.Fatal("a POSIX path's / folded")
 	}
 }
 

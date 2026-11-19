@@ -182,8 +182,8 @@ func TestLeashItemRun(t *testing.T) {
 	ap3 := waitEvent(t, a.app, "approval.pending", func(b json.RawMessage) bool {
 		return strings.Contains(string(b), gh) && strings.Contains(string(b), `"flags":["program_changed"]`) && strings.Contains(string(b), `"previous_sha256":"`+shaA+`"`)
 	})
-	if field(t, ap3.Body, "approval_id") == field(t, ap2.Body, "approval_id") {
-		t.Fatal("same approval id")
+	if field(t, ap3.Body, "approval_id") == field(t, ap2.Body, "approval_id") || field(t, ap3.Body, "replaces") != field(t, ap2.Body, "approval_id") {
+		t.Fatalf("new approval: %s", ap3.Body)
 	}
 	if result, err := a.app.ApprovalDecide(ctx, field(t, ap2.Body, "approval_id"), true); err == nil && result == "ok" {
 		t.Fatal("the old approval decided again")

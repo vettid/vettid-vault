@@ -189,6 +189,22 @@ func TestRunReferrals(t *testing.T) {
 	if d, _ := rc.decideS(t0, runBody(rc.wifi, "/usr/bin/git", shaA, "")); d != vault.AgentDeny || g.HourN != hour || g.DayN != day {
 		t.Fatalf("past the cap: %v, windows %d/%d", d, g.HourN, g.DayN)
 	}
+	// A pinned run with each false over its window: referred (no flag), held
+	// with its note; approved, it is answered the value.
+	rw := newRig(t)
+	rw.rule(t, Auto, 0, 1, rw.wifi)
+	rw.setRun(rw.wifi, 1, false, itemspec.Program{Program: "/usr/bin/git", SHA256: shaA, Path: "/usr/bin/git"})
+	pinnedRun := runBody(rw.wifi, "/usr/bin/git", shaA, "")
+	if d, _ := rw.decideS(t0, pinnedRun); d != vault.AgentAllow {
+		t.Fatalf("within the window: %v", d)
+	}
+	d, s := rw.decideS(t0.Add(time.Second), pinnedRun)
+	if d != vault.AgentAsk || len(s.HeldApproval().Flags) != 0 || len(s.HeldApproval().Note) == 0 {
+		t.Fatalf("over the window: %v %+v", d, s.HeldApproval())
+	}
+	if out, err := rw.approved(t0.Add(time.Second), pinnedRun, s.HeldApproval().Note); err != nil || !strings.Contains(string(out), "hunter22") {
+		t.Fatalf("approved over the window: %s %v", out, err)
+	}
 	// An address field cannot be used.
 	r.setRun(r.wifi, 2, false, itemspec.Program{Program: "/usr/bin/git", SHA256: shaA, Path: "/usr/bin/git"})
 	addr := strings.Replace(runBody(r.wifi, "/usr/bin/git", shaA, ""), `"field_id":"f1"`, `"field_id":"f2"`, 1)
@@ -248,6 +264,22 @@ func TestRunApprovalRecordsPin(t *testing.T) {
 	if _, err := r.approved(t0.Add(3*time.Second), changed, s.HeldApproval().Note); err != nil || r.stored(r.wifi).Version != 3 || len(syncKinds(r.h)) != 0 {
 		t.Fatalf("recorded without a pin flag: %v v%d", err, r.stored(r.wifi).Version)
 	}
+	// The pin cannot be stored (the item withdrawn between the read and the
+	// write): the run is refused, nothing read, nothing announced.
+	r.it.failSet = true
+	r.it.ways[[2]string{agent, r.wifi}].Run.Each = false
+	third := runBody(r.wifi, "/usr/bin/git", strings.Repeat("c", 64), "")
+	d, s = r.decideS(t0.Add(3500*time.Millisecond), third)
+	if d != vault.AgentAsk {
+		t.Fatal(d)
+	}
+	r.h.Reset()
+	before := r.it.used[r.wifi]
+	if out, err := r.approved(t0.Add(3500*time.Millisecond), third, s.HeldApproval().Note); err == nil || out != nil || r.it.used[r.wifi] != before ||
+		len(syncKinds(r.h)) != 0 || r.stored(r.wifi).Run.Programs[0].SHA256 != shaB {
+		t.Fatalf("pin not stored: %s %v", out, err)
+	}
+	r.it.failSet = false
 	// An approved run without its note is never run.
 	if _, err := r.approved(t0.Add(4*time.Second), changed, nil); codeOf(err) != "forbidden" {
 		t.Fatalf("no note: %v", err)
@@ -364,6 +396,36 @@ func TestRunSettingsChangedWhileHeld(t *testing.T) {
 	}
 	if _, err := rq.approved(t0, q2, sq2.HeldApproval().Note); !errors.As(err, &ra) || ra.Approval.PreviousPath != "/opt/git" || ra.Approval.PreviousSHA256 != shaA {
 		t.Fatalf("q2: %v", err)
+	}
+	// Held as unbound_program; the member then binds git (no pin yet). The
+	// approval showed an unbound run, not a first run of a bound program:
+	// referred again (program_unrecorded), no pin recorded, nothing read.
+	ru := newRig(t)
+	ru.rule(t, Auto, 0, 3600, ru.wifi)
+	ru.setRun(ru.wifi, 1, false)
+	_, su := ru.decideS(t0, a)
+	if strings.Join(su.HeldApproval().Flags, ",") != "unbound_program" {
+		t.Fatalf("held: %v", su.HeldApproval().Flags)
+	}
+	ru.setRun(ru.wifi, 2, false, itemspec.Program{Program: "git"})
+	if _, err := ru.approved(t0, a, su.HeldApproval().Note); !errors.As(err, &ra) || strings.Join(ra.Approval.Flags, ",") != "program_unrecorded" ||
+		ru.stored(ru.wifi).Run.Programs[0].SHA256 != "" || ru.stored(ru.wifi).Version != 2 || ru.it.used[ru.wifi] != 0 {
+		t.Fatalf("bound while held: %v", err)
+	}
+	// Held pinned (no flag, referred because each is true); the member then
+	// drops the pin. The approval showed no first run: referred again
+	// (program_unrecorded), nothing recorded.
+	rd := newRig(t)
+	rd.rule(t, Auto, 0, 3600, rd.wifi)
+	rd.setRun(rd.wifi, 1, true, itemspec.Program{Program: "git", SHA256: shaA, Path: "/usr/bin/git"})
+	_, sd := rd.decideS(t0, a)
+	if len(sd.HeldApproval().Flags) != 0 {
+		t.Fatalf("held: %v", sd.HeldApproval().Flags)
+	}
+	rd.setRun(rd.wifi, 2, true, itemspec.Program{Program: "git"})
+	if _, err := rd.approved(t0, a, sd.HeldApproval().Note); !errors.As(err, &ra) || strings.Join(ra.Approval.Flags, ",") != "program_unrecorded" ||
+		rd.stored(rd.wifi).Run.Programs[0].SHA256 != "" || rd.it.used[rd.wifi] != 0 {
+		t.Fatalf("pin dropped while held: %v", err)
 	}
 	// The same pin recorded meanwhile: the approval stands.
 	r2 := newRig(t)

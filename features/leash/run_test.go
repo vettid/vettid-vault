@@ -178,6 +178,17 @@ func TestRunReferrals(t *testing.T) {
 	if _, s := r.decideS(t0.Add(time.Second), sh); strings.Join(s.ApprovalFlags(), ",") != "shell,unbound_program" {
 		t.Fatalf("shell -c: %v", s.ApprovalFlags())
 	}
+	// Past the referral cap a referred run is throttled, and nothing is
+	// counted in the windows.
+	rc := newRig(t)
+	gid := rc.rule(t, Auto, 0, 3600, rc.wifi)
+	rc.setRun(rc.wifi, 1, true)
+	rc.f.agent(vault.NewSession(context.Background(), rc.h, vault.PeerInfo{}, t0, nil), agent).Referred = MaxReferralsPerHour
+	g := rc.f.d.Grants[gid]
+	hour, day := g.HourN, g.DayN
+	if d, _ := rc.decideS(t0, runBody(rc.wifi, "/usr/bin/git", shaA, "")); d != vault.AgentDeny || g.HourN != hour || g.DayN != day {
+		t.Fatalf("past the cap: %v, windows %d/%d", d, g.HourN, g.DayN)
+	}
 	// An address field cannot be used.
 	r.setRun(r.wifi, 2, false, itemspec.Program{Program: "/usr/bin/git", SHA256: shaA, Path: "/usr/bin/git"})
 	addr := strings.Replace(runBody(r.wifi, "/usr/bin/git", shaA, ""), `"field_id":"f1"`, `"field_id":"f2"`, 1)
@@ -295,10 +306,64 @@ func TestRunSettingsChangedWhileHeld(t *testing.T) {
 	if _, err := r.approved(t0, a, sa2.HeldApproval().Note); !errors.As(err, &ra) || ra.Approval.PreviousSHA256 != shaB {
 		t.Fatalf("a2: %v", err)
 	}
-	// Past the cap: forbidden, nothing held, nothing counted.
+	// Past the cap: forbidden, nothing held, nothing counted but the
+	// throttled refusal; the member is told once.
 	st.Referred = MaxReferralsPerHour
-	if _, err := r.approved(t0, a, sa2.HeldApproval().Note); codeOf(err) != "forbidden" || st.Referred != MaxReferralsPerHour {
+	r.h.Reset()
+	if _, err := r.approved(t0, a, sa2.HeldApproval().Note); codeOf(err) != "forbidden" || st.Referred != MaxReferralsPerHour ||
+		!r.h.HasActivity("leash.referrals_limited") || st.Counts[KindThrottled] == 0 {
 		t.Fatalf("past the cap: %v", err)
+	}
+	// Two runs held as program_changed against the same pin P0 (a): the
+	// first approved records its file; the second's approval showed P0, not
+	// the new pin, so it is referred again, showing the new one.
+	rc := newRig(t)
+	rc.rule(t, Auto, 0, 3600, rc.wifi)
+	rc.setRun(rc.wifi, 1, false, itemspec.Program{Program: "git", SHA256: shaA, Path: "/usr/bin/git"})
+	shaC := strings.Repeat("c", 64)
+	b1 := runBody(rc.wifi, "/usr/bin/git", shaB, "")
+	c1 := runBody(rc.wifi, "/usr/bin/git", shaC, "")
+	_, sb1 := rc.decideS(t0, b1)
+	_, sc1 := rc.decideS(t0, c1)
+	if strings.Join(sc1.HeldApproval().Flags, ",") != "program_changed" || sc1.HeldApproval().PreviousSHA256 != shaA {
+		t.Fatalf("c1 held: %+v", sc1.HeldApproval())
+	}
+	if _, err := rc.approved(t0, b1, sb1.HeldApproval().Note); err != nil || rc.stored(rc.wifi).Run.Programs[0].SHA256 != shaB {
+		t.Fatalf("b1: %v", err)
+	}
+	used := rc.it.used[rc.wifi]
+	if _, err := rc.approved(t0, c1, sc1.HeldApproval().Note); !errors.As(err, &ra) || ra.Approval.PreviousSHA256 != shaB ||
+		rc.stored(rc.wifi).Run.Programs[0].SHA256 != shaB || rc.it.used[rc.wifi] != used {
+		t.Fatalf("c1 approved against another pin: %v", err)
+	}
+	// Moved instead of changed: the same, through the previous path.
+	rp := newRig(t)
+	rp.rule(t, Auto, 0, 3600, rp.wifi)
+	rp.setRun(rp.wifi, 1, false, itemspec.Program{Program: "git", SHA256: shaA, Path: "/usr/bin/git"})
+	m1 := runBody(rp.wifi, "/opt/git", shaB, "")
+	m2 := runBody(rp.wifi, "/opt/x/git", shaB, "")
+	_, sm1 := rp.decideS(t0, m1)
+	_, sm2 := rp.decideS(t0, m2)
+	if _, err := rp.approved(t0, m1, sm1.HeldApproval().Note); err != nil {
+		t.Fatal(err)
+	}
+	// m2 showed the previous pin (A, /usr/bin/git); it is now (B, /opt/git).
+	if _, err := rp.approved(t0, m2, sm2.HeldApproval().Note); !errors.As(err, &ra) || ra.Approval.PreviousPath != "/opt/git" {
+		t.Fatalf("m2: %v", err)
+	}
+	// Only the previous path differs (same hash, another folder).
+	rq := newRig(t)
+	rq.rule(t, Auto, 0, 3600, rq.wifi)
+	rq.setRun(rq.wifi, 1, false, itemspec.Program{Program: "git", SHA256: shaA, Path: "/usr/bin/git"})
+	q1 := runBody(rq.wifi, "/opt/git", shaA, "")
+	q2 := runBody(rq.wifi, "/opt/y/git", shaA, "")
+	_, sq1 := rq.decideS(t0, q1)
+	_, sq2 := rq.decideS(t0, q2)
+	if _, err := rq.approved(t0, q1, sq1.HeldApproval().Note); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rq.approved(t0, q2, sq2.HeldApproval().Note); !errors.As(err, &ra) || ra.Approval.PreviousPath != "/opt/git" || ra.Approval.PreviousSHA256 != shaA {
+		t.Fatalf("q2: %v", err)
 	}
 	// The same pin recorded meanwhile: the approval stands.
 	r2 := newRig(t)

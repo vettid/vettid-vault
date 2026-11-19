@@ -110,14 +110,25 @@ func (f *Feature) itemRun(s *vault.Session, agent string, rules []itemspec.Agent
 			return nil, errForbidden // a held run without its note: never run unseen
 		}
 		if j.RecordsPin() && !n.shows(j) {
+			// A new referral: past the cap it is throttled as in AgentDecision
+			// (referrals_limited once, a throttled refusal counted). It is
+			// counted before the runtime holds it; should the hold be refused
+			// (limit), the count errs towards the cap.
 			st := f.agent(s, agent)
 			if st.Referred >= MaxReferralsPerHour {
+				if !st.RefLimited {
+					st.RefLimited = true
+					s.Record(vault.Activity{Kind: "leash.referrals_limited", DeviceID: agent, Audit: true, Feed: true, Priority: "high"})
+				}
+				f.refuse(s, agent, st, KindThrottled, ScopeItems)
 				return nil, errForbidden
 			}
 			st.Referred++
 			return nil, vault.ReferAgain(noteOf(j, w.Version).approval())
 		}
 		if j.RecordsPin() {
+			// The member's approval records the pin even if the field is
+			// then gone (the answer below is not_found).
 			if err := f.recordPin(s, agent, rules, r, w, j); err != nil {
 				return nil, err
 			}

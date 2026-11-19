@@ -143,6 +143,11 @@ func approvalPendingBody(h *HeldRequest, p *Peer, in *envelope.Inner) []byte {
 		// (0.85.3) the pin a program_changed run differs from (§10.11).
 		b.String("previous_sha256", h.PreviousSHA256).String("previous_path", h.PreviousPath)
 	}
+	if h.Replaces != "" {
+		// (0.85.3) the approval this one replaces: it was approved, and the
+		// request referred again (§10.11).
+		b.String("replaces", h.Replaces)
+	}
 	return b.Bytes()
 }
 
@@ -345,6 +350,7 @@ func (m *Manager) hold(p *Peer, in *envelope.Inner, key string, volatile bool, a
 		if len(a.Note) > 0 {
 			h.Note = a.Note
 		}
+		h.Replaces = a.replaces // a re-referral names the approval it replaces
 	}
 	m.st.Held[h.ID] = h
 	exp := envelope.FormatTS(h.Expires)
@@ -398,15 +404,29 @@ func (m *Manager) hApprovalDecide(ctx context.Context, s *Session, in *envelope.
 	}
 	delete(m.st.Held, aid)
 	m.dirty = true
-	m.notifyDevices("sync.event", strictjson.NewBuilder().String("kind", "approval.decided").String("approval_id", aid).
-		Bool("approved", approve).Bytes(), s.peer.ID, s.now)
+	decided := func(referred bool) {
+		b := strictjson.NewBuilder().String("kind", "approval.decided").String("approval_id", aid).Bool("approved", approve)
+		if referred {
+			b.Bool("referred", true)
+		}
+		m.notifyDevices("sync.event", b.Bytes(), s.peer.ID, s.now)
+	}
 	result := "denied"
 	if !approve {
+		decided(false)
 		m.answerHeld(h, "denied", s.now)
 		m.record(Activity{Kind: "approval.denied", DeviceID: h.DeviceID, Ref: aid, Audit: true}, s.now)
+		return strictjson.NewBuilder().String("result", result).Bytes(), nil
+	}
+	// An approval whose request was referred again (§10.11, 0.85.3) sent
+	// nothing: it is audited approval.referred, not approval.granted, and
+	// the new approval names it (replaces).
+	result = m.runHeld(ctx, h, s.now)
+	decided(result == "referred")
+	if result == "referred" {
+		m.record(Activity{Kind: "approval.referred", DeviceID: h.DeviceID, Ref: aid, Audit: true}, s.now)
 	} else {
 		m.record(Activity{Kind: "approval.granted", DeviceID: h.DeviceID, Ref: aid, Audit: true}, s.now)
-		result = m.runHeld(ctx, h, s.now)
 	}
 	return strictjson.NewBuilder().String("result", result).Bytes(), nil
 }
@@ -462,7 +482,9 @@ func (m *Manager) runHeld(ctx context.Context, h *HeldRequest, now time.Time) st
 		// under a new approval; this one was decided once and is gone.
 		// Nothing is answered to the agent yet.
 		volatile := te.spec.Volatile && te.spec.Request && in.Re == ""
-		id, code := m.hold(p, in, h.Key, volatile, ra.Approval, now)
+		a := ra.Approval
+		a.replaces = h.ID
+		id, code := m.hold(p, in, h.Key, volatile, a, now)
 		if code != "" {
 			return code
 		}

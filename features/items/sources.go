@@ -246,7 +246,7 @@ func (f *Feature) AgentCatalog(agent string, rules []itemspec.AgentRule) []items
 	var out []itemspec.AgentEntry
 	for _, it := range f.sortedItems() {
 		if incs, _ := f.agentIncls(agent, rules, it.ID); len(incs) > 0 {
-			out = append(out, itemspec.AgentEntry{Meta: itemspec.MetaOf(it, nil), Ways: waysOf(incs).Clone()})
+			out = append(out, itemspec.AgentEntry{Meta: itemspec.MetaOf(it, nil), Ways: settle(incs).Clone()})
 		}
 	}
 	return out

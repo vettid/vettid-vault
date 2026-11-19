@@ -708,7 +708,9 @@ func (f *Feature) AgentDecision(s *vault.Session, typ string, body json.RawMessa
 		}
 	}
 	delete(st.Cool, scope)
-	if scope == ScopeItems && item != "" {
+	if reveal && st.Referred >= MaxReferralsPerHour {
+		gs = nil // past the referral cap it is throttled below: nothing counted in the windows
+	} else if scope == ScopeItems && item != "" {
 		// item.get and item.use (0.23.0, §10.11 decision step 2): allowed
 		// only if every items.read grant whose rule includes the item is
 		// within both of its windows, and counted on each (the strictest

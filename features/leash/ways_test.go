@@ -224,16 +224,6 @@ func (r *rig) decideS(now time.Time, body string) (vault.AgentDecision, *vault.S
 	return r.f.AgentDecision(s, "agent.request", json.RawMessage(body)), s
 }
 
-func (r *rig) refusedCount() int {
-	n := 0
-	for _, a := range r.h.Activities {
-		if a.Kind == KindRefused || a.Kind == KindRefused+".summary" {
-			n++
-		}
-	}
-	return n
-}
-
 // §10.11 (0.42.0): item.get only with reveal. Without it: way_not_allowed
 // {ways}, counted as refused, with the scope's cooldown. With it: the
 // windows count it and it is always referred, flagged history, within the
@@ -303,8 +293,36 @@ func TestRevealDecision(t *testing.T) {
 			t.Fatalf("referral %d: %v", i, d)
 		}
 	}
+	g2 := r2.f.d.Grants[r2.f.itemRules(agent, t0)[0].ID]
+	counted := g2.HourN
 	if d, _ := r2.decideS(t0.Add(time.Minute), get); d != vault.AgentDeny || !r2.h.HasActivity("leash.referrals_limited") {
 		t.Fatalf("past the cap: %v", d)
+	}
+	// A reveal throttled by the cap uses nothing of the windows (review
+	// finding 3).
+	if g2.HourN != counted || g2.HourN != MaxReferralsPerHour {
+		t.Fatalf("windows counted a throttled reveal: %d, before %d", g2.HourN, counted)
+	}
+}
+
+// §10.11: a change of the proxy's header or prefix is not a widening (the
+// value still goes only to the bound hosts; lead's note, GC #14226), so it
+// needs no unlock window; adding a host does.
+func TestItemSetProxyHeaderOutsideWindow(t *testing.T) {
+	r := newRig(t)
+	r.rule(t, Auto, 0, 60, r.wifi)
+	if res := r.itemSet(`{"agent_id":"dev-agent","item_id":"` + r.wifi + `","ways":["use","proxy"],"proxy":{"hosts":["api.example.com"],"header":"Authorization","prefix":"Bearer "}}`); !res.OK() {
+		t.Fatal(res.Code)
+	}
+	r.w.open = false
+	if res := r.itemSet(`{"agent_id":"dev-agent","item_id":"` + r.wifi + `","version":1,"ways":["use","proxy"],"proxy":{"hosts":["api.example.com"],"header":"X-Api-Key"}}`); !res.OK() {
+		t.Fatalf("header change outside the window: %q", res.Code)
+	}
+	if w := r.stored(r.wifi); w.Proxy.Header != "X-Api-Key" || w.Proxy.Prefix != "" || w.Version != 2 {
+		t.Fatalf("stored: %+v", w.Proxy)
+	}
+	if res := r.itemSet(`{"agent_id":"dev-agent","item_id":"` + r.wifi + `","version":2,"ways":["use","proxy"],"proxy":{"hosts":["api.example.com","b.example.com"],"header":"X-Api-Key"}}`); res.Code != "credential_locked" {
+		t.Fatalf("host added outside the window: %q", res.Code)
 	}
 }
 

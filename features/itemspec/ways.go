@@ -385,9 +385,12 @@ func parseProxy(raw []byte) (*ProxyWays, error) {
 //
 // Binding an unbound item (programs from empty to a list) narrows, unless
 // an entry lists env names: an unbound item allows no env at all. An
-// absolute entry that replaces a bare one with the same last element
+// absolute entry whose last element is exactly a bare entry's program
 // narrows too (the bare name matched it and more), unless it lists a name
-// the bare entry did not.
+// the bare entry did not. Only an exact last element counts: a bare name
+// matches "its last path element" (§10.11), and the looser comparison of
+// the no-two-match rule (case, .exe, trailing dots) must not decide a
+// narrowing.
 //
 // A change of the proxy's header is a widening (not in the spec's list;
 // an erratum): some hosts echo or log a header, so a new header name can
@@ -414,7 +417,7 @@ func Widens(cur, next *ItemWays) bool {
 				q = Program{} // bound now: narrower, with no env allowed before
 			case IsAbsProgram(p.Program):
 				// A bare entry this absolute one narrows, if there is one.
-				if q, ok = findBare(cur.Run.Programs, ProgramKey(LastElement(p.Program))); !ok {
+				if q, ok = findBare(cur.Run.Programs, LastElement(p.Program)); !ok {
 					return true
 				}
 			default:
@@ -447,10 +450,10 @@ func Widens(cur, next *ItemWays) bool {
 	return false
 }
 
-// findBare finds the bare entry with the program key key.
-func findBare(ps []Program, key string) (Program, bool) {
+// findBare finds the bare entry whose program is exactly name.
+func findBare(ps []Program, name string) (Program, bool) {
 	for _, p := range ps {
-		if !IsAbsProgram(p.Program) && ProgramKey(p.Program) == key {
+		if !IsAbsProgram(p.Program) && p.Program == name {
 			return p, true
 		}
 	}
@@ -520,7 +523,7 @@ func ProgramKey(p string) string {
 	if i := strings.LastIndexAny(k, "/"+string(rune(backslash))); i >= 0 {
 		dir, last = k[:i+1], k[i+1:]
 	}
-	if len(dir) >= 3 && dir[1] == ':' { // a drive path (IsAbsProgram)
+	if len(dir) >= 3 && dir[0] >= 'a' && dir[0] <= 'z' && dir[1] == ':' { // a drive path (IsAbsProgram; k is lower case)
 		dir = strings.ReplaceAll(dir, "/", string(rune(backslash)))
 	}
 	last = strings.TrimRight(last, " .")

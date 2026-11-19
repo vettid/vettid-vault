@@ -62,7 +62,7 @@ const (
 const ScopeItems = leashwire.ScopeItems
 
 // opScope maps agent.request operations to their scope.
-var opScope = map[string]string{"catalog": ScopeItems, "item.get": ScopeItems, "item.use": ScopeItems}
+var opScope = map[string]string{"catalog": ScopeItems, "item.get": ScopeItems, "item.use": ScopeItems, "item.run": ScopeItems}
 
 // Delegable are the owner types a grant may give an agent (§10.11).
 // connScoped are those whose body carries connection_id, which a grant's
@@ -181,6 +181,7 @@ const (
 	KindThrottled = "leash.throttled" // never written singly
 	KindRead      = "leash.item.read"
 	KindUsed      = "leash.item.used"
+	KindRun       = "leash.item.run" // (0.42.0)
 )
 
 // Cooldown is one scope's refusal backoff.
@@ -446,6 +447,8 @@ type Request struct {
 	FieldID string
 	Action  string
 	Data    []byte
+	// Run is an item.run's request (0.42.0, §10.11); FieldID is its field.
+	Run *itemspec.Run
 }
 
 // ParseRequest parses an agent.request body strictly.
@@ -489,6 +492,12 @@ func ParseRequest(body []byte) (*Request, error) {
 		if r.Data, err = o.Base64("data", -1); err != nil || len(r.Data) == 0 || len(r.Data) > MaxUseData {
 			return nil, errBad
 		}
+	}
+	if r.Op == "item.run" {
+		if r.Run, err = itemspec.ParseRun(o); err != nil {
+			return nil, errBad
+		}
+		r.FieldID = r.Run.FieldID
 	}
 	return r, nil
 }
@@ -698,7 +707,15 @@ func (f *Feature) AgentDecision(s *vault.Session, typ string, body json.RawMessa
 	// do not hold reveal is answered way_not_allowed {ways} and counted as
 	// refused, with its cooldown; one that does is decided as an items.read
 	// request and then always referred, flagged history (§10.11).
+	//
+	// An item.run is judged by the item's settings (0.42.0, 0.85.3):
+	// way_not_allowed, program_not_allowed and env_not_allowed are counted
+	// as refused, with the cooldown; otherwise it is decided as an
+	// items.read request and referred when the settings say so (each,
+	// unbound, no pin match, a shell or an interpreter), with its flags.
 	reveal := false
+	var run *itemspec.RunJudgement
+	var runVersion uint64
 	if typ == "agent.request" && scope == ScopeItems && item != "" {
 		if r, err := ParseRequest(body); err == nil && r.Op == "item.get" {
 			w, _ := f.items.AgentWays(agent, rulesOf(gs), item)
@@ -708,10 +725,20 @@ func (f *Feature) AgentDecision(s *vault.Session, typ string, body json.RawMessa
 				return f.refuse(s, agent, st, KindRefused, scope)
 			}
 			reveal = true
+		} else if err == nil && r.Op == "item.run" {
+			w, _ := f.items.AgentWays(agent, rulesOf(gs), item)
+			j := itemspec.JudgeRun(w, r.Run)
+			if j.Refusal != "" {
+				coolDown(st, scope, now)
+				s.RefuseAgentWith(runRefusal(j, w))
+				return f.refuse(s, agent, st, KindRefused, scope)
+			}
+			run, runVersion = &j, w.Version
 		}
 	}
+	refer := reveal || run != nil && run.Refer
 	delete(st.Cool, scope)
-	if reveal && st.Referred >= MaxReferralsPerHour {
+	if refer && st.Referred >= MaxReferralsPerHour {
 		gs = nil // past the referral cap it is throttled below: nothing counted in the windows
 	} else if scope == ScopeItems && item != "" {
 		// item.get and item.use (0.23.0, §10.11 decision step 2): allowed
@@ -739,7 +766,7 @@ func (f *Feature) AgentDecision(s *vault.Session, typ string, body json.RawMessa
 				g.HourN++
 				g.DayN++
 			}
-			if !reveal {
+			if !refer {
 				f.note(s, agent, st, vault.Activity{Kind: KindAllowed, Ref: gs[0].ID})
 				return vault.AgentAllow
 			}
@@ -779,6 +806,9 @@ func (f *Feature) AgentDecision(s *vault.Session, typ string, body json.RawMessa
 	st.Referred++
 	if reveal {
 		s.FlagApproval([]string{FlagHistory})
+	}
+	if run != nil {
+		holdRun(s, *run, runVersion)
 	}
 	return vault.AgentAsk
 }
@@ -1356,6 +1386,8 @@ func (f *Feature) request(s *vault.Session, body []byte) (json.RawMessage, error
 		}
 		f.note(s, agent, f.agent(s, agent), vault.Activity{Kind: KindRead, Ref: r.ItemID, Feed: true})
 		return agentContent(content), nil
+	case "item.run":
+		return f.itemRun(s, agent, rules, r)
 	case "item.use":
 		value, ok := f.items.AgentFieldValue(agent, rules, r.ItemID, r.FieldID)
 		if !ok {

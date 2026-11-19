@@ -429,6 +429,13 @@ func NewSession(ctx context.Context, h Host, from PeerInfo, now time.Time, in *e
 	return &Session{host: h, from: from, ctx: ctx, now: now, inner: in}
 }
 
+// NewApprovedSession is NewSession for a held request an app approved,
+// held with note (Approved, HeldNote): how feature tests drive a handler
+// as the Manager's runHeld does.
+func NewApprovedSession(ctx context.Context, h Host, from PeerInfo, now time.Time, in *envelope.Inner, note json.RawMessage) *Session {
+	return &Session{host: h, from: from, ctx: ctx, now: now, inner: in, approved: true, heldNote: append(json.RawMessage(nil), note...)}
+}
+
 // PeerInfo is a read-only view of a principal.
 type PeerInfo struct {
 	ID      string

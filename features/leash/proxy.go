@@ -89,7 +89,14 @@ func (f *Feature) itemProxy(s *vault.Session, agent string, rules []itemspec.Age
 		return nil, errBad
 	}
 	f.note(s, agent, f.agent(s, agent), vault.Activity{Kind: KindProxy, Ref: r.ItemID, Feed: true})
-	return strictjson.NewBuilder().String("item_id", r.ItemID).String("field_id", r.FieldID).String("value", value).
-		String("header", j.Header).String("prefix", j.Prefix).String("host", j.Host).
-		String("expires_at", envelope.FormatTS(expires)).Bytes(), nil
+	answer := func(withValue bool) json.RawMessage {
+		b := strictjson.NewBuilder().String("item_id", r.ItemID).String("field_id", r.FieldID)
+		if withValue {
+			b = b.String("value", value)
+		}
+		return b.String("header", j.Header).String("prefix", j.Prefix).String("host", j.Host).
+			String("expires_at", envelope.FormatTS(expires)).Bytes()
+	}
+	s.CacheResponseAs(answer(false)) // no value in the response cache (#14595)
+	return answer(true), nil
 }

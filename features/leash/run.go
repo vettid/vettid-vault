@@ -125,6 +125,7 @@ func (f *Feature) itemRun(s *vault.Session, agent string, rules []itemspec.Agent
 		return nil, errNotFound
 	}
 	f.note(s, agent, f.agent(s, agent), vault.Activity{Kind: KindRun, Ref: r.ItemID, Feed: true})
+	s.CacheResponseAs(runCached(r.ItemID, r.FieldID)) // no value in the response cache (#14595)
 	return strictjson.NewBuilder().String("item_id", r.ItemID).String("field_id", r.FieldID).String("value", value).Bytes(), nil
 }
 

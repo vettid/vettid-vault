@@ -71,6 +71,9 @@ func (f *Feature) itemProxy(s *vault.Session, agent string, rules []itemspec.Age
 	if err := json.Unmarshal(s.HeldNote(), &n); err != nil || n.Host == "" {
 		return nil, errForbidden // a held proxy without its note: never sent unseen
 	}
+	// Compared exactly, header case included, though a change of the
+	// header's case alone is not a widening (itemspec.Widens): the member
+	// approves what the approval showed, and asking again costs little.
 	if n != proxyNoteOf(j) {
 		return nil, f.referAgain(s, agent, vault.Approval{Note: proxyNoteOf(j).raw()})
 	}

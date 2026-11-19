@@ -137,10 +137,12 @@ func TestProxyRefusals(t *testing.T) {
 
 // §10.11: seconds is 60–3,600 (bad_request otherwise), default 900, and
 // the proxy is cut to the access session's end; with no session left it
-// is session_required, nothing read.
+// is session_required, nothing read. A member item.proxy does not define
+// (a header or a prefix the approval would show) is bad_request too.
 func TestProxySeconds(t *testing.T) {
 	r := proxyRig(t)
-	for _, extra := range []string{`,"seconds":59`, `,"seconds":3601`, `,"seconds":0`, `,"seconds":-1`, `,"seconds":"900"`, `,"seconds":900.5`} {
+	for _, extra := range []string{`,"seconds":59`, `,"seconds":3601`, `,"seconds":0`, `,"seconds":-1`, `,"seconds":"900"`, `,"seconds":900.5`,
+		`,"header":"X-Harmless"`, `,"prefix":""`, `,"value":"x"`, `,"fields":["f1"]`} {
 		if res := featuretest.Call(r.f, r.h, t0, vault.KindAgent, "agent.request", proxyBody(r.wifi, "f1", "api.example.com", extra)); res.Code != "bad_request" {
 			t.Fatalf("%s: %q", extra, res.Code)
 		}
@@ -187,8 +189,9 @@ func TestProxyHeaderSafeValue(t *testing.T) {
 		r := proxyRig(t)
 		r.it.items[r.wifi].Fields[0].Value = json.RawMessage(strictjson.MarshalString(v))
 		res, err := r.approved(t0, proxyBody(r.wifi, "f1", "api.example.com", ""), json.RawMessage(heldNote))
-		if codeOf(err) != "bad_request" || res != nil || r.h.HasActivity(KindProxy) {
-			t.Fatalf("%q: %v %s", v, err, res)
+		// The use is counted: the value was read to be judged (lead's call).
+		if codeOf(err) != "bad_request" || res != nil || r.h.HasActivity(KindProxy) || r.it.used[r.wifi] != 1 {
+			t.Fatalf("%q: %v %s used=%d", v, err, res, r.it.used[r.wifi])
 		}
 	}
 	r := proxyRig(t)

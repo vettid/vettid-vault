@@ -25,11 +25,21 @@ type ProxyRequest struct {
 // ErrProxy is a malformed item.proxy (bad_request).
 var ErrProxy = errors.New("itemspec: bad item.proxy")
 
+// proxyMembers are the members an item.proxy request may have.
+var proxyMembers = map[string]bool{"op": true, "item_id": true, "field_id": true, "host": true, "seconds": true}
+
 // ParseProxyRequest parses an item.proxy request's members other than op
 // and item_id (§10.11): field_id; host, a proxy host by the binding's
 // rule (whether the item binds it is JudgeProxy's); seconds, 60–3,600,
-// default 900.
+// default 900. Any other member is refused: the approval shows the held
+// body, so an agent must not put a header or a prefix there that the
+// vault would not use.
 func ParseProxyRequest(o strictjson.Object) (*ProxyRequest, error) {
+	for k := range o {
+		if !proxyMembers[k] {
+			return nil, ErrProxy
+		}
+	}
 	p := &ProxyRequest{}
 	var err error
 	if p.FieldID, err = o.String("field_id"); err != nil || !ValidFieldID(p.FieldID) {

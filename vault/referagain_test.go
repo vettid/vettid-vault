@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -71,6 +72,7 @@ func TestReferAgain(t *testing.T) {
 	app := d.self()
 	pol := &referType{decision: AgentAsk}
 	d.m.addFeature(pol)
+	sinkOf(d)
 	ag := d.addDevice(t, "agent1", KindAgent, 0x70)
 	ag.peer.Access = &AccessSession{ID: "s", Expires: time.Now().Add(time.Hour)}
 
@@ -113,8 +115,12 @@ func TestReferAgain(t *testing.T) {
 	if ap2 == nil || bodyStr(t, ap2, "approval_id") == oldID || bodyStr(t, ap2, "previous_sha256") != "bb" || bodyStr(t, ap2, "previous_path") != "/usr/bin/b" {
 		t.Fatalf("second approval.pending: %+v", ap2)
 	}
-	if f, _ := flagsOf(t, ap2); f != `["program_changed"]` {
-		t.Fatalf("second flags: %s", f)
+	if f, _ := flagsOf(t, ap2); f != `["program_changed"]` || bodyStr(t, ap2, "replaces") != oldID {
+		t.Fatalf("second flags: %s, replaces %q", f, bodyStr(t, ap2, "replaces"))
+	}
+	// Audited as referred, not granted: nothing was sent.
+	if a := d.audits("approval.referred"); len(a) != 1 || a[0].Ref != oldID || len(d.audits("approval.granted")) != 0 {
+		t.Fatalf("audit: referred %+v, granted %d", a, len(d.audits("approval.granted")))
 	}
 	if find(in["agent1"], ofType("approval.waiting")) == nil {
 		t.Fatal("the agent was not told of the new approval")
@@ -139,6 +145,104 @@ func TestReferAgain(t *testing.T) {
 	}
 	if r := find(in["agent1"], reply(id)); r == nil || r.Status != envelope.StatusOK || pol.notes[1] != `{"v":2}` {
 		t.Fatalf("not answered: %+v (notes %q)", r, pol.notes)
+	}
+	if g := d.audits("approval.granted"); len(g) != 1 || g[0].Ref != bodyStr(t, ap2, "approval_id") {
+		t.Fatalf("granted: %+v", g)
+	}
+}
+
+// The sync.event approval.decided other apps get says referred when the
+// approved request was referred again, and not otherwise.
+func TestReferAgainSyncEvent(t *testing.T) {
+	d := newDevFixture(t)
+	app := d.self()
+	other := d.addDevice(t, "dev2", KindApp, 0x71)
+	pol := &referType{decision: AgentAsk, again: &Approval{Flags: []string{"shell"}}}
+	d.m.addFeature(pol)
+	ag := d.addDevice(t, "agent1", KindAgent, 0x70)
+	ag.peer.Access = &AccessSession{ID: "s", Expires: time.Now().Add(time.Hour)}
+	d.sendAs(ag, "test.refer", `{}`)
+	ap := find(d.inbox(app, ag, other)["dev1"], ofType("approval.pending"))
+	aid := bodyStr(t, ap, "approval_id")
+	d.sendAs(app, "approval.decide", `{"approval_id":"`+aid+`","approve":true}`)
+	in := d.inbox(app, ag, other)
+	ev := syncEvents(t, in["dev2"], "approval.decided")
+	if len(ev) != 1 || !strings.Contains(ev[0], `"approval_id":"`+aid+`"`) || !strings.Contains(ev[0], `"approved":true`) || !strings.Contains(ev[0], `"referred":true`) {
+		t.Fatalf("approval.decided: %v", ev)
+	}
+	// Approved and run: no referred member.
+	pol.again = nil
+	ap2 := find(in["dev1"], ofType("approval.pending"))
+	d.sendAs(app, "approval.decide", `{"approval_id":"`+bodyStr(t, ap2, "approval_id")+`","approve":true}`)
+	ev = syncEvents(t, d.inbox(app, ag, other)["dev2"], "approval.decided")
+	if len(ev) != 1 || strings.Contains(ev[0], "referred") {
+		t.Fatalf("approval.decided after a run: %v", ev)
+	}
+}
+
+// referDesk is a desktop step-up type whose handler returns what the test
+// sets and records what it was told.
+type referDesk struct {
+	again  *Approval
+	notes  []string
+	approv []bool
+}
+
+func (p *referDesk) Name() string                   { return "referdesk" }
+func (p *referDesk) Load(json.RawMessage) error     { return nil }
+func (p *referDesk) Save() (json.RawMessage, error) { return nil, nil }
+func (p *referDesk) Types() []TypeSpec {
+	return []TypeSpec{{Type: "test.desk", Request: true, From: []string{KindApp, KindDesktop}, DesktopApproval: true}}
+}
+func (p *referDesk) Handle(_ context.Context, s *Session, _ *envelope.Inner) (json.RawMessage, error) {
+	p.notes = append(p.notes, string(s.HeldNote()))
+	p.approv = append(p.approv, s.Approved())
+	if p.again != nil {
+		return nil, ReferAgain(*p.again)
+	}
+	return json.RawMessage(`{}`), nil
+}
+
+// The agent-only gates: a desktop's held request, approved, runs with no
+// note (whatever it was held with), and a ReferAgain from its handler is
+// answered internal and holds nothing.
+func TestReferAgainAgentsOnly(t *testing.T) {
+	d := newDevFixture(t)
+	app := d.self()
+	pol := &referDesk{again: &Approval{Flags: []string{"shell"}}}
+	d.m.addFeature(pol)
+	desk := d.addDevice(t, "desk1", KindDesktop, 0x72)
+	desk.peer.Access = &AccessSession{ID: "s", Expires: time.Now().Add(time.Hour)}
+	rid, _ := envelope.NewULID(time.Now())
+	d.m.mu.Lock()
+	h := &HeldRequest{}
+	aid, code := d.m.hold(desk.peer, &envelope.Inner{ID: rid, Type: "test.desk", TS: time.Now(), Body: []byte(`{}`)},
+		"desk1/"+rid, false, Approval{Note: json.RawMessage(`{"v":1}`)}, time.Now())
+	if code == "" {
+		h = d.m.st.Held[aid]
+		h.Note = json.RawMessage(`{"v":1}`) // as if stored: a desktop's handler is still never given it
+	}
+	d.m.mu.Unlock()
+	if code != "" {
+		t.Fatal(code)
+	}
+	d.inbox(app, desk) // the first approval.pending
+	did := d.sendAs(app, "approval.decide", `{"approval_id":"`+aid+`","approve":true}`)
+	in := d.inbox(app, desk)
+	if r := find(in["dev1"], reply(did)); r == nil || bodyStr(t, r, "result") != "internal" {
+		t.Fatalf("decide: %+v", r)
+	}
+	if len(pol.notes) != 1 || pol.notes[0] != "" || !pol.approv[0] {
+		t.Fatalf("desktop handler saw note %q approved %v", pol.notes, pol.approv)
+	}
+	if ap := find(in["dev1"], ofType("approval.pending")); ap != nil && bodyStr(t, ap, "approval_id") != aid {
+		t.Fatalf("a desktop request was held again: %s", ap.Body)
+	}
+	d.m.mu.Lock()
+	n := len(d.m.st.Held)
+	d.m.mu.Unlock()
+	if n != 0 {
+		t.Fatal("held")
 	}
 }
 

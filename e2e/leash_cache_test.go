@@ -126,11 +126,13 @@ func TestLeashValueNotCached(t *testing.T) {
 	notReferred("at once") // Events() holds every case's
 
 	// After the way is removed, the agent is suspended and its session
-	// ends, a retransmission still gets only the copy without the value
-	// (OK: run again, it would be refused way_not_allowed, forbidden or
-	// session_required, which is what shows it was not), is not referred,
-	// and changes no audit count, item settings (the pin's version) or
-	// grants.
+	// ends, a retransmission still gets only the copy without the value,
+	// and is not referred. The proof that it was not run again is that it
+	// is answered OK at all: run again, it would be refused
+	// (way_not_allowed, forbidden or session_required). The audit count,
+	// the item's settings (the pin's version) and the grants are checked
+	// as well, but they are weaker: note() audits only the first of a
+	// kind in each window, and the grant list shows no use counts.
 	unchanged := func(step string) {
 		t.Helper()
 		audit, err := a.app.AuditSearchAll(ctx, client.AuditQuery{}, false, 0)

@@ -151,3 +151,25 @@ func TestCacheNoValueBackstop(t *testing.T) {
 		}
 	}
 }
+
+// Through Handle: a value op answered without a copy (answerFor stands in
+// for a handler that forgot it) is cached as {}, never as the answer.
+func TestCacheNoValueThroughHandle(t *testing.T) {
+	r := newRig(t)
+	r.rule(t, Auto, 0, 60, r.wifi)
+	r.reveal(r.wifi)
+	r.f.answerFor = func(*vault.Session, *Request) (json.RawMessage, error) {
+		return json.RawMessage(`{"item_id":"x","fields":[{"value":"hunter22"}]}`), nil
+	}
+	body := `{"op":"item.get","item_id":"` + r.wifi + `"}`
+	in := &envelope.Inner{ID: "01JB2Z6V9K3M4N5P6Q7R8S9T0V", Type: "agent.request", TS: t0, Body: json.RawMessage(body)}
+	from, _ := r.h.Device(agent)
+	s := vault.NewApprovedSession(context.Background(), r.h, from, t0, in, nil)
+	res, err := r.f.Handle(context.Background(), s, in)
+	if err != nil || !strings.Contains(string(res), "hunter22") {
+		t.Fatalf("answer: %v %s", err, res)
+	}
+	if got := string(s.CachedResponseBody()); got != `{}` {
+		t.Fatalf("cached %q", got)
+	}
+}

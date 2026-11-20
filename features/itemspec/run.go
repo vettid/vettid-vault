@@ -196,15 +196,46 @@ var shells = map[string]bool{
 	"runghc": true, "ghci": true, "escript": true, "erl": true, "elixir": true, "iex": true, "qjs": true, "jsc": true,
 	"ipython": true, "bpython": true, "jython": true, "micropython": true, "ts-node": true, "tsx": true, "irb": true,
 	"jruby": true,
+	// Added in the second round (#14676): loaders, multicall binaries,
+	// Homebrew's g-prefixed coreutils, WSL and Git for Windows launchers,
+	// remote shells, Windows debuggers and script hosts, process wrappers,
+	// terminals and schedulers, and more shells and evaluators.
+	"ld.so": true, "wine64": true, "coreutils": true, "genv": true, "gtimeout": true, "gxargs": true, "gnice": true,
+	"gnohup": true, "gstdbuf": true, "gchroot": true, "gtime": true, "wslg": true, "git-bash": true, "git-cmd": true,
+	"debian": true, "kali": true, "plink": true, "winrs": true, "mosh": true, "autossh": true, "rsh": true,
+	"ssh-agent": true, "cdb": true, "ntsd": true, "windbg": true, "cmstp": true, "regasm": true, "regsvcs": true,
+	"odbcconf": true, "msxsl": true, "bitsadmin": true, "scriptrunner": true, "tini": true, "dumb-init": true,
+	"gosu": true, "su-exec": true, "runcon": true, "rlwrap": true, "eatmydata": true, "proot": true, "ccache": true,
+	"xcrun": true, "dtrace": true, "dtruss": true, "systemd-cat": true, "systemd-inhibit": true, "xterm": true,
+	"gnome-terminal": true, "konsole": true, "alacritty": true, "kitty": true, "at": true, "crontab": true,
+	"oksh": true, "pdksh": true, "lksh": true, "hush": true, "sash": true, "rc": true, "es": true,
+	"bb": true, "ghc": true, "ocaml": true, "raku": true, "gjs": true, "d8": true, "tcc": true, "emacs": true,
+	"sqlite3": true, "dc": true, "truffleruby": true, "graalpy": true,
+}
+
+// versionedShells are the shells whose names also come with a version
+// number appended (bash5, zsh5, pwsh7, py3, ksh93): flagged with any
+// trailing digits and dots removed, and only these, so the rule stays
+// tight.
+var versionedShells = map[string]bool{
+	"sh": true, "bash": true, "zsh": true, "dash": true, "ksh": true, "mksh": true, "oksh": true, "pdksh": true,
+	"lksh": true, "fish": true, "csh": true, "tcsh": true, "ash": true, "yash": true, "pwsh": true,
+	"powershell": true, "py": true, "pyw": true,
 }
 
 // shellPrefixes are shells (flag shell, always referred) whose names carry
-// versions or variants: lua5.4 and luajit, pypy3.10, tclsh8.6, wish8.6,
-// javaw, busybox.static, gawk-5.3.0, bash-static, zsh-5.9, pwsh-preview,
-// powershell_ise (§10.11,
-// #14596). By prefix, as the interpreters: looser only adds flags.
+// versions or variants (§10.11, #14596): lua5.4 and luajit, pypy3.10,
+// tclsh8.6, wish8.6, javaw, busybox.static, gawk-5.3.0, bash-static,
+// zsh-5.9, pwsh-preview, powershell_ise, ld-linux-x86-64.so.2,
+// ld-musl-x86_64.so.1, qemu-x86_64, ubuntu2204. By prefix, as the
+// interpreters: looser only adds flags.
 var shellPrefixes = []string{"lua", "pypy", "tclsh", "wish", "java", "busybox", "gawk-", "bash-", "mksh-", "zsh-", "ksh-",
-	"dash-", "pwsh-", "powershell_", "powershell-"}
+	"dash-", "pwsh-", "powershell_", "powershell-", "ld-linux", "ld-musl", "qemu-", "ubuntu"}
+
+// scriptExts are the endings of Windows scripts, which run in cmd.exe or
+// PowerShell by nature (npx.cmd, groovy.bat, x.ps1): flagged shell
+// whatever their name (#14676).
+var scriptExts = []string{".cmd", ".bat", ".ps1"}
 
 // shellSuffixes: any awk (nawk, goawk, original-awk, busybox-awk).
 var shellSuffixes = []string{"awk"}
@@ -223,11 +254,23 @@ var inlineArgs = map[string]bool{"-c": true, "-e": true, "-E": true, "-r": true,
 // adds flags.
 func programBase(program string) string { return ProgramKey(LastElement(program)) }
 
+// flagBase is programBase also without a final .com (Windows runs x.com
+// for x as it runs x.exe); for the flags only, never a binding's key.
+func flagBase(program string) string {
+	b := programBase(program)
+	return strings.TrimRight(strings.TrimSuffix(b, ".com"), " .")
+}
+
 // IsShell reports whether program is one of the shells, launchers or
 // evaluators (§10.11: flag shell).
 func IsShell(program string) bool {
-	b := programBase(program)
-	if shells[b] {
+	for _, e := range scriptExts {
+		if strings.HasSuffix(programBase(program), e) {
+			return true
+		}
+	}
+	b := flagBase(program)
+	if shells[b] || versionedShells[strings.TrimRight(b, "0123456789.")] {
 		return true
 	}
 	for _, p := range shellPrefixes {
@@ -246,7 +289,7 @@ func IsShell(program string) bool {
 // IsInterpreter reports whether program's base starts with one of the
 // interpreters' names (§10.11).
 func IsInterpreter(program string) bool {
-	b := programBase(program)
+	b := flagBase(program)
 	for _, i := range interpreters {
 		if strings.HasPrefix(b, i) {
 			return true

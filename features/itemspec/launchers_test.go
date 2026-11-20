@@ -27,6 +27,13 @@ var launchers = []string{
 	"escript", "erl", "elixir", "iex", "qjs", "jsc",
 	"run0", "sudo-rs", "gsudo", "psexec", "psexec64", "socat", "nc", "ncat", "netcat", "wine", "mono", "mintty",
 	"ipython", "bpython", "jython", "micropython", "ts-node", "tsx", "irb", "jruby",
+	"ld.so", "wine64", "coreutils", "genv", "gtimeout", "gxargs", "gnice", "gnohup", "gstdbuf", "gchroot", "gtime",
+	"wslg", "git-bash", "git-cmd", "debian", "kali", "plink", "winrs", "mosh", "autossh", "rsh", "ssh-agent", "cdb",
+	"ntsd", "windbg", "cmstp", "regasm", "regsvcs", "odbcconf", "msxsl", "bitsadmin", "scriptrunner", "tini",
+	"dumb-init", "gosu", "su-exec", "runcon", "rlwrap", "eatmydata", "proot", "ccache", "xcrun", "dtrace", "dtruss",
+	"systemd-cat", "systemd-inhibit", "xterm", "gnome-terminal", "konsole", "alacritty", "kitty", "at", "crontab",
+	"oksh", "pdksh", "lksh", "hush", "sash", "rc", "es", "bb", "ghc", "ocaml", "raku", "gjs", "d8", "tcc", "emacs",
+	"sqlite3", "dc", "truffleruby", "graalpy",
 }
 
 func TestLaunchersAreShells(t *testing.T) {
@@ -42,12 +49,20 @@ func TestLaunchersAreShells(t *testing.T) {
 		"/usr/bin/wish8.6", win("C:", "Java", "bin", "javaw.exe"), "/usr/bin/gawk-5.3.0", "/bin/bash-static",
 		"/bin/mksh-static", "/usr/bin/pwsh-preview", win("C:", "x", "powershell_ise.exe"), "/usr/bin/nawk",
 		"/usr/bin/goawk", "/usr/bin/original-awk", "/bin/busybox-awk", "/bin/busybox.static", "/usr/bin/zsh-5.9",
-		"/bin/ksh-93", "/bin/dash-0.5", "/usr/bin/Rscript"} {
+		"/bin/ksh-93", "/bin/dash-0.5", "/usr/bin/Rscript", "/usr/bin/powershell-preview",
+		"/lib64/ld-linux-x86-64.so.2", "/lib/ld-musl-x86_64.so.1", "/usr/bin/qemu-x86_64",
+		win("C:", "x", "ubuntu2204.exe"),
+		// Versions appended to a shell's name.
+		"/usr/local/bin/bash5", "/usr/bin/zsh5", "/opt/pwsh7", "/usr/bin/py3", "/usr/bin/py3.12", "/bin/sh2",
+		// Windows scripts, whatever their name, and .com as .exe.
+		win("C:", "npm", "npx.cmd"), win("C:", "x", "X.BAT"), win("C:", "x", "y.ps1"), win("C:", "x", "tool.cmd. "),
+		win("C:", "x", "cmd.COM"), win("C:", "x", "bash5.com")} {
 		if !IsShell(p) {
 			t.Errorf("%s is not flagged shell", p)
 		}
 	}
-	for _, p := range []string{"/usr/bin/git", "/usr/bin/gh", "/usr/bin/pydoc", "/usr/bin/rsync", "/usr/bin/sshd-x", "/usr/bin/sudoers"} {
+	for _, p := range []string{"/usr/bin/git", "/usr/bin/gh", "/usr/bin/pydoc", "/usr/bin/rsync", "/usr/bin/sshd-x", "/usr/bin/sudoers",
+		win("C:", "x", "git.com"), "/usr/bin/bashful", "/usr/bin/py-spy", "/usr/bin/cmdline", "/usr/bin/x.cmdx"} {
 		if IsShell(p) {
 			t.Errorf("%s is flagged shell", p)
 		}

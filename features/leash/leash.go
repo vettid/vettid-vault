@@ -215,6 +215,10 @@ type Feature struct {
 	keys  KeyUser
 	items AgentItems
 	d     data
+	// answerFor, when set (by this package's tests only), answers in place
+	// of answer, so a test can answer a value op without a cached copy
+	// and see request's backstop cache {}.
+	answerFor func(*vault.Session, *Request) (json.RawMessage, error)
 }
 
 // New returns the feature; keys is the credential feature, items the
@@ -1389,11 +1393,13 @@ func (f *Feature) request(s *vault.Session, body []byte) (json.RawMessage, error
 	if err != nil {
 		return nil, err
 	}
-	answer, err := f.answer(s, r)
+	answerFor := f.answer
+	if f.answerFor != nil {
+		answerFor = f.answerFor
+	}
+	answer, err := answerFor(s, r)
 	if err == nil {
-		// Every handler sets its own copy today, so only
-		// TestCacheNoValueBackstop exercises this, on the helper itself.
-		cacheNoValue(s, r.Op)
+		cacheNoValue(s, r.Op) // TestCacheNoValueThroughHandle
 	}
 	return answer, err
 }

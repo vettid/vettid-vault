@@ -12,15 +12,18 @@ import (
 // response cache, before any session, suspension, grant or settings check,
 // for 24 hours; so the copy kept there holds no value. It still tells the
 // agent the request was handled; to get the value it asks again, as a new
-// request (counted, decided and referred as usual).
+// request (counted, decided and referred as usual). Every copy carries
+// "withheld": true, and a live answer never does, so a connector has one
+// mark to go by: a notes-only item's copy has no field without a value
+// to mark it (owner decision a, #15273).
 
 // getCached is an item.get answer's cached copy: the item's id, name and
-// category, and its fields without their values. Notes are left out: the
-// item model keeps them with the values.
+// category, its fields without their values, and "withheld": true. Notes
+// are left out: the item model keeps them with the values.
 func getCached(answer []byte) json.RawMessage {
 	o, err := strictjson.ParseObject(answer)
 	if err != nil {
-		return emptyObject // never the answer itself
+		return withheldOnly // never the answer itself
 	}
 	b := strictjson.NewBuilder()
 	for _, k := range []string{"item_id", "name", "category"} {
@@ -31,7 +34,7 @@ func getCached(answer []byte) json.RawMessage {
 	if raw, ok := o["fields"]; ok {
 		fields, err := strictjson.AsArray(raw)
 		if err != nil {
-			return emptyObject
+			return withheldOnly
 		}
 		// Each field's members as sent, in the answer's order, without
 		// value: raw members, so nothing is re-encoded.
@@ -39,7 +42,7 @@ func getCached(answer []byte) json.RawMessage {
 		for i, fr := range fields {
 			f, err := strictjson.AsObject(fr)
 			if err != nil {
-				return emptyObject
+				return withheldOnly
 			}
 			if i > 0 {
 				arr = append(arr, ',')
@@ -54,12 +57,15 @@ func getCached(answer []byte) json.RawMessage {
 		}
 		b.Raw("fields", append(arr, ']'))
 	}
-	return b.Bytes()
+	return b.Bool("withheld", true).Bytes()
 }
 
-// runCached is an item.run answer's cached copy: {item_id, field_id}.
+// runCached is an item.run answer's cached copy: {item_id, field_id,
+// withheld: true}.
 func runCached(item, field string) json.RawMessage {
-	return strictjson.NewBuilder().String("item_id", item).String("field_id", field).Bytes()
+	return strictjson.NewBuilder().String("item_id", item).String("field_id", field).Bool("withheld", true).Bytes()
 }
 
-var emptyObject = json.RawMessage(`{}`)
+// withheldOnly is the copy kept when no other can be made: it still says
+// the request was handled and its value withheld.
+var withheldOnly = json.RawMessage(`{"withheld":true}`)

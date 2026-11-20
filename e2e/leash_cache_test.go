@@ -72,7 +72,8 @@ func TestLeashValueNotCached(t *testing.T) {
 	}
 	var sent []sentReq
 	// retransmit sends s again and checks the answer is its copy without
-	// the value; notReferred, that no approval was asked since.
+	// the value, marked "withheld"; notReferred, that no approval was asked
+	// since.
 	retransmit := func(s sentReq, step string) {
 		t.Helper()
 		if _, err := agent.SendWithID(ctx, s.id, "agent.request", s.raw); err != nil {
@@ -80,7 +81,7 @@ func TestLeashValueNotCached(t *testing.T) {
 		}
 		again, err := agent.AwaitResponse(ctx, s.id)
 		if err != nil || !again.OK() || strings.Contains(string(again.Body()), secret) || strings.Contains(string(again.Body()), `"value"`) ||
-			!strings.Contains(string(again.Body()), `"item_id":"`+item+`"`) {
+			!strings.Contains(string(again.Body()), `"item_id":"`+item+`"`) || !strings.Contains(string(again.Body()), `"withheld":true`) {
 			t.Fatalf("%s, %s: retransmission: %v %+v", s.op, step, err, again)
 		}
 		for _, m := range s.cached {
@@ -113,7 +114,7 @@ func TestLeashValueNotCached(t *testing.T) {
 			t.Fatalf("%s: approve: %q %v", c.op, result, err)
 		}
 		first, err := agent.AwaitResponse(ctx, id)
-		if err != nil || !first.OK() || !strings.Contains(string(first.Body()), secret) {
+		if err != nil || !first.OK() || !strings.Contains(string(first.Body()), secret) || strings.Contains(string(first.Body()), "withheld") {
 			t.Fatalf("%s: first answer: %v %+v", c.op, err, first)
 		}
 		sent = append(sent, sentReq{c.op, id, raw, c.cached})

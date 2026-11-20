@@ -136,18 +136,18 @@ func TestItemGetApprovedCachedWithoutValue(t *testing.T) {
 	from, _ := r.h.Device(agent)
 	s := vault.NewApprovedSession(context.Background(), r.h, from, t0, in, held.HeldApproval().Note)
 	res, err := r.f.Handle(context.Background(), s, in)
-	if err != nil || !strings.Contains(string(res), "hunter22") {
+	if err != nil || !strings.Contains(string(res), "hunter22") || strings.Contains(string(res), "withheld") {
 		t.Fatalf("answer: %v %s", err, res)
 	}
 	c := string(s.CachedResponseBody())
 	if c == "" || strings.Contains(c, "hunter22") || strings.Contains(c, `"value"`) || strings.Contains(c, `"notes"`) ||
-		!strings.Contains(c, `"item_id":"`+r.wifi+`"`) {
+		!strings.Contains(c, `"item_id":"`+r.wifi+`"`) || !strings.HasSuffix(c, `,"withheld":true}`) {
 		t.Fatalf("cached %s", c)
 	}
 }
 
-// A value op whose handler set no copy is cached as {"withheld":true}; one that did keeps
-// its copy; other ops are cached as answered.
+// A value op whose handler set no copy is cached as {"withheld":true}; one
+// that did keeps its copy; other ops are cached as answered.
 func TestCacheNoValueBackstop(t *testing.T) {
 	r := newRig(t)
 	from, _ := r.h.Device(agent)

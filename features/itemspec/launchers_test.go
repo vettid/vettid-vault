@@ -57,7 +57,14 @@ func TestLaunchersAreShells(t *testing.T) {
 		// Windows scripts and .com by name, as .exe (owner decision b, #14880).
 		win("C:", "npm", "npx.cmd"), win("C:", "npm", "PNPX.CMD"), win("C:", "npm", "tsx.cmd. "),
 		win("C:", "x", "groovy.bat"), win("C:", "x", "scala.BAT"), win("C:", "x", "wsl.ps1"), win("C:", "x", "bash5.cmd"), win("C:", "x", "cmd.COM"),
-		win("C:", "x", "bash5.com")} {
+		win("C:", "x", "bash5.com"),
+		// Stacked endings, and the trim after each (#14925 L1, L2).
+		win("C:", "x", "bash.exe.cmd"), win("C:", "x", "bash.cmd.bat"), win("C:", "x", "npx.cmd.cmd"),
+		win("C:", "x", "bash.exe.com"), win("C:", "x", "npx.cmd.ps1"), win("C:", "x", "cmd.com.bat"),
+		win("C:", "x", "bash .cmd"), win("C:", "x", "npx..cmd"),
+		// Versions and prefixes as scripts.
+		win("C:", "x", "py3.12.cmd"), win("C:", "x", "d8.cmd"), win("C:", "x", "ksh93.bat"),
+		win("C:", "x", "powershell-preview.cmd")} {
 		if !IsShell(p) {
 			t.Errorf("%s is not flagged shell", p)
 		}
@@ -83,6 +90,26 @@ func TestPinnedLauncherReferred(t *testing.T) {
 		want := RunJudgement{Entry: e, Bound: true, PinMatch: true, Refer: true, Flags: []string{FlagShell}}
 		if !reflect.DeepEqual(got, want) {
 			t.Errorf("%s:\n got %+v\nwant %+v", n, got, want)
+		}
+	}
+}
+
+// On Windows a pinned npx.cmd with each false is referred; a pinned
+// npm.cmd is not (owner decision b, #14880).
+func TestPinnedScriptsByName(t *testing.T) {
+	for _, c := range []struct {
+		program string
+		refer   bool
+	}{{win("C:", "npm", "npx.cmd"), true}, {win("C:", "npm", "npm.cmd"), false}} {
+		e := Program{Program: c.program, SHA256: hashA, Path: c.program}
+		got := JudgeRun(&ItemWays{Version: 3, Ways: []string{WayUse, WayRun}, Run: &RunWays{Programs: []Program{e}}},
+			runOf(c.program, hashA, []string{"x", "publish"}))
+		want := RunJudgement{Entry: e, Bound: true, PinMatch: true, Refer: c.refer}
+		if c.refer {
+			want.Flags = []string{FlagShell}
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("%s: got %+v, want %+v", c.program, got, want)
 		}
 	}
 }

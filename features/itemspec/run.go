@@ -232,12 +232,12 @@ var versionedShells = map[string]bool{
 var shellPrefixes = []string{"lua", "pypy", "tclsh", "wish", "java", "busybox", "gawk-", "bash-", "mksh-", "zsh-", "ksh-",
 	"dash-", "pwsh-", "powershell_", "powershell-", "ld-linux", "ld-musl", "qemu-", "ubuntu"}
 
-// flagExts are the endings ignored, as .exe is, when a program's name is
-// compared with the lists: .com, and the Windows scripts .cmd, .bat and
-// .ps1 (npx.cmd is npx; npm.cmd is npm, an ordinary program: owner
-// decision b, #14880). A .cmd or .bat run's argv passes through cmd.exe,
-// which parses it again; that is the connector's to refuse (A3.8).
-var flagExts = []string{".com", ".cmd", ".bat", ".ps1"}
+// flagExts are the endings ignored when a program's name is compared with
+// the lists: .exe, .com, and the Windows scripts .cmd, .bat and .ps1
+// (npx.cmd is npx; npm.cmd is npm, an ordinary program: owner decision b,
+// #14880). A .cmd or .bat run's argv passes through cmd.exe, which parses
+// it again; that is the connector's to refuse (A3.8a).
+var flagExts = []string{".exe", ".com", ".cmd", ".bat", ".ps1"}
 
 // shellSuffixes: any awk (nawk, goawk, original-awk, busybox-awk).
 var shellSuffixes = []string{"awk"}
@@ -256,13 +256,17 @@ var inlineArgs = map[string]bool{"-c": true, "-e": true, "-E": true, "-r": true,
 // adds flags.
 func programBase(program string) string { return ProgramKey(LastElement(program)) }
 
-// flagBase is programBase also without one final flagExts ending; for
-// the flags only, never a binding's key.
+// flagBase is programBase without any number of final flagExts endings
+// (bash.exe.cmd, npx.cmd.ps1), the trailing dots and spaces trimmed after
+// each; for the flags only, never a binding's key.
 func flagBase(program string) string {
 	b := programBase(program)
-	for _, e := range flagExts {
-		if strings.HasSuffix(b, e) {
-			return strings.TrimRight(strings.TrimSuffix(b, e), " .")
+	for again := true; again; {
+		again = false
+		for _, e := range flagExts {
+			if strings.HasSuffix(b, e) {
+				b, again = strings.TrimRight(strings.TrimSuffix(b, e), " ."), true
+			}
 		}
 	}
 	return b

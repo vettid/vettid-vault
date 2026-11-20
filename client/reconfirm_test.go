@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/vettid/vettid-vault/vms/envelope"
 	"github.com/vettid/vettid-vault/vms/handshake"
 )
 
@@ -122,9 +123,20 @@ func vaultConfirms(v *fakeVault) int {
 // Under Persist the hs.confirm sent again is queued in the outbox: a
 // failed deposit leaves it queued and it is retried; while it waits no
 // second copy is queued, even 12 days on.
-func TestDeviceReconfirmQueuedPersist(t *testing.T) {
+func TestDeviceReconfirmQueuedPersist(t *testing.T) { reconfirmQueued(t, false) }
+
+// The same with only Config.PersistBatch set.
+func TestDeviceReconfirmQueuedPersistBatch(t *testing.T) { reconfirmQueued(t, true) }
+
+func reconfirmQueued(t *testing.T, batch bool) {
 	ctx := context.Background()
 	r, v, d, clk := reconfirmPaired(t, true)
+	if batch {
+		d.mu.Lock()
+		d.cfg.Persist = nil
+		d.cfg.PersistBatch = func(st []byte, _ []*envelope.Inner) error { return keep(new([]byte), r)(st) }
+		d.mu.Unlock()
+	}
 	if n := vaultConfirms(v); n != 1 {
 		t.Fatalf("setup: %d hs.confirm", n)
 	}

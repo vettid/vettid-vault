@@ -125,7 +125,7 @@ func (d *Device) tickConfirmLocked(ctx context.Context) {
 			return
 		}
 	}
-	if d.cfg.Persist == nil {
+	if !d.persists() {
 		d.sendConfirm(ctx)
 		return
 	}

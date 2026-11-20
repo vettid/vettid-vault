@@ -89,7 +89,8 @@ type Config struct {
 	// Persist covers what the client records while handling (keys and
 	// sessions, tokens, device.paired, the msg_ids seen); the responses
 	// and events it hands to the caller stay in memory as before, so
-	// what the caller makes of them is the caller's to save.
+	// what the caller makes of them is the caller's to save (or, with
+	// PersistBatch, saved in the same write).
 	//
 	// Nothing a batch brought reaches the caller before the batch is
 	// saved: its responses and events are held back from the waiting
@@ -106,8 +107,28 @@ type Config struct {
 	// answered token_revoked makes the device refused (ErrRefused,
 	// Refused): it sends nothing more to that mailbox (§8.6).
 	Persist func(state []byte) error
+	// PersistBatch, if set, is used instead of Persist, with everything
+	// Persist's contract says, and is also given batch: the responses
+	// and events handled and not yet saved, oldest first (this batch's,
+	// and those of earlier batches whose save failed, which it is given
+	// again). Nothing of them is acknowledged before it returns nil, so
+	// a caller that keeps what it makes of them in the same save loses
+	// none of it to a crash (AGENT-PLAN §7.1 AV1: the agent connector's
+	// grants, access session and unlink). batch is nil when nothing is
+	// held (a save of the state alone, such as a queued hs.confirm). It is
+	// the caller's own slice, but the *Inner values in it are shared: the
+	// same values go to the waiting calls and Events once the save
+	// succeeds, as with Persist, so never modify them, and copy what you
+	// keep. As with Events, a response may appear twice (an answer and
+	// its replay, §8.2), and a response also reaches its waiting call:
+	// key what you derive on ID and Re. Like Persist, it must not call
+	// Poll, Deliver or the waiting calls. After an error the next Poll
+	// calls it again before it collects, with the same messages (and any
+	// that Deliver handled since).
+	PersistBatch func(state []byte, batch []*envelope.Inner) error
 	// RunError, if set, receives each error of a Poll that Run makes
-	// (a Persist error, a collect error, ErrRefused, ErrOutboxDropped).
+	// (a Persist or PersistBatch error, a collect error, ErrRefused,
+	// ErrOutboxDropped).
 	// Run keeps collecting after it, with a backoff.
 	RunError func(error)
 }
@@ -1041,10 +1062,10 @@ func (d *Device) Run(ctx context.Context) error {
 }
 
 // Poll collects once from the device's mailbox and processes what arrived.
-// With Config.Persist set, it first deposits what waits in the outbox,
-// then handles the batch, calls Persist, deposits the batch's outbox
-// entries and acknowledges the batch; a Persist error is returned and
-// leaves the batch unacknowledged. Polls never overlap: a Poll waits for
+// With Config.Persist (or PersistBatch) set, it first deposits what waits
+// in the outbox, then handles the batch, calls Persist (or PersistBatch),
+// deposits the batch's outbox entries and acknowledges the batch; a save
+// error is returned and leaves the batch unacknowledged. Polls never overlap: a Poll waits for
 // the one in progress (or for ctx to end).
 // While Run runs, Poll returns ErrRunning: Run is the one collector.
 func (d *Device) Poll(ctx context.Context) error {
@@ -1078,7 +1099,7 @@ func (d *Device) poll(ctx context.Context, skip func() bool) error {
 		d.wakeLocked()
 		d.mu.Unlock()
 	}()
-	if d.cfg.Persist != nil {
+	if d.persists() {
 		return d.pollPersist(ctx)
 	}
 	d.mu.Lock()
@@ -1116,7 +1137,8 @@ func (d *Device) poll(ctx context.Context, skip func() bool) error {
 	return ferr
 }
 
-// pollPersist is Poll with Config.Persist: save before acknowledging
+// pollPersist is Poll with Config.Persist or PersistBatch: save before
+// acknowledging
 // (§8.3). A message of the batch that is collected again, after a
 // Persist error or a crash between Persist and the acks, is skipped by
 // the msg_id dedupe (State.Seen, saved with the batch's effects) and
@@ -1210,19 +1232,29 @@ func (d *Device) handleBatch(ctx context.Context, msgs []relayclient.Message) (b
 	return handled, unacked
 }
 
-// saveLocked calls Persist with the state; sem is held. On success
-// the outbox entries it holds may be deposited and the held responses
-// and events reach the waiting calls; on failure the device stays dirty.
+// persists reports whether a save hook is set (Config.Persist or
+// Config.PersistBatch): Poll and Deliver then save before acknowledging.
+func (d *Device) persists() bool { return d.cfg.Persist != nil || d.cfg.PersistBatch != nil }
+
+// saveLocked calls Persist (or PersistBatch, with the held responses and
+// events) with the state; sem is held. On success the outbox entries it
+// holds may be deposited and the held responses and events reach the
+// waiting calls; on failure the device stays dirty.
 func (d *Device) saveLocked() error {
 	d.mu.Lock()
 	d.export()
 	state, err := json.Marshal(d.st)
 	queued := d.nextSeq
+	batch := append([]*envelope.Inner(nil), d.held...)
 	d.mu.Unlock()
 	if err != nil {
 		return err
 	}
-	err = d.cfg.Persist(state)
+	if d.cfg.PersistBatch != nil {
+		err = d.cfg.PersistBatch(state, batch)
+	} else {
+		err = d.cfg.Persist(state)
+	}
 	suite.Wipe(state)
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -1248,8 +1280,8 @@ func (d *Device) emit(in *envelope.Inner) {
 	d.events = append(d.events, in)
 }
 
-// PersistError returns the last Persist error while what the device has
-// handled is not saved (nil once a Persist succeeds). The waiting calls
+// PersistError returns the last Persist (or PersistBatch) error while
+// what the device has handled is not saved (nil once a Persist succeeds). The waiting calls
 // also return it, joined to their context's error, when their context
 // ends while it is set.
 func (d *Device) PersistError() error {
@@ -1495,11 +1527,12 @@ func outboxBackoff(n int) time.Duration {
 }
 
 // Deliver processes one message as if collected (in-process tests).
-// With Config.Persist it is handled as a batch of one: saved (the error,
+// With Config.Persist or PersistBatch it is handled as a batch of one:
+// saved (the error,
 // if any, is PersistError, and the next Poll saves again), then its
 // deposits are made.
 func (d *Device) Deliver(ctx context.Context, m relayclient.Message) {
-	if d.cfg.Persist == nil {
+	if !d.persists() {
 		d.mu.Lock()
 		defer d.mu.Unlock()
 		d.handle(ctx, m)

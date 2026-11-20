@@ -58,13 +58,15 @@ jobs:
           go-version-file: go.mod
       - name: govulncheck v1.9.0
         env:
-          GOOS: linux
-          GOARCH: ${{ matrix.goarch }}
+          ARCH: ${{ matrix.goarch }}
           TAGS: ${{ matrix.tags }}
         run: |
+          # Built for the runner, then run with the build's GOOS/GOARCH (they
+          # set which files it loads, not what it runs on).
+          go install golang.org/x/vuln/cmd/govulncheck@v1.9.0
           args=(-show verbose)
           if [ -n "$TAGS" ]; then args+=(-tags "$TAGS"); fi
-          go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 "${args[@]}" ./...
+          GOOS=linux GOARCH="$ARCH" "$(go env GOPATH)/bin/govulncheck" "${args[@]}" ./...
 
   issue:
     # One issue for all findings: opened, or commented on while open; a

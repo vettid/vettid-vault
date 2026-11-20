@@ -232,10 +232,12 @@ var versionedShells = map[string]bool{
 var shellPrefixes = []string{"lua", "pypy", "tclsh", "wish", "java", "busybox", "gawk-", "bash-", "mksh-", "zsh-", "ksh-",
 	"dash-", "pwsh-", "powershell_", "powershell-", "ld-linux", "ld-musl", "qemu-", "ubuntu"}
 
-// scriptExts are the endings of Windows scripts, which run in cmd.exe or
-// PowerShell by nature (npx.cmd, groovy.bat, x.ps1): flagged shell
-// whatever their name (#14676).
-var scriptExts = []string{".cmd", ".bat", ".ps1"}
+// flagExts are the endings ignored, as .exe is, when a program's name is
+// compared with the lists: .com, and the Windows scripts .cmd, .bat and
+// .ps1 (npx.cmd is npx; npm.cmd is npm, an ordinary program: owner
+// decision b, #14880). A .cmd or .bat run's argv passes through cmd.exe,
+// which parses it again; that is the connector's to refuse (A3.8).
+var flagExts = []string{".com", ".cmd", ".bat", ".ps1"}
 
 // shellSuffixes: any awk (nawk, goawk, original-awk, busybox-awk).
 var shellSuffixes = []string{"awk"}
@@ -254,21 +256,21 @@ var inlineArgs = map[string]bool{"-c": true, "-e": true, "-E": true, "-r": true,
 // adds flags.
 func programBase(program string) string { return ProgramKey(LastElement(program)) }
 
-// flagBase is programBase also without a final .com (Windows runs x.com
-// for x as it runs x.exe); for the flags only, never a binding's key.
+// flagBase is programBase also without one final flagExts ending; for
+// the flags only, never a binding's key.
 func flagBase(program string) string {
 	b := programBase(program)
-	return strings.TrimRight(strings.TrimSuffix(b, ".com"), " .")
+	for _, e := range flagExts {
+		if strings.HasSuffix(b, e) {
+			return strings.TrimRight(strings.TrimSuffix(b, e), " .")
+		}
+	}
+	return b
 }
 
 // IsShell reports whether program is one of the shells, launchers or
 // evaluators (§10.11: flag shell).
 func IsShell(program string) bool {
-	for _, e := range scriptExts {
-		if strings.HasSuffix(programBase(program), e) {
-			return true
-		}
-	}
 	b := flagBase(program)
 	if shells[b] || versionedShells[strings.TrimRight(b, "0123456789.")] {
 		return true

@@ -54,15 +54,19 @@ func TestLaunchersAreShells(t *testing.T) {
 		win("C:", "x", "ubuntu2204.exe"),
 		// Versions appended to a shell's name.
 		"/usr/local/bin/bash5", "/usr/bin/zsh5", "/opt/pwsh7", "/usr/bin/py3", "/usr/bin/py3.12", "/bin/sh2",
-		// Windows scripts, whatever their name, and .com as .exe.
-		win("C:", "npm", "npx.cmd"), win("C:", "x", "X.BAT"), win("C:", "x", "y.ps1"), win("C:", "x", "tool.cmd. "),
-		win("C:", "x", "cmd.COM"), win("C:", "x", "bash5.com")} {
+		// Windows scripts and .com by name, as .exe (owner decision b, #14880).
+		win("C:", "npm", "npx.cmd"), win("C:", "npm", "PNPX.CMD"), win("C:", "npm", "tsx.cmd. "),
+		win("C:", "x", "groovy.bat"), win("C:", "x", "scala.BAT"), win("C:", "x", "wsl.ps1"), win("C:", "x", "bash5.cmd"), win("C:", "x", "cmd.COM"),
+		win("C:", "x", "bash5.com")} {
 		if !IsShell(p) {
 			t.Errorf("%s is not flagged shell", p)
 		}
 	}
 	for _, p := range []string{"/usr/bin/git", "/usr/bin/gh", "/usr/bin/pydoc", "/usr/bin/rsync", "/usr/bin/sshd-x", "/usr/bin/sudoers",
-		win("C:", "x", "git.com"), "/usr/bin/bashful", "/usr/bin/py-spy", "/usr/bin/cmdline", "/usr/bin/x.cmdx"} {
+		win("C:", "x", "git.com"), "/usr/bin/bashful", "/usr/bin/py-spy", "/usr/bin/cmdline", "/usr/bin/x.cmdx",
+		// Ordinary programs stay ordinary as scripts (owner decision b, #14779, #14880).
+		win("C:", "nodejs", "npm.cmd"), win("C:", "nodejs", "npm.ps1"), win("C:", "x", "yarn.cmd"),
+		win("C:", "x", "pnpm.cmd"), win("C:", "x", "tsc.cmd"), win("C:", "x", "build.bat")} {
 		if IsShell(p) {
 			t.Errorf("%s is flagged shell", p)
 		}

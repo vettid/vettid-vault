@@ -106,6 +106,23 @@ type Config struct {
 	// answered token_revoked makes the device refused (ErrRefused,
 	// Refused): it sends nothing more to that mailbox (§8.6).
 	Persist func(state []byte) error
+	// PersistBatch, if set, is used instead of Persist, with everything
+	// Persist's contract says, and is also given batch: the responses
+	// and events handled and not yet saved, oldest first (this batch's,
+	// and those of earlier batches whose save failed, which it is given
+	// again). Nothing of them is acknowledged before it returns nil, so
+	// a caller that keeps what it makes of them in the same save loses
+	// none of it to a crash (AGENT-PLAN §7.1 AV1: the agent connector's
+	// grants, access session and unlink). batch may be empty (a save of
+	// the state alone, such as a queued hs.confirm). The same *Inner
+	// values go to the waiting calls and Events once the save succeeds,
+	// as with Persist: do not modify them, and copy what you keep. As
+	// with Events, a response may appear twice (an answer and its
+	// replay, §8.2), and a response also reaches its waiting call: key
+	// what you derive on ID and Re. After an error the next Poll calls
+	// it again before it collects, with the same messages (and any that
+	// Deliver handled since).
+	PersistBatch func(state []byte, batch []*envelope.Inner) error
 	// RunError, if set, receives each error of a Poll that Run makes
 	// (a Persist error, a collect error, ErrRefused, ErrOutboxDropped).
 	// Run keeps collecting after it, with a backoff.
@@ -1078,7 +1095,7 @@ func (d *Device) poll(ctx context.Context, skip func() bool) error {
 		d.wakeLocked()
 		d.mu.Unlock()
 	}()
-	if d.cfg.Persist != nil {
+	if d.persists() {
 		return d.pollPersist(ctx)
 	}
 	d.mu.Lock()
@@ -1210,19 +1227,29 @@ func (d *Device) handleBatch(ctx context.Context, msgs []relayclient.Message) (b
 	return handled, unacked
 }
 
-// saveLocked calls Persist with the state; sem is held. On success
-// the outbox entries it holds may be deposited and the held responses
-// and events reach the waiting calls; on failure the device stays dirty.
+// persists reports whether a save hook is set (Config.Persist or
+// Config.PersistBatch): Poll and Deliver then save before acknowledging.
+func (d *Device) persists() bool { return d.cfg.Persist != nil || d.cfg.PersistBatch != nil }
+
+// saveLocked calls Persist (or PersistBatch, with the held responses and
+// events) with the state; sem is held. On success the outbox entries it
+// holds may be deposited and the held responses and events reach the
+// waiting calls; on failure the device stays dirty.
 func (d *Device) saveLocked() error {
 	d.mu.Lock()
 	d.export()
 	state, err := json.Marshal(d.st)
 	queued := d.nextSeq
+	batch := append([]*envelope.Inner(nil), d.held...)
 	d.mu.Unlock()
 	if err != nil {
 		return err
 	}
-	err = d.cfg.Persist(state)
+	if d.cfg.PersistBatch != nil {
+		err = d.cfg.PersistBatch(state, batch)
+	} else {
+		err = d.cfg.Persist(state)
+	}
 	suite.Wipe(state)
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -1499,7 +1526,7 @@ func outboxBackoff(n int) time.Duration {
 // if any, is PersistError, and the next Poll saves again), then its
 // deposits are made.
 func (d *Device) Deliver(ctx context.Context, m relayclient.Message) {
-	if d.cfg.Persist == nil {
+	if !d.persists() {
 		d.mu.Lock()
 		defer d.mu.Unlock()
 		d.handle(ctx, m)

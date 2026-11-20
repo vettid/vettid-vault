@@ -94,8 +94,12 @@ func (f *Feature) itemProxy(s *vault.Session, agent string, rules []itemspec.Age
 		if withValue {
 			b = b.String("value", value)
 		}
-		return b.String("header", j.Header).String("prefix", j.Prefix).String("host", j.Host).
-			String("expires_at", envelope.FormatTS(expires)).Bytes()
+		b = b.String("header", j.Header).String("prefix", j.Prefix).String("host", j.Host).
+			String("expires_at", envelope.FormatTS(expires))
+		if !withValue {
+			b = b.Bool("withheld", true) // the cached copy (#15273)
+		}
+		return b.Bytes()
 	}
 	s.CacheResponseAs(answer(false)) // no value in the response cache (#14595)
 	return answer(true), nil

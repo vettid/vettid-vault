@@ -88,7 +88,9 @@ func TestLeashValueNotCached(t *testing.T) {
 			t.Fatalf("%s: first answer: %v %+v", c.op, err, first)
 		}
 		// The same request again: the cached copy, without the value or the
-		// notes, and no new approval.
+		// notes, and no new approval. That the retransmission is answered at
+		// all, with no approval to give, is the evidence it came from the
+		// cache and was not referred again (a referral would hold it).
 		if _, err := agent.SendWithID(ctx, id, "agent.request", raw); err != nil {
 			t.Fatal(err)
 		}

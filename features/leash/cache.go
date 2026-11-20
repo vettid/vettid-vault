@@ -29,18 +29,30 @@ func getCached(answer []byte) json.RawMessage {
 		}
 	}
 	if raw, ok := o["fields"]; ok {
-		var fields []map[string]json.RawMessage
-		if err := json.Unmarshal(raw, &fields); err != nil {
-			return emptyObject
-		}
-		for _, f := range fields {
-			delete(f, "value")
-		}
-		out, err := json.Marshal(fields)
+		fields, err := strictjson.AsArray(raw)
 		if err != nil {
 			return emptyObject
 		}
-		b.Raw("fields", out)
+		// Each field's members as sent, in the answer's order, without
+		// value: raw members, so nothing is re-encoded.
+		arr := []byte{'['}
+		for i, fr := range fields {
+			f, err := strictjson.AsObject(fr)
+			if err != nil {
+				return emptyObject
+			}
+			if i > 0 {
+				arr = append(arr, ',')
+			}
+			fb := strictjson.NewBuilder()
+			for _, k := range []string{"field_id", "label", "kind"} {
+				if v, ok := f[k]; ok {
+					fb.Raw(k, v)
+				}
+			}
+			arr = append(arr, fb.Bytes()...)
+		}
+		b.Raw("fields", append(arr, ']'))
 	}
 	return b.Bytes()
 }

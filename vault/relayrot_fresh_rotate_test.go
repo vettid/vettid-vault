@@ -223,7 +223,9 @@ func TestRelayRotFreshWaitUnstoredFailsClosed(t *testing.T) {
 		t.Fatalf("completed (or attempted) with the wait unstored: mailbox %s, pending %v, attempts %v %v", fx.mailbox(), pr != nil, rot[len(rot0):], reg[len(reg0):])
 	}
 	fx.fs.setFail(0)
-	fx.setClk(fx.clk.Add(relayRetryWait(8))) // past any sooner retry's wait
+	// Past any sooner retry's wait: relayRetryWait draws at random up to relayRetryMax, so a draw here could fall short of
+	// the one the vault made.
+	fx.setClk(fx.clk.Add(relayRetryMax))
 	fx.batch()
 	if fx.mailbox() != pmb {
 		t.Fatal("not completed once the wait was stored")

@@ -80,7 +80,7 @@ func TestItemRunApprovedCachedWithoutValue(t *testing.T) {
 	from, _ := r.h.Device(agent)
 	s := vault.NewApprovedSession(context.Background(), r.h, from, t0, in, held.HeldApproval().Note)
 	res, err := r.f.Handle(context.Background(), s, in)
-	if err != nil || !strings.Contains(string(res), "hunter22") {
+	if err != nil || !strings.Contains(string(res), "hunter22") || strings.Contains(string(res), "withheld") {
 		t.Fatalf("answer: %v %s", err, res)
 	}
 	if r.stored(r.wifi).Version != 2 {
@@ -188,7 +188,7 @@ func TestCacheNoValueThroughHandle(t *testing.T) {
 	from, _ := r.h.Device(agent)
 	s := vault.NewApprovedSession(context.Background(), r.h, from, t0, in, nil)
 	res, err := r.f.Handle(context.Background(), s, in)
-	if err != nil || !strings.Contains(string(res), "hunter22") {
+	if err != nil || !strings.Contains(string(res), "hunter22") || strings.Contains(string(res), "withheld") {
 		t.Fatalf("answer: %v %s", err, res)
 	}
 	if got := string(s.CachedResponseBody()); got != `{"withheld":true}` {

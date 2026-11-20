@@ -3,6 +3,7 @@
 package e2e
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -22,7 +23,7 @@ func TestLeashValueNotCached(t *testing.T) {
 	const secret = "sk_test_cache_1"
 	r := relaytest.Start(t, nil)
 	a := newTestVault(t, r.URL, "a", nil)
-	ctx := ctxT(t, 180*time.Second)
+	ctx := ctxT(t, 300*time.Second)
 	item, _, err := a.app.ItemPut(ctx, "", 0, "secret", []string{"agent ok"}, client.ItemContent{Name: "api",
 		Fields: []client.ItemField{{Label: "Key", Kind: "password", Value: secret}}, Notes: "notes-" + secret})
 	if err != nil {
@@ -69,6 +70,34 @@ func TestLeashValueNotCached(t *testing.T) {
 		{"item.proxy", map[string]any{"item_id": item, "field_id": "f1", "host": "api.example.com"},
 			[]string{`"header":"Authorization"`, `"prefix":"Bearer "`, `"expires_at"`}},
 	}
+	var sent []sentReq
+	// retransmit sends s again and checks the answer is its copy without
+	// the value; notReferred, that no approval was asked since.
+	retransmit := func(s sentReq, step string) {
+		t.Helper()
+		if _, err := agent.SendWithID(ctx, s.id, "agent.request", s.raw); err != nil {
+			t.Fatal(err)
+		}
+		again, err := agent.AwaitResponse(ctx, s.id)
+		if err != nil || !again.OK() || strings.Contains(string(again.Body()), secret) || strings.Contains(string(again.Body()), `"value"`) ||
+			!strings.Contains(string(again.Body()), `"item_id":"`+item+`"`) {
+			t.Fatalf("%s, %s: retransmission: %v %+v", s.op, step, err, again)
+		}
+		for _, m := range s.cached {
+			if !strings.Contains(string(again.Body()), m) {
+				t.Fatalf("%s, %s: cached copy lacks %s: %s", s.op, step, m, again.Body())
+			}
+		}
+	}
+	notReferred := func(step string) {
+		t.Helper()
+		time.Sleep(2 * time.Second)
+		for _, ev := range a.app.Events() {
+			if ev.Type == "approval.pending" {
+				t.Fatalf("%s: a retransmission was referred again", step)
+			}
+		}
+	}
 	for _, c := range cases {
 		body := map[string]any{"op": c.op}
 		for k, v := range c.members {
@@ -87,28 +116,107 @@ func TestLeashValueNotCached(t *testing.T) {
 		if err != nil || !first.OK() || !strings.Contains(string(first.Body()), secret) {
 			t.Fatalf("%s: first answer: %v %+v", c.op, err, first)
 		}
+		sent = append(sent, sentReq{c.op, id, raw, c.cached})
 		// The same request again: the cached copy, without the value or the
 		// notes, and no new approval. That the retransmission is answered at
 		// all, with no approval to give, is the evidence it came from the
 		// cache and was not referred again (a referral would hold it).
-		if _, err := agent.SendWithID(ctx, id, "agent.request", raw); err != nil {
+		retransmit(sent[len(sent)-1], "at once")
+	}
+	notReferred("at once") // Events() holds every case's
+
+	// After the way is removed, the agent is suspended and its session
+	// ends, a retransmission still gets only the copy without the value,
+	// and is not referred. The proof that it was not run again is that it
+	// is answered OK at all: run again, it would be refused
+	// (way_not_allowed, forbidden or session_required). The audit count,
+	// the item's settings (the pin's version) and the grants are checked
+	// as well, but they are weaker: note() audits only the first of a
+	// kind in each window, and the grant list shows no use counts.
+	unchanged := func(step string) {
+		t.Helper()
+		audit, err := a.app.AuditSearchAll(ctx, client.AuditQuery{}, false, 0)
+		if err != nil {
 			t.Fatal(err)
 		}
-		again, err := agent.AwaitResponse(ctx, id)
-		if err != nil || !again.OK() || strings.Contains(string(again.Body()), secret) || strings.Contains(string(again.Body()), `"value"`) ||
-			!strings.Contains(string(again.Body()), `"item_id":"`+item+`"`) {
-			t.Fatalf("%s: retransmission: %v %+v", c.op, err, again)
+		before, err := a.app.LeashItemList(ctx, agent.DeviceID(), item)
+		if err != nil {
+			t.Fatal(err)
 		}
-		for _, m := range c.cached {
-			if !strings.Contains(string(again.Body()), m) {
-				t.Fatalf("%s: cached copy lacks %s: %s", c.op, m, again.Body())
-			}
+		grants, err := a.app.LeashGrantList(ctx, agent.DeviceID())
+		if err != nil {
+			t.Fatal(err)
 		}
-		time.Sleep(2 * time.Second)
-		for _, ev := range a.app.Events() {
-			if ev.Type == "approval.pending" {
-				t.Fatalf("%s: the retransmission was referred again", c.op)
-			}
+		for _, s := range sent {
+			retransmit(s, step)
+		}
+		notReferred(step)
+		audit2, err := a.app.AuditSearchAll(ctx, client.AuditQuery{}, false, 0)
+		if err != nil || len(audit2) != len(audit) {
+			t.Fatalf("%s: audit %d entries, then %d: %v", step, len(audit), len(audit2), err)
+		}
+		if w, err := a.app.LeashItemList(ctx, agent.DeviceID(), item); err != nil || !sameRaw(w, before) {
+			t.Fatalf("%s: item settings changed: %v", step, err)
+		}
+		if g, err := a.app.LeashGrantList(ctx, agent.DeviceID()); err != nil || !sameRaw(g, grants) {
+			t.Fatalf("%s: grants changed: %v", step, err)
 		}
 	}
+	if _, err := a.app.LeashItemSet(ctx, agent.DeviceID(), item, settingsVersion(t, itemSettings(ctx, t, a, agent.DeviceID(), item)),
+		map[string]any{"ways": []string{"use"}}); err != nil {
+		t.Fatal(err)
+	}
+	unchanged("way removed")
+	for i := 0; i < 40; i++ { // spam suspends the agent (as in TestLeash)
+		if rr := a.request(agent, "settings.get", `{}`); rr.ErrorCode() != "forbidden" {
+			t.Fatalf("hammer %d: %q", i, rr.ErrorCode())
+		}
+	}
+	waitEvent(t, a.app, "sync.event", syncKind("leash.agent.suspended"))
+	unchanged("suspended")
+	if err := a.app.SessionEnd(ctx, agent.DeviceID()); err != nil {
+		t.Fatal(err)
+	}
+	waitEvent(t, agent, "device.session.ended", nil)
+	unchanged("session ended")
+}
+
+type sentReq struct {
+	op     string
+	id     string
+	raw    json.RawMessage
+	cached []string
+}
+
+func itemSettings(ctx context.Context, t *testing.T, a *testVault, agentID, item string) []json.RawMessage {
+	t.Helper()
+	l, err := a.app.LeashItemList(ctx, agentID, item)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return l
+}
+
+// settingsVersion is the version of the item's settings in a list.
+func settingsVersion(t *testing.T, l []json.RawMessage) uint64 {
+	t.Helper()
+	var w struct {
+		Version uint64 `json:"version"`
+	}
+	if len(l) != 1 || json.Unmarshal(l[0], &w) != nil {
+		t.Fatalf("settings: %s", l)
+	}
+	return w.Version
+}
+
+func sameRaw(a, b []json.RawMessage) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if string(a[i]) != string(b[i]) {
+			return false
+		}
+	}
+	return true
 }

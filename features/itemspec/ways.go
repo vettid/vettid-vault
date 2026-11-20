@@ -502,6 +502,14 @@ func ValidProgram(p string) bool {
 	if p == "" || len(p) > MaxProgram || !utf8.ValidString(p) || !showable(p) {
 		return false
 	}
+	// No "~" in the last element (owner decision a, #14596): on Windows an
+	// 8.3 short name (BASH~1.EXE) is another name for a file, which the
+	// member would read on the phone as another program, and which the
+	// shell list and the bindings would not know. Refused on every system,
+	// as the ":" rule.
+	if strings.Contains(LastElement(p), "~") {
+		return false
+	}
 	if IsAbsProgram(p) {
 		return cleanPath(p, false) && strings.TrimRight(LastElement(p), " .") != ""
 	}

@@ -98,3 +98,78 @@ func TestGetCachedMalformed(t *testing.T) {
 		}
 	}
 }
+
+// item.get approved after its referral (as runHeld runs it): the cached
+// copy has no value and no notes.
+func TestItemGetApprovedCachedWithoutValue(t *testing.T) {
+	r := newRig(t)
+	r.rule(t, Auto, 0, 60, r.wifi)
+	r.reveal(r.wifi)
+	r.it.items[r.wifi].Notes = "notes-hunter22"
+	body := `{"op":"item.get","item_id":"` + r.wifi + `"}`
+	d, held := r.decideS(t0, body)
+	if d != vault.AgentAsk {
+		t.Fatal(d)
+	}
+	in := &envelope.Inner{ID: "01JB2Z6V9K3M4N5P6Q7R8S9T0V", Type: "agent.request", TS: t0, Body: json.RawMessage(body)}
+	from, _ := r.h.Device(agent)
+	s := vault.NewApprovedSession(context.Background(), r.h, from, t0, in, held.HeldApproval().Note)
+	res, err := r.f.Handle(context.Background(), s, in)
+	if err != nil || !strings.Contains(string(res), "hunter22") {
+		t.Fatalf("answer: %v %s", err, res)
+	}
+	c := string(s.CachedResponseBody())
+	if c == "" || strings.Contains(c, "hunter22") || strings.Contains(c, `"value"`) || strings.Contains(c, `"notes"`) ||
+		!strings.Contains(c, `"item_id":"`+r.wifi+`"`) {
+		t.Fatalf("cached %s", c)
+	}
+}
+
+// A value op whose handler set no copy is cached as {}; one that did keeps
+// its copy; other ops are cached as answered.
+func TestCacheNoValueBackstop(t *testing.T) {
+	r := newRig(t)
+	from, _ := r.h.Device(agent)
+	for _, op := range []string{"item.get", "item.run", "item.proxy"} {
+		s := vault.NewSession(context.Background(), r.h, from, t0, nil)
+		cacheNoValue(s, op)
+		if got := string(s.CachedResponseBody()); got != `{}` {
+			t.Fatalf("%s: cached %q", op, got)
+		}
+		s = vault.NewSession(context.Background(), r.h, from, t0, nil)
+		s.CacheResponseAs(json.RawMessage(`{"item_id":"x"}`))
+		cacheNoValue(s, op)
+		if got := string(s.CachedResponseBody()); got != `{"item_id":"x"}` {
+			t.Fatalf("%s: copy replaced: %q", op, got)
+		}
+	}
+	for _, op := range []string{"catalog", "item.use"} {
+		s := vault.NewSession(context.Background(), r.h, from, t0, nil)
+		cacheNoValue(s, op)
+		if s.CachedResponseBody() != nil {
+			t.Fatalf("%s: cached %s", op, s.CachedResponseBody())
+		}
+	}
+}
+
+// Through Handle: a value op answered without a copy (answerFor stands in
+// for a handler that forgot it) is cached as {}, never as the answer.
+func TestCacheNoValueThroughHandle(t *testing.T) {
+	r := newRig(t)
+	r.rule(t, Auto, 0, 60, r.wifi)
+	r.reveal(r.wifi)
+	r.f.answerFor = func(*vault.Session, *Request) (json.RawMessage, error) {
+		return json.RawMessage(`{"item_id":"x","fields":[{"value":"hunter22"}]}`), nil
+	}
+	body := `{"op":"item.get","item_id":"` + r.wifi + `"}`
+	in := &envelope.Inner{ID: "01JB2Z6V9K3M4N5P6Q7R8S9T0V", Type: "agent.request", TS: t0, Body: json.RawMessage(body)}
+	from, _ := r.h.Device(agent)
+	s := vault.NewApprovedSession(context.Background(), r.h, from, t0, in, nil)
+	res, err := r.f.Handle(context.Background(), s, in)
+	if err != nil || !strings.Contains(string(res), "hunter22") {
+		t.Fatalf("answer: %v %s", err, res)
+	}
+	if got := string(s.CachedResponseBody()); got != `{}` {
+		t.Fatalf("cached %q", got)
+	}
+}

@@ -159,10 +159,90 @@ func MatchProgram(programs []Program, program string) (Program, bool) {
 	return Program{}, false
 }
 
+// shells are the programs flagged shell and always referred (§10.11): the
+// shells, and (owner decision a, #14596) the launchers, which run another
+// program named in their argv, and the evaluators, which run code given in
+// it, so that a pinned one cannot run whatever argv an agent picks.
 var shells = map[string]bool{
 	"sh": true, "bash": true, "zsh": true, "dash": true, "ksh": true, "mksh": true, "fish": true, "csh": true,
 	"tcsh": true, "busybox": true, "env": true, "cmd": true, "powershell": true, "pwsh": true,
+	// Shells of the same kind, added with #14596.
+	"toybox": true, "ash": true, "rbash": true, "ksh93": true, "yash": true, "posh": true, "nu": true, "xonsh": true,
+	"elvish": true, "osh": true, "ysh": true,
+	// Launchers (#14596).
+	"sudo": true, "doas": true, "xargs": true, "nohup": true, "timeout": true, "nice": true, "ssh": true, "wsl": true,
+	// Launchers of the same kind, added with #14596.
+	"su": true, "runuser": true, "pkexec": true, "runas": true, "setsid": true, "stdbuf": true, "time": true,
+	"chroot": true, "nsenter": true, "unshare": true, "ionice": true, "taskset": true, "chrt": true, "prlimit": true,
+	"flock": true, "script": true, "watch": true, "systemd-run": true, "strace": true, "ltrace": true, "gdb": true,
+	"npx": true, "bunx": true, "uvx": true, "pnpx": true, "pipx": true, "rundll32": true, "regsvr32": true,
+	"msiexec": true, "conhost": true, "sg": true, "newgrp": true, "setpriv": true, "capsh": true, "setarch": true,
+	"linux32": true, "linux64": true, "arch": true, "numactl": true, "cgexec": true, "firejail": true, "bwrap": true,
+	"fakeroot": true, "faketime": true, "proxychains": true, "proxychains4": true, "torsocks": true, "sshpass": true,
+	"unbuffer": true, "xvfb-run": true, "dbus-run-session": true, "dbus-launch": true, "chpst": true,
+	"valgrind": true, "perf": true, "lldb": true, "start-stop-daemon": true, "daemonize": true,
+	"systemd-nspawn": true, "machinectl": true, "flatpak-spawn": true, "parallel": true, "tmux": true,
+	"screen": true, "caffeinate": true, "sandbox-exec": true, "open": true, "launchctl": true, "forfiles": true,
+	"pcalua": true, "wt": true, "explorer": true, "schtasks": true, "wmic": true,
+	"run0": true, "sudo-rs": true, "gsudo": true, "psexec": true, "psexec64": true, "socat": true, "nc": true,
+	"ncat": true, "netcat": true, "wine": true, "mono": true, "mintty": true,
+	// Evaluators (#14596).
+	"awk": true, "gawk": true, "mawk": true, "deno": true, "bun": true, "py": true, "cscript": true, "wscript": true,
+	"mshta": true,
+	// Evaluators of the same kind, added with #14596.
+	"pyw": true, "expect": true, "rscript": true, "r": true, "julia": true, "jshell": true, "groovy": true,
+	"jrunscript": true, "jjs": true, "csi": true, "fsi": true, "msbuild": true, "installutil": true, "hh": true,
+	"swift": true, "scala": true, "kotlin": true, "clojure": true, "guile": true, "racket": true, "sbcl": true,
+	"runghc": true, "ghci": true, "escript": true, "erl": true, "elixir": true, "iex": true, "qjs": true, "jsc": true,
+	"ipython": true, "bpython": true, "jython": true, "micropython": true, "ts-node": true, "tsx": true, "irb": true,
+	"jruby": true,
+	// Added in the second round (#14676): loaders, multicall binaries,
+	// Homebrew's g-prefixed coreutils, WSL and Git for Windows launchers,
+	// remote shells, Windows debuggers and script hosts, process wrappers,
+	// terminals and schedulers, and more shells and evaluators.
+	"ld.so": true, "wine64": true, "coreutils": true, "genv": true, "gtimeout": true, "gxargs": true, "gnice": true,
+	"gnohup": true, "gstdbuf": true, "gchroot": true, "gtime": true, "wslg": true, "git-bash": true, "git-cmd": true,
+	"debian": true, "kali": true, "plink": true, "winrs": true, "mosh": true, "autossh": true, "rsh": true,
+	"ssh-agent": true, "cdb": true, "ntsd": true, "windbg": true, "cmstp": true, "regasm": true, "regsvcs": true,
+	"odbcconf": true, "msxsl": true, "bitsadmin": true, "scriptrunner": true, "tini": true, "dumb-init": true,
+	"gosu": true, "su-exec": true, "runcon": true, "rlwrap": true, "eatmydata": true, "proot": true, "ccache": true,
+	"xcrun": true, "dtrace": true, "dtruss": true, "systemd-cat": true, "systemd-inhibit": true, "xterm": true,
+	"gnome-terminal": true, "konsole": true, "alacritty": true, "kitty": true, "at": true, "crontab": true,
+	"oksh": true, "pdksh": true, "lksh": true, "hush": true, "sash": true, "rc": true, "es": true,
+	"bb": true, "ghc": true, "ocaml": true, "raku": true, "gjs": true, "d8": true, "tcc": true, "emacs": true,
+	"sqlite3": true, "dc": true, "truffleruby": true, "graalpy": true,
 }
+
+// versionedShells are the shells whose names also come with a version
+// number appended (bash5, zsh5, pwsh7, py3, ksh93): flagged with any
+// trailing digits and dots removed, and only these, so the rule stays
+// tight.
+var versionedShells = map[string]bool{
+	"sh": true, "bash": true, "zsh": true, "dash": true, "ksh": true, "mksh": true, "oksh": true, "pdksh": true,
+	"lksh": true, "fish": true, "csh": true, "tcsh": true, "ash": true, "yash": true, "pwsh": true,
+	"powershell": true, "py": true, "pyw": true,
+}
+
+// shellPrefixes are shells (flag shell, always referred) whose names carry
+// versions or variants (§10.11, #14596): lua5.4 and luajit, pypy3.10,
+// tclsh8.6, wish8.6, javaw, busybox.static, gawk-5.3.0, bash-static,
+// zsh-5.9, pwsh-preview, powershell_ise, ld-linux-x86-64.so.2,
+// ld-musl-x86_64.so.1, qemu-x86_64, ubuntu2204. By prefix, as the
+// interpreters: looser only adds flags.
+var shellPrefixes = []string{"lua", "pypy", "tclsh", "wish", "java", "busybox", "gawk-", "bash-", "mksh-", "zsh-", "ksh-",
+	"dash-", "pwsh-", "powershell_", "powershell-", "ld-linux", "ld-musl", "qemu-", "ubuntu"}
+
+// scriptExts are the endings of Windows scripts, which run in cmd.exe or
+// PowerShell by nature (npx.cmd, groovy.bat, x.ps1): flagged shell
+// whatever their name (#14676).
+var scriptExts = []string{".cmd", ".bat", ".ps1"}
+
+// shellSuffixes: any awk (nawk, goawk, original-awk, busybox-awk).
+var shellSuffixes = []string{"awk"}
+
+// The list is best-effort: a program not on it that runs what its argv
+// names (git -c core.sshCommand=..., rsync -e, find -exec) is judged by
+// its binding like any other.
 
 var interpreters = []string{"python", "node", "perl", "ruby", "php", "osascript"}
 
@@ -174,14 +254,42 @@ var inlineArgs = map[string]bool{"-c": true, "-e": true, "-E": true, "-r": true,
 // adds flags.
 func programBase(program string) string { return ProgramKey(LastElement(program)) }
 
-// IsShell reports whether program is one of the shells (§10.11: flag
-// shell).
-func IsShell(program string) bool { return shells[programBase(program)] }
+// flagBase is programBase also without a final .com (Windows runs x.com
+// for x as it runs x.exe); for the flags only, never a binding's key.
+func flagBase(program string) string {
+	b := programBase(program)
+	return strings.TrimRight(strings.TrimSuffix(b, ".com"), " .")
+}
+
+// IsShell reports whether program is one of the shells, launchers or
+// evaluators (§10.11: flag shell).
+func IsShell(program string) bool {
+	for _, e := range scriptExts {
+		if strings.HasSuffix(programBase(program), e) {
+			return true
+		}
+	}
+	b := flagBase(program)
+	if shells[b] || versionedShells[strings.TrimRight(b, "0123456789.")] {
+		return true
+	}
+	for _, p := range shellPrefixes {
+		if strings.HasPrefix(b, p) {
+			return true
+		}
+	}
+	for _, p := range shellSuffixes {
+		if strings.HasSuffix(b, p) {
+			return true
+		}
+	}
+	return false
+}
 
 // IsInterpreter reports whether program's base starts with one of the
 // interpreters' names (§10.11).
 func IsInterpreter(program string) bool {
-	b := programBase(program)
+	b := flagBase(program)
 	for _, i := range interpreters {
 		if strings.HasPrefix(b, i) {
 			return true

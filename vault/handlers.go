@@ -245,6 +245,9 @@ type Approval struct {
 	PreviousSHA256 string
 	PreviousPath   string
 	Note           json.RawMessage
+	// Proxy is what approval.pending{proxy} shows for an agent's
+	// item.proxy (§10.11, 0.92.0): the values the vault will send.
+	Proxy *ApprovalProxy
 	// replaces is the approval a re-referral replaces (set by runHeld only).
 	replaces string
 }
@@ -252,7 +255,20 @@ type Approval struct {
 func (a Approval) clone() Approval {
 	a.Flags = append([]string(nil), a.Flags...)
 	a.Note = append(json.RawMessage(nil), a.Note...)
+	if a.Proxy != nil {
+		p := *a.Proxy
+		a.Proxy = &p
+	}
 	return a
+}
+
+// ApprovalProxy is approval.pending{proxy} (§6.8, §10.11, 0.92.0): an
+// agent's item.proxy's bound host as the item's settings spell it, the
+// header's name and the prefix ("" when none, always sent).
+type ApprovalProxy struct {
+	Host   string `json:"host"`
+	Header string `json:"header"`
+	Prefix string `json:"prefix"`
 }
 
 // ReferAgainError is what a handler running an approved agent request
@@ -300,6 +316,14 @@ func (s *Session) ApprovalPrevious(sha256, path string) {
 // AgentPolicy calls it, during AgentDecision.
 func (s *Session) NoteApproval(note json.RawMessage) {
 	s.approval.Note = append(json.RawMessage(nil), note...)
+}
+
+// ProxyApproval sets what the approval of an agent's item.proxy shows
+// (approval.pending{proxy}, §10.11, 0.92.0): the host, header and prefix
+// the vault decided on and will send. Only an AgentPolicy calls it,
+// during AgentDecision.
+func (s *Session) ProxyApproval(p ApprovalProxy) {
+	s.approval.Proxy = &p
 }
 
 // AgentRefusal and ApprovalFlags return what RefuseAgentWith and

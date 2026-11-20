@@ -41,6 +41,12 @@ func (n proxyNote) raw() json.RawMessage {
 	return raw
 }
 
+// shown is what the approval shows of n (approval.pending{proxy}, 0.92.0):
+// the same three values, as the vault will send them.
+func (n proxyNote) shown() *vault.ApprovalProxy {
+	return &vault.ApprovalProxy{Host: n.Host, Header: n.Header, Prefix: n.Prefix}
+}
+
 // itemProxy answers an item.proxy (§10.11) once an app approved it: an
 // item.proxy is always referred, so one not approved is forbidden (fail
 // secure). The settings are judged again: a proxy they now refuse gets
@@ -75,7 +81,8 @@ func (f *Feature) itemProxy(s *vault.Session, agent string, rules []itemspec.Age
 	// header's case alone is not a widening (itemspec.Widens): the member
 	// approves what the approval showed, and asking again costs little.
 	if n != proxyNoteOf(j) {
-		return nil, f.referAgain(s, agent, vault.Approval{Note: proxyNoteOf(j).raw()})
+		n := proxyNoteOf(j)
+		return nil, f.referAgain(s, agent, vault.Approval{Note: n.raw(), Proxy: n.shown()})
 	}
 	expires, ok := itemspec.ProxyExpiry(s.Now(), r.Proxy.Seconds, s.From().SessionExpires)
 	if !ok {

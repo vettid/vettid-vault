@@ -844,6 +844,7 @@ func (f *Feature) AgentDecision(s *vault.Session, typ string, body json.RawMessa
 	}
 	if proxy != nil {
 		s.NoteApproval(proxy.raw())
+		s.ProxyApproval(*proxy.shown())
 	}
 	return vault.AgentAsk
 }

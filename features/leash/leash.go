@@ -1416,7 +1416,9 @@ func (f *Feature) request(s *vault.Session, body []byte) (json.RawMessage, error
 			return nil, errNotFound
 		}
 		f.note(s, agent, f.agent(s, agent), vault.Activity{Kind: KindRead, Ref: r.ItemID, Feed: true})
-		return agentContent(content), nil
+		answer := agentContent(content)
+		s.CacheResponseAs(getCached(answer)) // no value in the response cache (#14595)
+		return answer, nil
 	case "item.run":
 		return f.itemRun(s, agent, rules, r)
 	case "item.proxy":

@@ -1389,6 +1389,29 @@ func (f *Feature) request(s *vault.Session, body []byte) (json.RawMessage, error
 	if err != nil {
 		return nil, err
 	}
+	answer, err := f.answer(s, r)
+	if err == nil {
+		// Every handler sets its own copy today, so only
+		// TestCacheNoValueBackstop exercises this, on the helper itself.
+		cacheNoValue(s, r.Op)
+	}
+	return answer, err
+}
+
+// cacheNoValue: an op whose answer carries a secret value is never cached
+// with it (#14595). Each handler sets its copy without the value; one that
+// did not is cached as {} rather than as the answer.
+func cacheNoValue(s *vault.Session, op string) {
+	if valueOps[op] && s.CachedResponseBody() == nil {
+		s.CacheResponseAs(emptyObject)
+	}
+}
+
+// valueOps are the ops whose answers carry a secret value (§8.2 Exception).
+var valueOps = map[string]bool{"item.get": true, "item.run": true, "item.proxy": true}
+
+// answer answers a parsed agent.request (request).
+func (f *Feature) answer(s *vault.Session, r *Request) (json.RawMessage, error) {
 	agent := s.From().ID
 	gs := f.matching(agent, opScope[r.Op], "", r.ItemID, s.Now())
 	if len(gs) == 0 || f.items == nil {

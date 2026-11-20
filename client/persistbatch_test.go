@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/vettid/vettid-vault/vms/envelope"
 )
@@ -66,6 +67,88 @@ func TestPersistBatchBeforeAck(t *testing.T) {
 		t.Fatal("the saved state lacks the batch's msg_ids")
 	}
 	if got := eventTypes(d); !slices.Equal(got, []string{"test.one", "test.two"}) {
+		t.Fatalf("events %v", got)
+	}
+	// The next save is given only what came since: nothing is held after
+	// a successful one.
+	id3 := v.send("test.three", []byte(`{}`))
+	if err := d.Poll(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(calls) != 2 || !slices.Equal(calls[1], []string{"test.three"}) || !slices.Equal(waiting[1], []string{id3}) {
+		t.Fatalf("second save: batches %v, waiting %v", calls, waiting)
+	}
+	if got := eventTypes(d); !slices.Equal(got, []string{"test.three"}) {
+		t.Fatalf("events after the second save %v", got)
+	}
+}
+
+// batch is the callback's own slice: emptying it, overwriting an entry or
+// appending to it changes nothing of what the waiting calls and Events
+// get.
+func TestPersistBatchSliceIsACopy(t *testing.T) {
+	r, v, d := pair(t)
+	_ = eventTypes(d)
+	_ = r
+	d.cfg.PersistBatch = func(_ []byte, batch []*envelope.Inner) error {
+		if len(batch) > 0 {
+			batch[0] = &envelope.Inner{Type: "test.forged"}
+		}
+		batch = append(batch, &envelope.Inner{Type: "test.appended"})
+		_ = batch
+		return nil
+	}
+	v.send("test.one", []byte(`{}`))
+	v.send("test.two", []byte(`{}`))
+	if err := d.Poll(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	in, err := d.WaitEvent(ctx, "test.one", nil)
+	if err != nil || in == nil || in.Type != "test.one" {
+		t.Fatalf("WaitEvent: %v, %v", in, err)
+	}
+	if got := eventTypes(d); !slices.Equal(got, []string{"test.two"}) {
+		t.Fatalf("events %v", got)
+	}
+}
+
+// Across failures: a failed Deliver of A, then a failed Deliver of B, then
+// a Poll that saves: the save is given [A, B] in order, and a later save
+// is not given them again.
+func TestPersistBatchAcrossFailures(t *testing.T) {
+	r, v, d := pair(t)
+	_ = eventTypes(d)
+	fail := true
+	var calls [][]string
+	d.cfg.PersistBatch = func(_ []byte, batch []*envelope.Inner) error {
+		calls = append(calls, batchTypes(batch))
+		if fail {
+			return errors.New("disk full")
+		}
+		return nil
+	}
+	v.send("test.a", []byte(`{}`))
+	d.Deliver(context.Background(), r.take(v.dev.Mailbox)[0])
+	v.send("test.b", []byte(`{}`))
+	d.Deliver(context.Background(), r.take(v.dev.Mailbox)[0])
+	if got := eventTypes(d); len(got) != 0 {
+		t.Fatalf("events before a save: %v", got)
+	}
+	fail = false
+	if err := d.Poll(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	v.send("test.c", []byte(`{}`))
+	if err := d.Poll(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	want := [][]string{{"test.a"}, {"test.a", "test.b"}, {"test.a", "test.b"}, {"test.c"}}
+	if !slices.EqualFunc(calls, want, slices.Equal[[]string]) {
+		t.Fatalf("PersistBatch batches %v, want %v", calls, want)
+	}
+	if got := eventTypes(d); !slices.Equal(got, []string{"test.a", "test.b", "test.c"}) {
 		t.Fatalf("events %v", got)
 	}
 }

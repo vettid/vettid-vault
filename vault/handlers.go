@@ -328,7 +328,8 @@ func (s *Session) ProxyApproval(p ApprovalProxy) {
 
 // AgentRefusal and ApprovalFlags return what RefuseAgentWith and
 // FlagApproval set (nil if nothing), and HeldApproval all that a referral
-// would be held with: for tests of an AgentPolicy.
+// would be held with (flags, previous pin, proxy, note): for tests of an
+// AgentPolicy.
 func (s *Session) AgentRefusal() *HandlerError { return s.agentRefusal }
 func (s *Session) ApprovalFlags() []string     { return append([]string(nil), s.approval.Flags...) }
 func (s *Session) HeldApproval() Approval      { return s.approval.clone() }

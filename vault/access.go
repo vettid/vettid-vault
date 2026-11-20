@@ -314,7 +314,8 @@ func (m *Manager) endAccess(ctx context.Context, p *Peer, notify bool, reason, e
 // cached, errors included.
 //
 // For an agent, a holds what the LEASH policy set (flags, the previous
-// pin, its note); for anyone else it is ignored. It returns the new
+// pin, an item.proxy's shown values, its note); for anyone else it is
+// ignored. It returns the new
 // approval's id, or the error code the request was answered with instead
 // (limit, internal).
 func (m *Manager) hold(p *Peer, in *envelope.Inner, key string, volatile bool, a Approval, now time.Time) (id, code string) {

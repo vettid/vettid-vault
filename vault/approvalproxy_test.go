@@ -64,7 +64,8 @@ func pendingListBodies(t *testing.T, d *devFixture, app *tdev) []json.RawMessage
 
 // §6.8, §10.11 (0.92.0): an item.proxy's approval carries proxy {host,
 // header, prefix}, the prefix present when empty, in approval.pending and
-// its pending.list entry, and kept across a reload; a referral again
+// its pending.list entry, and stored with the held request (its JSON round
+// trip, which is what the state saves); a referral again
 // carries the new values; the note is still never sent.
 func TestApprovalProxy(t *testing.T) {
 	d := newDevFixture(t)

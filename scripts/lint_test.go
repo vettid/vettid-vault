@@ -273,7 +273,7 @@ func TestEIFToolchain(t *testing.T) {
 		}
 	}
 	for _, wf := range []string{"../.github/workflows/release.yml", "../.github/workflows/compat.yml", "../.github/workflows/ci.yml",
-		"../.github/workflows/enclave-kernel.yml", "../.github/workflows/kernel-freshness.yml"} {
+		"../.github/workflows/enclave-kernel.yml", "../.github/workflows/kernel-freshness.yml", "../.github/workflows/vulns.yml"} {
 		w := read(t, wf)
 		for _, m := range regexp.MustCompile(`(?m)^\s*-?\s*uses:\s*(\S+)`).FindAllStringSubmatch(w, -1) {
 			if !regexp.MustCompile(`@[0-9a-f]{40}$`).MatchString(m[1]) {

@@ -294,3 +294,27 @@ func TestProxyApprovalWithoutPrefix(t *testing.T) {
 		t.Fatalf("%v %+v", d, p)
 	}
 }
+
+// §10.11 (0.92.0): a request that spells the bound host another way (with
+// or without its default port) shows the host as the settings spell it, in
+// the approval and in its note.
+func TestProxyApprovalRespelledHost(t *testing.T) {
+	for _, c := range []struct{ bound, asked string }{
+		{"api.example.com", "api.example.com:443"},
+		{"api.example.com:443", "api.example.com"},
+	} {
+		r := newRig(t)
+		r.rule(t, Auto, 0, 60, r.wifi)
+		r.setProxy(r.wifi, 3, "Authorization", "Bearer ", c.bound)
+		r.session(t0.Add(time.Hour))
+		d, s := r.decideS(t0, proxyBody(r.wifi, "f1", c.asked, ""))
+		a := s.HeldApproval()
+		if p := a.Proxy; d != vault.AgentAsk || p == nil || *p != (vault.ApprovalProxy{Host: c.bound, Header: "Authorization", Prefix: "Bearer "}) {
+			t.Fatalf("bound %s, asked %s: %v %+v", c.bound, c.asked, d, p)
+		}
+		var n proxyNote
+		if json.Unmarshal(a.Note, &n) != nil || n.Host != c.bound {
+			t.Fatalf("bound %s, asked %s: note %s", c.bound, c.asked, a.Note)
+		}
+	}
+}

@@ -79,7 +79,8 @@ func TestApprovalProxy(t *testing.T) {
 	d.sendAs(ag, "test.proxy", `{"x":1}`)
 	ap := find(d.inbox(app, ag)["dev1"], ofType("approval.pending"))
 	const want = `"proxy":{"host":"api.example.com:443","header":"Authorization","prefix":""}`
-	if ap == nil || !bytes.Contains(ap.Body, []byte(want)) {
+	// The member is the body's last.
+	if ap == nil || !bytes.HasSuffix(ap.Body, []byte(want+"}")) {
 		t.Fatalf("approval.pending: %+v", ap)
 	}
 	if bytes.Contains(ap.Body, []byte(`"n"`)) {

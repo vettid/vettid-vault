@@ -18,14 +18,17 @@ import (
 	"fmt"
 	"math/rand/v2"
 	"net/http"
+	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/vettid/vettid-relay/relayauth"
 	"github.com/vettid/vettid-relay/relayclient"
 
 	"github.com/vettid/vettid-vault/vms/altchan"
+	"github.com/vettid/vettid-vault/vms/callwire"
 	"github.com/vettid/vettid-vault/vms/envelope"
 	"github.com/vettid/vettid-vault/vms/handshake"
 	"github.com/vettid/vettid-vault/vms/invite"
@@ -288,7 +291,9 @@ type VaultRecord struct {
 // implemented.
 func Features() []string { return []string{handshake.CapConfirm} }
 
-// Device is one owner device.
+// Device is one owner device. Its keys, its sessions and the messages it
+// has handled stay in memory until Close, which wipes them; call Close when
+// done with it (after Save, if the state is to be kept).
 type Device struct {
 	mu  sync.Mutex
 	cfg Config
@@ -352,6 +357,14 @@ type Device struct {
 	// responses and events of unsaved batches from the waiting calls.
 	dirty bool
 	held  []*envelope.Inner
+	// closed is set by Close; closeCtx is cancelled by it, which ends a
+	// poll, deposit or wait in progress (Close, d.mu).
+	closed      bool
+	closeCtx    context.Context
+	closeStop   context.CancelFunc
+	closeDone   chan struct{} // closed once Close has wiped
+	wipePending bool          // Close ran during a callback: the next release wipes
+	callbacks   atomic.Int32  // Persist, PersistBatch or RunError calls in progress
 	// outboxFails counts consecutive transient outbox failures;
 	// outboxNext is when the outbox may be tried again (§8.6 backoff).
 	outboxFails int
@@ -429,6 +442,7 @@ func open(cfg Config, st *State) (*Device, error) {
 	}
 	d := &Device{cfg: cfg, st: st, sem: make(chan struct{}, 1), wake: make(chan struct{}),
 		ik: ed25519.NewKeyFromSeed(st.IKSeed), relayKey: ed25519.NewKeyFromSeed(st.RelaySeed)}
+	d.closeCtx, d.closeStop = context.WithCancel(context.Background())
 	var err error
 	if d.kem, err = suite.NewPrivateKey(st.KEMSeed); err != nil {
 		return nil, err
@@ -471,10 +485,14 @@ func (d *Device) relayClient(url string) *relayclient.Client {
 	return c
 }
 
-// Save returns the device state (secret).
+// Save returns the device state (secret). ErrClosed once the Device is
+// closed: its keys are wiped.
 func (d *Device) Save() ([]byte, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	if d.closed {
+		return nil, ErrClosed
+	}
 	d.export()
 	return json.Marshal(d.st)
 }
@@ -500,12 +518,62 @@ func (d *Device) export() {
 
 // RelayAddr returns the device's relay address.
 func (d *Device) RelayAddr() handshake.RelayAddr {
-	pk := d.relayKey.Public().(ed25519.PublicKey)
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.closed {
+		return handshake.RelayAddr{} // the key is wiped
+	}
+	return d.relayAddrLocked()
+}
+
+// signShare signs a call share with the identity key, under the lock:
+// Close wipes the key under it.
+func (d *Device) signShare(m []byte) ([]byte, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.closed {
+		return nil, ErrClosed
+	}
+	return callwire.SignShare(d.ik, m)
+}
+
+// borrowRelay returns a relay client for url with its own copy of the
+// relay key, for a transfer that runs without the lock (a blob), and a
+// done that wipes the copy. Close wipes the Device's key, not the copy,
+// and cuts the transfer short through ctx's bound.
+func (d *Device) borrowRelay(url string) (*relayclient.Client, func(), error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.closed {
+		return nil, nil, ErrClosed
+	}
+	key := append(ed25519.PrivateKey(nil), d.relayKey...)
+	c := relayclient.New(url, key)
+	c.HTTP, c.Now = d.cfg.HTTP, d.cfg.Now
+	return c, func() { clear(key) }, nil
+}
+
+// relayAddrLocked is RelayAddr; d.mu is held.
+func (d *Device) relayAddrLocked() handshake.RelayAddr {
+	pk := append(ed25519.PublicKey(nil), d.relayKey.Public().(ed25519.PublicKey)...)
 	return handshake.RelayAddr{URL: d.st.RelayURL, Mailbox: relayauth.MailboxID(pk), PK: pk}
 }
 
 // IdentityKey returns the device's ik.
-func (d *Device) IdentityKey() ed25519.PublicKey { return d.ik.Public().(ed25519.PublicKey) }
+// After Close it returns nil: the key is wiped.
+func (d *Device) IdentityKey() ed25519.PublicKey {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.closed {
+		return nil
+	}
+	return d.identityKeyLocked()
+}
+
+// identityKeyLocked is IdentityKey; d.mu is held.
+func (d *Device) identityKeyLocked() ed25519.PublicKey {
+	return append(ed25519.PublicKey(nil), d.ik.Public().(ed25519.PublicKey)...)
+}
 
 // KEMKey returns the device's static KEM key.
 func (d *Device) KEMKey() *suite.PublicKey { return d.kem.Public() }
@@ -539,6 +607,11 @@ func (d *Device) DeviceID() string {
 // OpenToken mints a one-shot open token for the device's mailbox, for the
 // vault's first deposit at enrollment (§7.1: ≤ 10 min).
 func (d *Device) OpenToken() (string, error) {
+	d.mu.Lock() // the relay key is used under the lock: Close wipes it under the lock
+	defer d.mu.Unlock()
+	if d.closed {
+		return "", ErrClosed
+	}
 	return d.own.MintOpenToken(d.st.RelayURL, 10*time.Minute, "")
 }
 
@@ -601,6 +674,9 @@ func (d *Device) AwaitEnrolled(ctx context.Context) error {
 // CompleteEnrollment runs the first app's handshake (purpose app, ctx =
 // vault id) and waits for device.paired.
 func (d *Device) CompleteEnrollment(ctx context.Context) error {
+	if d.isClosed() {
+		return ErrClosed
+	}
 	d.mu.Lock()
 	if d.st.Vault == nil || d.st.Vault.Token == "" {
 		d.mu.Unlock()
@@ -624,6 +700,9 @@ func (d *Device) CompleteEnrollment(ctx context.Context) error {
 // (hs.fin) and returns the SAS to compare (0.10.3). Then call AwaitPaired,
 // which waits for the owner's approval (device.paired).
 func (d *Device) Pair(ctx context.Context, link string) (string, error) {
+	if d.isClosed() {
+		return "", ErrClosed
+	}
 	return d.PairAttested(ctx, link, nil)
 }
 
@@ -631,6 +710,9 @@ func (d *Device) Pair(ctx context.Context, link string) (string, error) {
 // carries device_attest over the challenge DevattChallenge(hs.init id, "",
 // hs.init ts) (§6.7, §11.7).
 func (d *Device) PairAttested(ctx context.Context, link string, att Attester) (string, error) {
+	if d.isClosed() {
+		return "", ErrClosed
+	}
 	if err := d.startPairing(ctx, link, att); err != nil {
 		return "", err
 	}
@@ -671,6 +753,11 @@ func (d *Device) awaitHandshake(ctx context.Context) (string, error) {
 func (d *Device) startPairing(ctx context.Context, link string, att Attester) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	if d.closed {
+		return ErrClosed
+	}
+	ctx, cancel := d.bound(ctx) // Close ends the claim fetch and the deposit
+	defer cancel()
 	if d.refused != nil {
 		// Before anything else: fetching the claim would spend the
 		// owner's single-use link, and opening it would replace the vault
@@ -757,6 +844,9 @@ func (d *Device) startInit(purpose handshake.Purpose, ctxID, depositToken string
 
 func (d *Device) startInitWith(purpose handshake.Purpose, ctxID, depositToken string, profile json.RawMessage, da *altchan.DeviceAttest, id string, now time.Time,
 	apiKey []byte) error {
+	if d.closed { // d.mu is held
+		return ErrClosed
+	}
 	if d.refused != nil {
 		// This device's relay key is refused by the vault's mailbox, and a
 		// re-pairing must use a new relay key (§6.7): a new Device.
@@ -787,7 +877,7 @@ func (d *Device) startInitWith(purpose handshake.Purpose, ctxID, depositToken st
 		secret = d.unlockSecretLocked(1)
 	}
 	ini, err := handshake.NewInitiator(handshake.InitiatorConfig{
-		Purpose: purpose, Ctx: ctxID, Identity: d.ik, StaticKEM: d.kem.Public(), Relay: d.RelayAddr(),
+		Purpose: purpose, Ctx: ctxID, Identity: d.ik, StaticKEM: d.kem.Public(), Relay: d.relayAddrLocked(),
 		Token: tok, Profile: profile, ResponderIK: v.IK, ResponderEK: ek, ResponderRelayKey: v.RelayPK,
 		Policy: d.policy(), Now: now, ID: id, DeviceAttest: da, APIKey: apiKey, UnlockSecret: secret,
 		Features: Features(),
@@ -795,7 +885,9 @@ func (d *Device) startInitWith(purpose handshake.Purpose, ctxID, depositToken st
 	if err != nil {
 		return err
 	}
-	if _, err := d.relayClient(v.RelayURL).Deposit(context.Background(), v.Mailbox, depositToken, ini.Envelope()); err != nil {
+	dctx, cancel := d.bound(context.Background()) // Close ends it
+	defer cancel()
+	if _, err := d.relayClient(v.RelayURL).Deposit(dctx, v.Mailbox, depositToken, ini.Envelope()); err != nil {
 		return err
 	}
 	d.ini = ini
@@ -855,6 +947,11 @@ func (d *Device) sendLocked(ctx context.Context, id, typ string, body json.RawMe
 }
 
 func (d *Device) sendFull(ctx context.Context, id, typ string, body json.RawMessage, re, status string, exp time.Time) (_ string, err error) {
+	if d.closed {
+		return "", ErrClosed
+	}
+	ctx, cancel := d.bound(ctx) // Close ends a deposit in progress
+	defer cancel()
 	v := d.st.Vault
 	if v == nil || v.Token == "" || d.keyring.Current() == nil {
 		return "", ErrNotPaired
@@ -1028,6 +1125,10 @@ func (d *Device) waitUntil(ctx context.Context, done func() bool) error {
 	fails := 0
 	for {
 		d.mu.Lock()
+		if d.closed {
+			d.mu.Unlock()
+			return ErrClosed
+		}
 		if done() {
 			d.mu.Unlock()
 			return nil
@@ -1055,6 +1156,9 @@ func (d *Device) waitUntil(ctx context.Context, done func() bool) error {
 		if hit {
 			return nil
 		}
+		if errors.Is(err, ErrClosed) || d.closing() {
+			return ErrClosed
+		}
 		if err == nil || ctx.Err() != nil {
 			fails = 0
 			continue
@@ -1073,15 +1177,250 @@ func (d *Device) waitUntil(ctx context.Context, done func() bool) error {
 
 // acquire takes sem, or returns the context's error.
 func (d *Device) acquire(ctx context.Context) error {
+	if d.isClosed() {
+		return ErrClosed
+	}
+	ctx, cancel := d.bound(ctx)
+	defer cancel()
 	select {
 	case d.sem <- struct{}{}:
+		if d.isClosed() { // closed while waiting: Close takes sem next
+			d.release()
+			return ErrClosed
+		}
 		return nil
 	case <-ctx.Done():
+		if d.closing() {
+			return ErrClosed
+		}
 		return ctx.Err()
 	}
 }
 
-func (d *Device) release() { <-d.sem }
+// ErrClosed is returned by a Device's operations once it is closed.
+var ErrClosed = errors.New("client: device closed")
+
+// inCallback runs a Persist, PersistBatch or RunError callback, counted so
+// that a Close from it does not wait for itself; the count is kept right
+// if the callback panics.
+func (d *Device) inCallback(f func()) {
+	d.callbacks.Add(1)
+	defer d.callbacks.Add(-1)
+	f()
+}
+
+// closing reports whether Close has begun (its context is cancelled
+// before it sets closed).
+func (d *Device) closing() bool { return d.closeCtx != nil && d.closeCtx.Err() != nil }
+
+// isClosed reports whether Close was called.
+func (d *Device) isClosed() bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.closed
+}
+
+// bound returns ctx cut short by Close, and its cancel.
+func (d *Device) bound(ctx context.Context) (context.Context, context.CancelFunc) {
+	if d.closeCtx == nil {
+		return ctx, func() {}
+	}
+	c, cancel := context.WithCancel(ctx)
+	stop := context.AfterFunc(d.closeCtx, cancel)
+	return c, func() { stop(); cancel() }
+}
+
+// Close ends the Device and wipes what it holds in memory: the messages
+// handled and not yet taken (held and buffered events), the agent's
+// grants, the session keys, the handshakes in progress, the device's own
+// keys, and every byte slice of its state (seeds, the app key, the phone
+// key, the credential copy, the outbox). The vault, recovery, credential
+// and handshake state are dropped with them.
+//
+// To keep the state, stop Run (end its context), Save, then Close: a
+// message Run handles between Save and Close is acknowledged but not
+// saved. Save returns ErrClosed after Close.
+//
+// Close cuts short a Poll, deposit, transfer or wait in progress, waits
+// for Run to return, and wipes. Afterwards every method with an error
+// result returns ErrClosed; getters return empty values (IdentityKey nil,
+// RelayAddr zero). A second Close waits for the first to finish.
+//
+// From a Persist, PersistBatch or RunError callback (or while one runs on
+// any goroutine), Close does not wait for the Poll or Run that called it:
+// it returns at once, possibly before the wipe, which is done when that
+// Poll ends (or at once if no Poll holds the Device). A second Close then
+// does not wait for the wipe either. Close must not be called from an Attester, which
+// runs while the Device is locked.
+//
+// What Close cannot reach: Go strings (tokens, ids), and key copies
+// already handed out (the *ecdsa.PrivateKey from AppKey, and the one in a
+// MemberAPI from APIFor).
+func (d *Device) Close() error {
+	if d.closeStop != nil {
+		d.closeStop() // ends a poll, deposit, transfer or wait in progress
+	}
+	d.mu.Lock()
+	if d.closed {
+		done := d.closeDone
+		d.mu.Unlock()
+		if d.callbacks.Load() == 0 && done != nil {
+			<-done
+		}
+		return nil
+	}
+	d.closed = true
+	d.closeDone = make(chan struct{})
+	if d.wake != nil {
+		d.wakeLocked()
+	}
+	running, runDone := d.running, d.runDone
+	if d.callbacks.Load() > 0 {
+		// Waiting for the Poll or Run that may be the caller would never
+		// end. Under d.mu, as release checks: take the semaphore if no
+		// Poll holds it and wipe now, or leave the wipe to that Poll's
+		// release.
+		now := d.sem == nil
+		if !now {
+			select {
+			case d.sem <- struct{}{}:
+				now = true
+			default:
+				d.wipePending = true
+			}
+		}
+		d.mu.Unlock()
+		if now {
+			d.wipe()
+		}
+		return nil
+	}
+	d.mu.Unlock()
+	if testCloseWaitHook != nil {
+		testCloseWaitHook()
+	}
+	if running {
+		<-runDone
+	}
+	if d.sem != nil {
+		d.sem <- struct{}{} // no Poll runs from here on; never released
+	}
+	d.mu.Lock()
+	d.wipePending = false
+	d.mu.Unlock()
+	d.wipe()
+	return nil
+}
+
+// testCloseWaitHook, set only by tests, runs in Close once closed is set,
+// before it waits for Run and the poll semaphore.
+var testCloseWaitHook func()
+
+// wipe wipes what the Device holds (Close). The caller holds the poll
+// semaphore, so no Poll runs, and keeps it.
+func (d *Device) wipe() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	for _, in := range d.held {
+		in.Wipe()
+	}
+	for _, in := range d.events {
+		in.Wipe()
+	}
+	d.held, d.events = nil, nil
+	suite.Wipe(d.leashGrants)
+	d.leashGrants, d.leashStatus = nil, nil
+	if d.keyring != nil {
+		d.keyring.Destroy()
+	}
+	if d.ini != nil {
+		d.ini.Abort()
+		d.ini = nil
+	}
+	for _, r := range d.awaiting {
+		r.Abort()
+	}
+	d.awaiting, d.awaitingSince = nil, nil
+	clear(d.ik)
+	clear(d.relayKey) // the relay client's key, the same bytes
+	if d.kem != nil {
+		d.kem.Destroy()
+	}
+	if d.st != nil {
+		wipeBytes(reflect.ValueOf(d.st))
+		// Dropped, not left zeroed: a zero public key verifies forged
+		// signatures, and nothing is to use them now.
+		d.st.Vault, d.st.Recovery, d.st.Alt, d.st.Credential = nil, nil, nil, nil
+		d.st.Outgoing, d.st.Awaiting, d.st.AwaitingSince, d.st.Outbox = nil, nil, nil, nil
+		d.st.UTKs, d.st.AttestChain = nil, nil
+	}
+	if d.closeDone != nil {
+		close(d.closeDone)
+	}
+}
+
+// wipeBytes zeroes every byte slice reachable from v (through pointers,
+// structs, slices and maps): the device state's secrets, whatever field
+// holds them. State has no pointer cycles; a byte array held as a map
+// value (not addressable) is skipped.
+func wipeBytes(v reflect.Value) {
+	if v.Type() == reflect.TypeFor[time.Time]() {
+		return // its location may be shared (time.Local)
+	}
+	switch v.Kind() {
+	case reflect.Pointer, reflect.Interface:
+		if !v.IsNil() {
+			wipeBytes(v.Elem())
+		}
+	case reflect.Struct:
+		for i := range v.NumField() {
+			wipeBytes(v.Field(i))
+		}
+	case reflect.Slice:
+		if v.Type().Elem().Kind() == reflect.Uint8 {
+			suite.Wipe(v.Bytes())
+			return
+		}
+		for i := range v.Len() {
+			wipeBytes(v.Index(i))
+		}
+	case reflect.Array:
+		if v.Type().Elem().Kind() == reflect.Uint8 && v.CanAddr() {
+			suite.Wipe(v.Slice(0, v.Len()).Bytes())
+			return
+		}
+		for i := range v.Len() {
+			wipeBytes(v.Index(i))
+		}
+	case reflect.Map:
+		for _, k := range v.MapKeys() {
+			wipeBytes(v.MapIndex(k))
+		}
+	}
+}
+
+// release gives back the poll semaphore, or, if Close ran during a
+// callback of this Poll, wipes and keeps it.
+func (d *Device) release() {
+	if testReleaseHook != nil {
+		testReleaseHook()
+	}
+	// The check and the hand-back are one step under d.mu: a Close from a
+	// callback, which sets wipePending and tries the semaphore under d.mu,
+	// either sees it free (and wipes) or leaves the wipe to this release.
+	d.mu.Lock()
+	if !d.wipePending {
+		<-d.sem // never blocks: the caller holds the slot
+		d.mu.Unlock()
+		return
+	}
+	d.wipePending = false
+	d.mu.Unlock()
+	d.wipe() // the semaphore is kept: no Poll runs after the wipe
+}
+
+// testReleaseHook, set only by tests, runs as release begins.
+var testReleaseHook func()
 
 // wakeLocked wakes the waiting calls. d.mu is held.
 func (d *Device) wakeLocked() {
@@ -1105,8 +1444,12 @@ func (d *Device) wakeLocked() {
 // events of a batch whose save failed) stay in the Device after Run stops:
 // the next Poll, or a waiting call's own, saves and delivers them. A
 // caller wipes the bodies it takes once done with them (envelope.Inner.Wipe).
-func (d *Device) Run(ctx context.Context) error {
+func (d *Device) Run(ctx context.Context) (err error) {
 	d.mu.Lock()
+	if d.closed {
+		d.mu.Unlock()
+		return ErrClosed
+	}
 	if d.running {
 		d.mu.Unlock()
 		return ErrRunning
@@ -1119,6 +1462,13 @@ func (d *Device) Run(ctx context.Context) error {
 		close(d.runDone)
 		d.wakeLocked()
 		d.mu.Unlock()
+	}()
+	ctx, cancel := d.bound(ctx) // Close ends it
+	defer cancel()
+	defer func() {
+		if d.closing() {
+			err = ErrClosed
+		}
 	}()
 	fails := 0
 	for {
@@ -1134,7 +1484,7 @@ func (d *Device) Run(ctx context.Context) error {
 			return ctx.Err()
 		}
 		if f := d.cfg.RunError; f != nil {
-			f(err)
+			d.inCallback(func() { f(err) })
 		}
 		fails++
 		t := time.NewTimer(outboxBackoff(fails))
@@ -1161,13 +1511,21 @@ func (d *Device) Poll(ctx context.Context) error {
 	if running {
 		return ErrRunning
 	}
-	return d.poll(ctx, nil)
+	if err := d.poll(ctx, nil); err != nil {
+		if d.closing() {
+			return ErrClosed
+		}
+		return err
+	}
+	return nil
 }
 
 // poll is Poll; skip (called with mu held, once sem is taken) ends it
 // early without collecting, for a waiter whose message arrived during
 // the Poll it waited for.
 func (d *Device) poll(ctx context.Context, skip func() bool) error {
+	ctx, cancel := d.bound(ctx) // Close ends a long poll
+	defer cancel()
 	if err := d.acquire(ctx); err != nil {
 		return err
 	}
@@ -1337,9 +1695,9 @@ func (d *Device) saveLocked() error {
 		return err
 	}
 	if d.cfg.PersistBatch != nil {
-		err = d.cfg.PersistBatch(state, batch)
+		d.inCallback(func() { err = d.cfg.PersistBatch(state, batch) })
 	} else {
-		err = d.cfg.Persist(state)
+		d.inCallback(func() { err = d.cfg.Persist(state) })
 	}
 	suite.Wipe(state)
 	d.mu.Lock()
@@ -1417,6 +1775,9 @@ func outboxKind(typ, re string) string {
 // mailbox answered token_revoked it sends nothing and returns that
 // refusal (§8.6). d.mu is held.
 func (d *Device) depositVault(ctx context.Context, kind, relayURL, mailbox, token string, payload []byte) error {
+	if d.closed { // d.mu is held
+		return ErrClosed
+	}
 	if d.refused != nil {
 		return d.refused
 	}
@@ -1618,9 +1979,17 @@ func outboxBackoff(n int) time.Duration {
 // if any, is PersistError, and the next Poll saves again), then its
 // deposits are made.
 func (d *Device) Deliver(ctx context.Context, m relayclient.Message) {
+	if d.isClosed() {
+		return
+	}
+	ctx, cancel := d.bound(ctx) // Close ends its deposits
+	defer cancel()
 	if !d.persists() {
 		d.mu.Lock()
 		defer d.mu.Unlock()
+		if d.closed { // checked again under the lock: Close may have run since
+			return
+		}
 		d.handle(ctx, m)
 		return
 	}
@@ -2204,8 +2573,14 @@ func (d *Device) chain() []*handshake.Rotation {
 // whatever the current token's age. The old app does this at a transfer's
 // approval (TransferApproveSigner).
 func (d *Device) RenewVaultToken(ctx context.Context) error {
+	if d.isClosed() {
+		return ErrClosed
+	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	if d.closed { // checked again under the lock: Close may have run since
+		return ErrClosed
+	}
 	if d.st.Vault == nil || d.keyring.Current() == nil {
 		return ErrNotPaired
 	}

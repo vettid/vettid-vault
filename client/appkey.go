@@ -20,8 +20,14 @@ import (
 // AppKey returns this app's app key and its SPKI DER, making it on first
 // use.
 func (d *Device) AppKey() (*ecdsa.PrivateKey, []byte, error) {
+	if d.isClosed() {
+		return nil, nil, ErrClosed
+	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	if d.closed { // checked again under the lock: Close may have run since
+		return nil, nil, ErrClosed
+	}
 	return d.appKeyLocked()
 }
 
@@ -51,6 +57,9 @@ func (d *Device) appKeyLocked() (*ecdsa.PrivateKey, []byte, error) {
 // AppKeyB64 returns the app key as the API takes it: standard base64 of
 // the SPKI DER.
 func (d *Device) AppKeyB64() (string, error) {
+	if d.isClosed() {
+		return "", ErrClosed
+	}
 	_, der, err := d.AppKey()
 	if err != nil {
 		return "", err
@@ -61,6 +70,9 @@ func (d *Device) AppKeyB64() (string, error) {
 // APIFor returns a member API client whose requests this app's key signs
 // for its vault (§11.12.2): the app holds no member session.
 func (d *Device) APIFor(base string, hc *http.Client) (*MemberAPI, error) {
+	if d.isClosed() {
+		return nil, ErrClosed
+	}
 	k, _, err := d.AppKey()
 	if err != nil {
 		return nil, err
@@ -146,6 +158,9 @@ func (a *MemberAPI) RecoveryClaim(ctx context.Context, vaultID, recoveryID strin
 // vault id the API assigned, which then names the vault in the app key's
 // requests (enclave, enroll, polls; §11.12.1).
 func (d *Device) RedeemVia(ctx context.Context, api *MemberAPI, secret, email, code string) (*RedeemResult, error) {
+	if d.isClosed() {
+		return nil, ErrClosed
+	}
 	r, err := api.Redeem(ctx, secret, email, code)
 	if err != nil {
 		return nil, err
@@ -162,6 +177,9 @@ func (d *Device) RedeemVia(ctx context.Context, api *MemberAPI, secret, email, c
 // ClaimVia claims a recovery from its QR with this app's key and records
 // the member's id (§11.11.7).
 func (d *Device) ClaimVia(ctx context.Context, api *MemberAPI, qr *altchan.RecoveryCode) (*RedeemResult, error) {
+	if d.isClosed() {
+		return nil, ErrClosed
+	}
 	r, err := api.RecoveryClaim(ctx, qr.VaultID, qr.RecoveryID)
 	if err != nil {
 		return nil, err

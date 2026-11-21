@@ -227,7 +227,7 @@ func (d *Device) CallStart(ctx context.Context, connectionID, media, sdp string)
 		return nil, err
 	}
 	ek := sk.Public().Bytes()
-	esig, err := callwire.SignShare(d.ik, callwire.ShareMessage(callwire.RoleOffer, cid, media, ek))
+	esig, err := d.signShare(callwire.ShareMessage(callwire.RoleOffer, cid, media, ek))
 	if err != nil {
 		return nil, err
 	}
@@ -254,6 +254,9 @@ func (d *Device) CallStart(ctx context.Context, connectionID, media, sdp string)
 // IncomingCall checks a call.offer event from the vault (its ICE
 // configuration signed by the vault).
 func (d *Device) IncomingCall(ev *envelope.Inner) (*Call, error) {
+	if d.isClosed() {
+		return nil, ErrClosed
+	}
 	if ev.Type != "call.offer" {
 		return nil, ErrCall
 	}
@@ -285,6 +288,9 @@ func (d *Device) IncomingCall(ev *envelope.Inner) (*Call, error) {
 // CallAnswer answers an incoming call: it encapsulates to the caller's
 // ek (the media key stays on this device) and sends call.answer.
 func (d *Device) CallAnswer(ctx context.Context, c *Call, sdp string) error {
+	if d.isClosed() {
+		return ErrClosed
+	}
 	o, err := strictjson.ParseObject(c.Offer.Body)
 	defer wipeParsed(o) // the response body, parsed: nothing here keeps a slice of it
 	if err != nil {
@@ -298,7 +304,7 @@ func (d *Device) CallAnswer(ctx context.Context, c *Call, sdp string) error {
 	if err != nil {
 		return err
 	}
-	esig, err := callwire.SignShare(d.ik, callwire.ShareMessage(callwire.RoleAnswer, c.ID, "", enc))
+	esig, err := d.signShare(callwire.ShareMessage(callwire.RoleAnswer, c.ID, "", enc))
 	if err != nil {
 		suite.Wipe(k)
 		return err
@@ -315,6 +321,9 @@ func (d *Device) CallAnswer(ctx context.Context, c *Call, sdp string) error {
 // CallAccept takes the callee's call.answer event and derives the media
 // key on the calling device.
 func (d *Device) CallAccept(c *Call, ev *envelope.Inner) (sdp string, err error) {
+	if d.isClosed() {
+		return "", ErrClosed
+	}
 	o, err := strictjson.ParseObject(ev.Body)
 	defer wipeParsed(o) // our parse of the caller's event: nothing here keeps a slice of it
 	if err != nil {

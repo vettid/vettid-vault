@@ -143,6 +143,9 @@ func (d *Device) sealedOp(ctx context.Context, typ string, withBlob bool, payloa
 // CredentialRaw sends a credential operation with an explicit UTK and
 // blob (nil: none). It exists for tests of UTK reuse and stale blobs.
 func (d *Device) CredentialRaw(ctx context.Context, typ string, u UTK, blob []byte, payload map[string]any) (strictjson.Object, error) {
+	if d.isClosed() {
+		return nil, ErrClosed
+	}
 	o, _, _, err := d.sealedWith(ctx, typ, u, blob, blob != nil, payload, false, nil)
 	return o, err
 }
@@ -150,6 +153,9 @@ func (d *Device) CredentialRaw(ctx context.Context, typ string, u UTK, blob []by
 // CredentialRawExtra is CredentialRaw with extra outer members (a
 // transfer approval's transfer_id and signer).
 func (d *Device) CredentialRawExtra(ctx context.Context, typ string, u UTK, blob []byte, payload, extra map[string]any) (strictjson.Object, error) {
+	if d.isClosed() {
+		return nil, ErrClosed
+	}
 	o, _, _, err := d.sealedWith(ctx, typ, u, blob, blob != nil, payload, false, extra)
 	return o, err
 }
@@ -496,8 +502,14 @@ func (d *Device) TransferReject(ctx context.Context, id string) error {
 // CredentialBlob returns this app's copy of the blob (the member's own
 // backup when the vault keeps none, §3.5.6).
 func (d *Device) CredentialBlob() []byte {
+	if d.isClosed() {
+		return nil
+	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	if d.closed { // checked again under the lock: Close may have run since
+		return nil
+	}
 	if d.st.Credential == nil {
 		return nil
 	}

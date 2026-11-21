@@ -2,9 +2,11 @@ package envelope
 
 import (
 	"encoding/json"
+	"strconv"
 	"time"
 
 	"github.com/vettid/vettid-vault/vms/strictjson"
+	"github.com/vettid/vettid-vault/vms/suite"
 )
 
 // InnerVersion is the inner format version `v` (§5.3).
@@ -248,14 +250,32 @@ func (in *Inner) Marshal(mode Mode) ([]byte, error) {
 	return b.Bytes(), nil
 }
 
+// testParsedHook, set only by tests, sees each set of members ParseInner
+// parsed (the top level, the error object, the features array) once wiped.
+var testParsedHook func(strictjson.Object)
+
+// wipeParsed wipes the members ParseInner parsed out of its input.
+func wipeParsed(o strictjson.Object) {
+	o.Wipe()
+	if testParsedHook != nil {
+		testParsedHook(o)
+	}
+}
+
 // ParseInner parses an (unpadded) inner plaintext strictly. Unknown members
 // are ignored (§5.3); known members must have exactly the specified type
 // and form; duplicate member names anywhere are rejected.
+//
+// b is the caller's to wipe. The copies ParseInner makes of it are
+// wiped before it returns, except Body, which the returned Inner owns
+// (Inner.Wipe). The string members (id, type, the error's message, …) are
+// Go strings and cannot be wiped; a message's secrets belong in its body.
 func ParseInner(b []byte, mode Mode) (*Inner, error) {
 	o, err := strictjson.ParseObject(b)
 	if err != nil {
 		return nil, ErrInner
 	}
+	defer wipeParsed(o) // every member's copy, the body's too unless handed over
 	if v, err := o.Uint("v", InnerVersion, InnerVersion); err != nil || v != InnerVersion {
 		return nil, ErrInner
 	}
@@ -300,6 +320,7 @@ func ParseInner(b []byte, mode Mode) (*Inner, error) {
 		if err != nil {
 			return nil, ErrInner
 		}
+		defer wipeParsed(eo) // its members' copies, unknown ones included
 		e := &Error{}
 		if e.Code, err = eo.String("code"); err != nil {
 			return nil, ErrInner
@@ -314,6 +335,13 @@ func ParseInner(b []byte, mode Mode) (*Inner, error) {
 	if arr, ok, err := o.OptArray("features"); err != nil {
 		return nil, ErrInner
 	} else if ok {
+		defer func() {
+			f := strictjson.Object{}
+			for i, raw := range arr {
+				f[strconv.Itoa(i)] = raw
+			}
+			wipeParsed(f)
+		}()
 		// 0.86.0 (§5.3): a known member, so its form is checked.
 		in.Features = make([]string, 0, len(arr))
 		for _, raw := range arr {
@@ -327,14 +355,25 @@ func ParseInner(b []byte, mode Mode) (*Inner, error) {
 			return nil, ErrInner
 		}
 	}
-	if _, err := o.Object("body"); err != nil {
+	// Checked without o.Object, which would copy each of the body's
+	// members once more. The body's copy in o is handed over, not copied.
+	if !o.IsObjectMember("body") {
 		return nil, ErrInner
 	}
-	in.Body = append(json.RawMessage(nil), o["body"]...)
 	if err := in.validate(mode); err != nil {
-		return nil, err
+		return nil, err // the body's copy is wiped with the other members
 	}
+	in.Body = o["body"]
+	delete(o, "body")
 	return in, nil
+}
+
+// Wipe zeroes the body, the copy of the plaintext the Inner owns. A caller
+// that drops a message it opened, rather than handing it on, wipes it.
+func (in *Inner) Wipe() {
+	if in != nil {
+		suite.Wipe(in.Body)
+	}
 }
 
 // CheckTime applies the freshness rules (§8.4, §5.3): reject `ts` more than

@@ -317,6 +317,10 @@ func (i *Initiator) handleResp(raw []byte, collectSender ed25519.PublicKey, now 
 	return res, true, err
 }
 
+// testDropHook, set only by tests, sees an opened hs.resp that
+// completeResp drops, once its body is wiped.
+var testDropHook func(*envelope.Inner)
+
 func (i *Initiator) completeResp(env *envelope.Envelope, padded []byte, exp suite.Exporter, now time.Time) (*Result, error) {
 	ke, err := exp.Export(suite.LabelHsKe, suite.KeySize)
 	if err != nil {
@@ -327,6 +331,16 @@ func (i *Initiator) completeResp(env *envelope.Envelope, padded []byte, exp suit
 	if err != nil {
 		return nil, err
 	}
+	// hs.resp carries the request token: wiped unless the Result hands it on.
+	handed := false
+	defer func() {
+		if !handed {
+			in.Wipe()
+			if testDropHook != nil {
+				testDropHook(in)
+			}
+		}
+	}()
 	if in.Type != TypeResp {
 		return nil, ErrType
 	}
@@ -369,6 +383,7 @@ func (i *Initiator) completeResp(env *envelope.Envelope, padded []byte, exp suit
 	if i.verifyOnly {
 		// Evidence only (RestoreInitiatorVerifyOnly): sig_R verified, no
 		// sig_I and no hs.fin. The caller activates nothing.
+		handed = true
 		return &Result{Epoch: epoch, Resp: resp, ResponderIK: verifyIK, ResponderKEM: newKEM, Inner: in, SAS: sas}, nil
 	}
 	sigI, err := SignFin(i.cfg.Identity, th)
@@ -391,5 +406,6 @@ func (i *Initiator) completeResp(env *envelope.Envelope, padded []byte, exp suit
 		epoch.Destroy()
 		return nil, err
 	}
+	handed = true
 	return &Result{Epoch: epoch, Fin: fin, Resp: resp, ResponderIK: verifyIK, ResponderKEM: newKEM, Inner: in, SAS: sas}, nil
 }

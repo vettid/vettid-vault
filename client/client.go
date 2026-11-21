@@ -1019,6 +1019,11 @@ func (d *Device) wakeLocked() {
 // 30 s), which a successful Poll resets: after a Persist error that is
 // the retry, and a refused device keeps collecting (§8.6). When Run
 // stops, waiting calls go back to collecting themselves.
+//
+// Messages handled but not yet taken (buffered events, and responses and
+// events of a batch whose save failed) stay in the Device after Run stops:
+// the next Poll, or a waiting call's own, saves and delivers them. A
+// caller wipes the bodies it takes once done with them (envelope.Inner.Wipe).
 func (d *Device) Run(ctx context.Context) error {
 	d.mu.Lock()
 	if d.running {
@@ -1557,6 +1562,34 @@ func (d *Device) Deliver(ctx context.Context, m relayclient.Message) {
 // testHandleHook, set only by tests, runs at the start of handle.
 var testHandleHook func(relayclient.Message)
 
+// testDropHook, set only by tests, sees each opened message that is
+// dropped, after its body is wiped.
+var testDropHook func(*envelope.Inner)
+
+// testPaddedHook, set only by tests, sees handleEnrolled's opened
+// plaintext once it is wiped.
+var testPaddedHook func([]byte)
+
+// testParsedHook, set only by tests, sees a body's parsed members once
+// wipeParsed has wiped them.
+var testParsedHook func(strictjson.Object)
+
+// wipeParsed wipes the members parsed out of a body that carries a token.
+func wipeParsed(o strictjson.Object) {
+	o.Wipe()
+	if testParsedHook != nil {
+		testParsedHook(o)
+	}
+}
+
+// dropped wipes the body of an opened message that is not handed on.
+func dropped(in *envelope.Inner) {
+	in.Wipe()
+	if testDropHook != nil && in != nil {
+		testDropHook(in)
+	}
+}
+
 // handle processes one collected message. Classification is by sender and
 // recipient kid only (§13.6). It reports whether the message is to be left
 // unacked and not marked seen: one of a new epoch that arrived before its
@@ -1615,6 +1648,16 @@ func (d *Device) handle(ctx context.Context, m relayclient.Message) (unacked boo
 		}
 		return false
 	}
+	// A message dropped here (a duplicate, one refused for the clock, one
+	// out of place) has its body wiped. Only one handed on keeps it: an
+	// emitted one, which the caller owns, and an hs.init, which the rekey's
+	// handshake goes on reading (its body holds public keys and links).
+	handed := false
+	defer func() {
+		if !handed {
+			dropped(in)
+		}
+	}()
 	if in.ID != "" {
 		// §8.2: the inner id, per principal (here the vault only). A
 		// duplicate, a retransmitted hs.init included, is skipped, and its
@@ -1632,6 +1675,7 @@ func (d *Device) handle(ctx context.Context, m relayclient.Message) (unacked boo
 		d.noteConfirmed(ctx, ep, now)
 	}
 	if in.Type == handshake.TypeInit {
+		handed = true
 		d.handleRekey(ctx, m.Payload, in, ep, sender, now)
 		return false
 	}
@@ -1670,6 +1714,7 @@ func (d *Device) handle(ctx context.Context, m relayclient.Message) (unacked boo
 		// The device's standing token (§10.3, 0.10.3) replaces the request
 		// token of the pairing's hs.resp, before maintain() looks at it.
 		if o, err := strictjson.ParseObject(in.Body); err == nil {
+			defer wipeParsed(o) // the standing token's copy
 			if tok, ok, _ := o.OptString("token"); ok {
 				if exp, err := d.heldFromVault(tok); err == nil {
 					d.st.Vault.Token, d.st.Vault.TokenExp = tok, exp
@@ -1720,6 +1765,7 @@ func (d *Device) handle(ctx context.Context, m relayclient.Message) (unacked boo
 			d.leashGrants = append(json.RawMessage(nil), in.Body...) // the agent's current grants (§10.11); d.mu is held
 		}
 	}
+	handed = true
 	d.emit(in)
 	d.maintain(ctx, now)
 	return false
@@ -1730,14 +1776,31 @@ func (d *Device) handleEnrolled(env *envelope.Envelope, sender ed25519.PublicKey
 	if err != nil {
 		return
 	}
+	defer func() {
+		suite.Wipe(padded) // the whole plaintext; DecodeInner copies out of it
+		if testPaddedHook != nil {
+			testPaddedHook(padded)
+		}
+	}()
 	in, err := envelope.DecodeInner(padded, envelope.ModeSealed)
-	if err != nil || in.Type != "vault.enrolled" {
+	if err != nil {
+		return
+	}
+	// Wiped unless emitted: vault.enrolled carries the vault token.
+	handed := false
+	defer func() {
+		if !handed {
+			dropped(in)
+		}
+	}()
+	if in.Type != "vault.enrolled" {
 		return
 	}
 	o, err := strictjson.ParseObject(in.Body)
 	if err != nil {
 		return
 	}
+	defer wipeParsed(o) // the token's copy
 	bundle, err := o.Base64("vault_bundle", -1)
 	if err != nil {
 		return
@@ -1785,6 +1848,7 @@ func (d *Device) handleEnrolled(env *envelope.Envelope, sender ed25519.PublicKey
 		}
 		a.EnrollNonce, a.EnrollPCRs, a.EnrollNumber = nil, "", 0
 	}
+	handed = true
 	d.emit(in)
 }
 
@@ -1825,6 +1889,9 @@ func (d *Device) handleResp(ctx context.Context, raw []byte, sender ed25519.Publ
 		}
 		return
 	}
+	// The hs.resp the initiator hands on carries the request token; the
+	// device reads what it needs from res.Resp, then wipes it.
+	defer dropped(res.Inner)
 	d.ini, d.sas = nil, res.SAS
 	if res.Resp.Token != "" {
 		if exp, err := d.heldFromVault(res.Resp.Token); err == nil {
@@ -1956,6 +2023,7 @@ func (d *Device) storeVaultToken(body json.RawMessage) {
 	if err != nil {
 		return
 	}
+	defer wipeParsed(o) // the token's copy
 	tok, err := o.String("token")
 	if err != nil {
 		return

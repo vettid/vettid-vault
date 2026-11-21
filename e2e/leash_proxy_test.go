@@ -16,10 +16,11 @@ import (
 
 // §10.11 item.proxy (0.42.0) through the real relay: refused without the
 // proxy way and for a host the item does not bind; always referred, even
-// under an auto rule; approved, answered the value with the header, the
-// prefix, the host and expires_at cut to the agent's access session; a
-// header changed while it waits is referred again, the new approval
-// replacing the old.
+// under an auto rule, the approval and its pending.list entry showing
+// proxy in the settings' spelling (0.92.0); approved, answered the value
+// with the header, the prefix, the host and expires_at cut to the agent's
+// access session; a header changed while it waits is referred again, the
+// new approval replacing the old and showing the new values.
 func TestLeashItemProxy(t *testing.T) {
 	r := relaytest.Start(t, nil)
 	a := newTestVault(t, r.URL, "a", nil)
@@ -92,12 +93,19 @@ func TestLeashItemProxy(t *testing.T) {
 	}
 	cool()
 
-	// Referred under an auto rule; approved: the value, its header and the
-	// expiry cut to the session's end (asked 3,600 s, session 600 s).
-	ch := async(proxy("api.example.com"))
+	// Referred under an auto rule, the host asked with its default port: the
+	// approval and its pending.list entry show proxy with the settings'
+	// spelling (0.92.0). Approved: the value, its header and the expiry cut
+	// to the session's end (asked 3,600 s, session 600 s).
+	ch := async(proxy("api.example.com:443"))
 	ap := waitEvent(t, a.app, "approval.pending", has("type", "agent.request"))
-	if !strings.Contains(string(ap.Body), `"op":"item.proxy"`) || strings.Contains(string(ap.Body), "sk_test_1") {
+	const shown = `"proxy":{"host":"api.example.com","header":"Authorization","prefix":"Bearer "}`
+	if !strings.Contains(string(ap.Body), `"op":"item.proxy"`) || strings.Contains(string(ap.Body), "sk_test_1") ||
+		!strings.Contains(string(ap.Body), shown) {
 		t.Fatalf("approval: %s", ap.Body)
+	}
+	if pl := a.request(a.app, "pending.list", `{}`); !pl.OK() || !strings.Contains(string(pl.Body()), shown) {
+		t.Fatalf("pending.list: %+v", pl)
 	}
 	if result, err := a.app.ApprovalDecide(ctx, field(t, ap.Body, "approval_id"), true); err != nil || result != "ok" {
 		t.Fatalf("approve: %q %v", result, err)
@@ -129,6 +137,9 @@ func TestLeashItemProxy(t *testing.T) {
 		t.Fatalf("approve after the change: %q %v", result, err)
 	}
 	ap = waitEvent(t, a.app, "approval.pending", has("replaces", first))
+	if !strings.Contains(string(ap.Body), `"proxy":{"host":"api.example.com","header":"X-Api-Key","prefix":""}`) {
+		t.Fatalf("approval referred again: %s", ap.Body)
+	}
 	if result, err := a.app.ApprovalDecide(ctx, field(t, ap.Body, "approval_id"), true); err != nil || result != "ok" {
 		t.Fatalf("approve again: %q %v", result, err)
 	}

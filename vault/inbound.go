@@ -731,7 +731,7 @@ func (m *Manager) dispatch(ctx context.Context, p *Peer, in *envelope.Inner, ep 
 		// LEASH hook (§6.8, §10.11): the agent's policy may allow an owner
 		// type or refer it to the owner, and decides every agent.request;
 		// app-only types never. A refusal may name its error (0.42.0:
-		// way_not_allowed), and a referral its approval (flags, previous pin, note).
+		// way_not_allowed), and a referral its approval (flags, previous pin, proxy, note).
 		switch m.agentDecision(s, te, in) {
 		case AgentAllow:
 			allowed = true

@@ -72,6 +72,10 @@ func (d *Device) VerifyManifest(served []byte, t Trust) (*manifest.Served, *mani
 		return nil, nil, err
 	}
 	d.mu.Lock()
+	if d.closed {
+		d.mu.Unlock()
+		return nil, nil, ErrClosed
+	}
 	seen := uint64(0)
 	if d.st.Alt != nil {
 		seen = d.st.Alt.ManifestSerial
@@ -156,6 +160,9 @@ func (d *Device) alt() *AltState {
 func (d *Device) Alt() AltState {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	if d.closed {
+		return AltState{} // not re-created in the wiped state
+	}
 	a := *d.alt()
 	a.HeaderSeq = map[string]uint64{}
 	for k, v := range d.st.Alt.HeaderSeq {
@@ -358,6 +365,10 @@ func (d *Device) Signer(ctx context.Context) (*DeviceSigner, error) {
 			return nil, ErrProtocol
 		}
 		d.mu.Lock()
+		if d.closed {
+			d.mu.Unlock()
+			return nil, ErrClosed
+		}
 		d.st.SignerBound = true
 		d.mu.Unlock()
 		return sg, nil
@@ -390,7 +401,7 @@ func (d *Device) BuildUnlock(userGUID, pin string, e *Enclave, m *manifest.Manif
 	}
 	recovering := d.st.Vault == nil && d.st.Recovery != nil
 	if (d.st.Vault == nil && !recovering) || d.st.VaultID == "" {
-		return nil, ErrNotPaired
+		return nil, d.notPairedLocked()
 	}
 	a := d.alt()
 	if m.Serial < a.ManifestSerial {

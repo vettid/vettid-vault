@@ -498,9 +498,13 @@ func (d *Device) Save() ([]byte, error) {
 }
 
 func (d *Device) export() {
+	// The snapshots replaced hold key material: wiped, not left behind.
 	if d.st.Vault != nil {
+		wipeBytes(reflect.ValueOf(&d.st.Vault.Sessions))
 		d.st.Vault.Sessions = d.keyring.Export()
 	}
+	wipeBytes(reflect.ValueOf(d.st.Outgoing))
+	wipeBytes(reflect.ValueOf(d.st.Awaiting))
 	d.st.Outgoing = nil
 	if d.ini != nil {
 		if s, err := d.ini.Export(); err == nil {
@@ -550,7 +554,7 @@ func (d *Device) borrowRelay(url string) (*relayclient.Client, func(), error) {
 	key := append(ed25519.PrivateKey(nil), d.relayKey...)
 	c := relayclient.New(url, key)
 	c.HTTP, c.Now = d.cfg.HTTP, d.cfg.Now
-	return c, func() { clear(key) }, nil
+	return c, func() { wipeKey(key); c.Key = nil }, nil
 }
 
 // relayAddrLocked is RelayAddr; d.mu is held.
@@ -657,6 +661,7 @@ func (d *Device) heldFromVault(tok string) (time.Time, error) {
 }
 
 func (d *Device) setVaultFromPrincipal(pr handshake.Principal) {
+	d.dropVaultLocked()
 	d.st.Vault = &VaultRecord{IK: pr.IK, KEM: pr.KEM.Bytes(), RelayURL: pr.Relay.URL, Mailbox: pr.Relay.Mailbox, RelayPK: pr.Relay.PK}
 }
 
@@ -680,7 +685,7 @@ func (d *Device) CompleteEnrollment(ctx context.Context) error {
 	d.mu.Lock()
 	if d.st.Vault == nil || d.st.Vault.Token == "" {
 		d.mu.Unlock()
-		return ErrNotPaired
+		return d.notPairedLocked()
 	}
 	err := d.startInit(handshake.PurposeApp, d.st.VaultID, d.st.Vault.Token, nil)
 	d.mu.Unlock()
@@ -954,7 +959,7 @@ func (d *Device) sendFull(ctx context.Context, id, typ string, body json.RawMess
 	defer cancel()
 	v := d.st.Vault
 	if v == nil || v.Token == "" || d.keyring.Current() == nil {
-		return "", ErrNotPaired
+		return "", d.notPairedLocked()
 	}
 	now := d.cfg.Now()
 	if id == "" {
@@ -1122,6 +1127,8 @@ func (d *Device) waitFor(ctx context.Context, match func(*envelope.Inner) bool) 
 // waiter that had to wait for another's Poll checks it again before
 // collecting, so it never long-polls for a message already buffered.
 func (d *Device) waitUntil(ctx context.Context, done func() bool) error {
+	ctx, cancel := d.bound(ctx) // Close ends a wait, and its backoff
+	defer cancel()
 	fails := 0
 	for {
 		d.mu.Lock()
@@ -1140,12 +1147,12 @@ func (d *Device) waitUntil(ctx context.Context, done func() bool) error {
 			case <-wake:
 			case <-stopped:
 			case <-ctx.Done():
-				return d.ctxErr(ctx)
+				return d.waitErr(ctx)
 			}
 			continue
 		}
 		d.mu.Unlock()
-		if err := d.ctxErr(ctx); err != nil {
+		if err := d.waitErr(ctx); err != nil {
 			return err
 		}
 		hit := false
@@ -1165,12 +1172,16 @@ func (d *Device) waitUntil(ctx context.Context, done func() bool) error {
 		}
 		// A failed Poll (relay or Persist error): back off as Run does.
 		fails++
-		t := time.NewTimer(outboxBackoff(fails))
+		delay := outboxBackoff(fails)
+		if testBackoff > 0 {
+			delay = testBackoff
+		}
+		t := time.NewTimer(delay)
 		select {
 		case <-t.C:
 		case <-ctx.Done():
 			t.Stop()
-			return d.ctxErr(ctx)
+			return d.waitErr(ctx)
 		}
 	}
 }
@@ -1209,6 +1220,37 @@ func (d *Device) inCallback(f func()) {
 	f()
 }
 
+// dropVaultLocked drops the vault record, wiping its last sessions
+// snapshot (session keys) first. d.mu is held.
+func (d *Device) dropVaultLocked() {
+	if d.st.Vault != nil {
+		wipeBytes(reflect.ValueOf(&d.st.Vault.Sessions))
+	}
+	d.st.Vault = nil
+}
+
+// notPairedLocked is ErrNotPaired, or ErrClosed once the Device is closed
+// (Close drops the vault record). d.mu is held.
+func (d *Device) notPairedLocked() error {
+	if d.closed {
+		return ErrClosed
+	}
+	return ErrNotPaired
+}
+
+// testBackoff, set only by tests, replaces a waiting call's backoff after
+// a failed Poll.
+var testBackoff time.Duration
+
+// waitErr is ctxErr, or ErrClosed if Close ended the wait.
+func (d *Device) waitErr(ctx context.Context) error {
+	err := d.ctxErr(ctx)
+	if err != nil && d.closing() {
+		return ErrClosed
+	}
+	return err
+}
+
 // closing reports whether Close has begun (its context is cancelled
 // before it sets closed).
 func (d *Device) closing() bool { return d.closeCtx != nil && d.closeCtx.Err() != nil }
@@ -1243,19 +1285,27 @@ func (d *Device) bound(ctx context.Context) (context.Context, context.CancelFunc
 //
 // Close cuts short a Poll, deposit, transfer or wait in progress, waits
 // for Run to return, and wipes. Afterwards every method with an error
-// result returns ErrClosed; getters return empty values (IdentityKey nil,
-// RelayAddr zero). A second Close waits for the first to finish.
+// result returns ErrClosed. Of the getters, IdentityKey returns nil,
+// RelayAddr, Alt and LeashGrants empty values; the public ones (KEMKey,
+// the ids, Paired) keep theirs. A second Close waits for the first to
+// finish. A Persist due after Close is skipped: that batch stays unacked
+// and is delivered again to whoever opens the saved state.
 //
 // From a Persist, PersistBatch or RunError callback (or while one runs on
 // any goroutine), Close does not wait for the Poll or Run that called it:
 // it returns at once, possibly before the wipe, which is done when that
 // Poll ends (or at once if no Poll holds the Device). A second Close then
-// does not wait for the wipe either. Close must not be called from an Attester, which
-// runs while the Device is locked.
+// does not wait for the wipe either.
 //
-// What Close cannot reach: Go strings (tokens, ids), and key copies
-// already handed out (the *ecdsa.PrivateKey from AppKey, and the one in a
-// MemberAPI from APIFor).
+// Close must not be called from a WaitEvent predicate, an Attester,
+// Config.HTTP or Config.Now: they run while the Device is locked, and
+// Close would wait for that lock.
+//
+// What Close cannot reach: Go strings (tokens, ids); key copies already
+// handed out (the *ecdsa.PrivateKey from AppKey, and the one in a
+// MemberAPI from APIFor); what the KEM library keeps inside its key
+// values beyond the seed Destroy wipes; and copies encoding/json made in
+// its pooled buffers (Save).
 func (d *Device) Close() error {
 	if d.closeStop != nil {
 		d.closeStop() // ends a poll, deposit, transfer or wait in progress
@@ -1341,8 +1391,14 @@ func (d *Device) wipe() {
 		r.Abort()
 	}
 	d.awaiting, d.awaitingSince = nil, nil
-	clear(d.ik)
-	clear(d.relayKey) // the relay client's key, the same bytes
+	wipeKey(d.ik)
+	wipeKey(d.relayKey) // the relay client's key, the same bytes
+	// Dropped too: crypto/ed25519 caches each key's expanded form for as
+	// long as the key's bytes stay referenced.
+	d.ik, d.relayKey = nil, nil
+	if d.own != nil {
+		d.own.Key = nil
+	}
 	if d.kem != nil {
 		d.kem.Destroy()
 	}
@@ -1378,7 +1434,8 @@ func wipeBytes(v reflect.Value) {
 		}
 	case reflect.Slice:
 		if v.Type().Elem().Kind() == reflect.Uint8 {
-			suite.Wipe(v.Bytes())
+			b := v.Bytes()
+			suite.Wipe(b[:cap(b)]) // to capacity: a shorter slice may hide older bytes
 			return
 		}
 		for i := range v.Len() {
@@ -1686,6 +1743,10 @@ func (d *Device) persists() bool { return d.cfg.Persist != nil || d.cfg.PersistB
 // waiting calls; on failure the device stays dirty.
 func (d *Device) saveLocked() error {
 	d.mu.Lock()
+	if d.closed { // the state is wiped: not saved; the batch stays unacked and is redelivered
+		d.mu.Unlock()
+		return ErrClosed
+	}
 	d.export()
 	state, err := json.Marshal(d.st)
 	queued := d.nextSeq
@@ -2150,7 +2211,8 @@ func (d *Device) handle(ctx context.Context, m relayclient.Message) (unacked boo
 			return false
 		}
 		d.keyring = &handshake.Keyring{}
-		d.st.Vault, d.sas, d.st.PairingPending = nil, "", false
+		d.dropVaultLocked()
+		d.sas, d.st.PairingPending = "", false
 		d.dropOutboxLocked()
 	case "device.paired":
 		// §6.7 "Late and duplicate": the vault sends it once per pairing.
@@ -2211,6 +2273,7 @@ func (d *Device) handle(ctx context.Context, m relayclient.Message) (unacked boo
 		d.followRotation(in.Body)
 	case "leash.grant.updated":
 		if in.Re == "" && d.newerGrantSet(in.Body) {
+			suite.Wipe(d.leashGrants)                                // the set it replaces
 			d.leashGrants = append(json.RawMessage(nil), in.Body...) // the agent's current grants (§10.11); d.mu is held
 		}
 	}
@@ -2282,7 +2345,7 @@ func (d *Device) handleEnrolled(env *envelope.Envelope, sender ed25519.PublicKey
 	d.setVaultFromPrincipal(pr)
 	exp, err := d.heldFromVault(tok)
 	if err != nil {
-		d.st.Vault = nil
+		d.dropVaultLocked()
 		return
 	}
 	d.st.Vault.Token, d.st.Vault.TokenExp = tok, exp
@@ -2582,7 +2645,7 @@ func (d *Device) RenewVaultToken(ctx context.Context) error {
 		return ErrClosed
 	}
 	if d.st.Vault == nil || d.keyring.Current() == nil {
-		return ErrNotPaired
+		return d.notPairedLocked()
 	}
 	tok, err := d.mintForVault()
 	if err != nil {

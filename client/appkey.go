@@ -166,6 +166,10 @@ func (d *Device) RedeemVia(ctx context.Context, api *MemberAPI, secret, email, c
 		return nil, err
 	}
 	d.mu.Lock()
+	if d.closed {
+		d.mu.Unlock()
+		return nil, ErrClosed
+	}
 	if d.st.VaultID == "" {
 		d.st.VaultID = r.VaultID
 	}
@@ -185,6 +189,10 @@ func (d *Device) ClaimVia(ctx context.Context, api *MemberAPI, qr *altchan.Recov
 		return nil, err
 	}
 	d.mu.Lock()
+	if d.closed {
+		d.mu.Unlock()
+		return nil, ErrClosed
+	}
 	d.st.UserGUID = r.UserGUID
 	if d.st.VaultID == "" {
 		d.st.VaultID = qr.VaultID // names the vault in the claim key's requests

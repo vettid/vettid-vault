@@ -360,6 +360,16 @@ func TestCloseRacesKeyUsers(t *testing.T) {
 			}
 			return err
 		},
+		"LeashGrants": func(ctx context.Context, d *Device) error { _ = d.LeashGrants(); return nil },
+		"signShare":   func(ctx context.Context, d *Device) error { _, err := d.signShare([]byte("m")); return err },
+		"borrowRelay": func(ctx context.Context, d *Device) error {
+			_, done, err := d.borrowRelay("https://relay.example")
+			if err == nil {
+				done()
+			}
+			return err
+		},
+		"Alt": func(ctx context.Context, d *Device) error { _ = d.Alt(); return nil },
 		"Deliver": func(ctx context.Context, d *Device) error {
 			d.Deliver(ctx, relayclientMessage())
 			return nil
@@ -369,6 +379,9 @@ func TestCloseRacesKeyUsers(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			for range 40 {
 				_, _, d := pair(t)
+				d.mu.Lock()
+				d.leashGrants = []byte(`{"grant_seq":1,"grants":[{"grant_id":"g1"}]}`)
+				d.mu.Unlock()
 				var wg sync.WaitGroup
 				stop := make(chan struct{})
 				started := make(chan struct{})
@@ -518,5 +531,226 @@ func TestCallbackPanicKeepsTheCount(t *testing.T) {
 	}()
 	if n := d.callbacks.Load(); n != 0 {
 		t.Fatalf("callbacks = %d after a panic, want 0", n)
+	}
+}
+
+// blocks reports whether f is still running after a while, and then
+// whether it returns once release is called.
+func blocks(t *testing.T, f func(), release func()) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() { f(); close(done) }()
+	select {
+	case <-done:
+		t.Fatal("it did not wait")
+	case <-time.After(100 * time.Millisecond):
+	}
+	release()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("it did not finish once released")
+	}
+}
+
+// Each key user takes the Device's lock: while the lock is held it waits.
+// Deterministic, unlike the race test; but it does not show the key is
+// used inside that lock hold (a use after the unlock still waits here):
+// the race test, which sees the wipe under -race, covers that.
+func TestKeyUsersTakeTheLock(t *testing.T) {
+	for name, use := range map[string]func(d *Device){
+		"OpenToken":   func(d *Device) { _, _ = d.OpenToken() },
+		"IdentityKey": func(d *Device) { _ = d.IdentityKey() },
+		"RelayAddr":   func(d *Device) { _ = d.RelayAddr() },
+		"signShare":   func(d *Device) { _, _ = d.signShare([]byte("m")) },
+		"borrowRelay": func(d *Device) {
+			if _, done, err := d.borrowRelay("https://relay.example"); err == nil {
+				done()
+			}
+		},
+		"LeashGrants": func(d *Device) { _ = d.LeashGrants() },
+		"Alt":         func(d *Device) { _ = d.Alt() },
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, _, d := pair(t)
+			d.mu.Lock()
+			blocks(t, func() { use(d) }, d.mu.Unlock)
+		})
+	}
+}
+
+// borrowRelay hands out a copy of the relay key, not the Device's bytes:
+// wiping the copy leaves the Device's key, and Close leaves the copy.
+func TestBorrowRelayCopies(t *testing.T) {
+	_, _, d := pair(t)
+	c, done, err := d.borrowRelay("https://relay.example")
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.mu.Lock()
+	own := d.relayKey
+	d.mu.Unlock()
+	if !bytes.Equal(c.Key, own) || &c.Key[0] == &own[0] {
+		t.Fatal("not an equal copy in its own memory")
+	}
+	key := c.Key
+	done()
+	if !zeroed(key) || zeroed(own) {
+		t.Fatal("done did not wipe the copy alone")
+	}
+}
+
+// Close waits for a Poll holding the semaphore, and for Run, before it
+// wipes.
+func TestCloseWaitsForPollAndRun(t *testing.T) {
+	t.Run("the semaphore", func(t *testing.T) {
+		_, _, d := pair(t)
+		d.sem <- struct{}{} // a Poll in progress
+		blocks(t, func() { _ = d.Close() }, func() { <-d.sem })
+	})
+	t.Run("Run", func(t *testing.T) {
+		_, _, d := pair(t)
+		runDone := make(chan struct{})
+		d.mu.Lock()
+		d.running, d.runDone = true, runDone
+		d.mu.Unlock()
+		blocks(t, func() { _ = d.Close() }, func() {
+			d.mu.Lock()
+			d.running = false
+			d.mu.Unlock()
+			close(runDone)
+		})
+	})
+}
+
+// After Close the key references are dropped, so crypto/ed25519 can let
+// go of its expanded copies, and a due Persist is skipped.
+func TestCloseDropsKeysAndSkipsPersist(t *testing.T) {
+	_, _, d := pair(t)
+	persisted := 0
+	d.cfg.Persist = func([]byte) error { persisted++; return nil }
+	if err := d.Close(); err != nil {
+		t.Fatal(err)
+	}
+	d.mu.Lock()
+	ik, rk, ownKey := d.ik, d.relayKey, d.own.Key
+	d.mu.Unlock()
+	if ik != nil || rk != nil || ownKey != nil {
+		t.Fatal("a key reference was kept")
+	}
+	if err := d.saveLocked(); !errors.Is(err, ErrClosed) || persisted != 0 {
+		t.Fatalf("save after Close: %v, %d persisted", err, persisted)
+	}
+}
+
+// LeashGrants returns its own copies, and wipes the copy it parsed, not
+// the Device's set: a second read still sees the grant, and Close wiping
+// the Device's set leaves what was returned. (The race with Close's wipe
+// of the set is the race test's LeashGrants entry.)
+func TestLeashGrantsCopies(t *testing.T) {
+	_, _, d := pair(t)
+	d.mu.Lock()
+	d.leashGrants = []byte(`{"grant_seq":1,"grants":[{"grant_id":"g1"}]}`)
+	d.mu.Unlock()
+	gs := d.LeashGrants()
+	if len(gs) != 1 {
+		t.Fatalf("%d grants", len(gs))
+	}
+	if again := d.LeashGrants(); len(again) != 1 {
+		t.Fatal("reading the grants changed the Device's own set")
+	}
+	if err := d.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if string(gs[0]) != `{"grant_id":"g1"}` {
+		t.Fatalf("the returned grant was changed: %q", gs[0])
+	}
+	if d.LeashGrants() != nil {
+		t.Fatal("grants after Close")
+	}
+}
+
+// A call waiting through a failing collect's backoff returns at once when
+// Close comes, not when the backoff (up to 30 s) ends.
+func TestCloseEndsAWaitersBackoff(t *testing.T) {
+	r, _, d := pair(t)
+	r.mu.Lock()
+	r.failCollect = true
+	r.mu.Unlock()
+	testBackoff = 30 * time.Second // as a backoff grown to its cap
+	defer func() { testBackoff = 0 }()
+	errc := make(chan error, 1)
+	go func() {
+		_, err := d.WaitEvent(context.Background(), "never.sent", nil)
+		errc <- err
+	}()
+	time.Sleep(300 * time.Millisecond) // a failed collect: the waiter is in its backoff
+	start := time.Now()
+	if err := d.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-errc:
+		if !errors.Is(err, ErrClosed) {
+			t.Fatalf("the waiter returned %v, want ErrClosed", err)
+		}
+		if took := time.Since(start); took > time.Second {
+			t.Fatalf("the waiter took %v after Close", took)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the waiter did not return")
+	}
+}
+
+// collectBytes returns every non-empty byte slice reachable from v.
+func collectBytes(v reflect.Value, out *[][]byte) {
+	switch v.Kind() {
+	case reflect.Pointer, reflect.Interface:
+		if !v.IsNil() {
+			collectBytes(v.Elem(), out)
+		}
+	case reflect.Struct:
+		for i := range v.NumField() {
+			collectBytes(v.Field(i), out)
+		}
+	case reflect.Slice:
+		if v.Type().Elem().Kind() == reflect.Uint8 {
+			if v.Len() > 0 {
+				*out = append(*out, v.Bytes())
+			}
+			return
+		}
+		for i := range v.Len() {
+			collectBytes(v.Index(i), out)
+		}
+	case reflect.Map:
+		for _, k := range v.MapKeys() {
+			collectBytes(v.MapIndex(k), out)
+		}
+	}
+}
+
+// Dropping or replacing the vault record wipes its last sessions snapshot
+// (the session keys a Save exported), not just the record.
+func TestDropVaultWipesSessions(t *testing.T) {
+	_, _, d := pair(t)
+	d.mu.Lock()
+	d.export() // the snapshot a Save would write
+	var bs [][]byte
+	collectBytes(reflect.ValueOf(&d.st.Vault.Sessions), &bs)
+	if len(bs) == 0 {
+		d.mu.Unlock()
+		t.Fatal("no sessions snapshot: the fixture is not paired")
+	}
+	d.dropVaultLocked()
+	vault := d.st.Vault
+	d.mu.Unlock()
+	if vault != nil {
+		t.Fatal("the record was kept")
+	}
+	for i, b := range bs {
+		if !zeroed(b) {
+			t.Fatalf("sessions buffer %d not wiped", i)
+		}
 	}
 }

@@ -196,7 +196,7 @@ func (d *Device) vaultIK() (ed25519.PublicKey, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if d.st.Vault == nil {
-		return nil, ErrNotPaired
+		return nil, d.notPairedLocked()
 	}
 	return append(ed25519.PublicKey(nil), d.st.Vault.IK...), nil
 }
@@ -229,6 +229,7 @@ func (d *Device) CallStart(ctx context.Context, connectionID, media, sdp string)
 	ek := sk.Public().Bytes()
 	esig, err := d.signShare(callwire.ShareMessage(callwire.RoleOffer, cid, media, ek))
 	if err != nil {
+		sk.Destroy()
 		return nil, err
 	}
 	o, err := d.Op(ctx, "call.start", map[string]any{"connection_id": connectionID, "call_id": cid, "media": media, "sdp": sdp,

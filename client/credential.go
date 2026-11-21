@@ -161,6 +161,10 @@ func (d *Device) LastUTK() UTK {
 	return d.lastUTK
 }
 
+// testReplyKeyHook, set only by tests, sees each reply key sealedWith
+// destroyed because it did not hand it to the caller.
+var testReplyKeyHook func(*suite.PrivateKey)
+
 // sealedWith sends typ with the payload sealed to u, the blob, and extra
 // outer members (an item operation's item_id, version, tags, ...).
 func (d *Device) sealedWith(ctx context.Context, typ string, u UTK, blob []byte, withBlob bool, payload map[string]any, reply bool,
@@ -173,6 +177,17 @@ func (d *Device) sealedWith(ctx context.Context, typ string, u UTK, blob []byte,
 		}
 		payload["reply_key"] = base64.StdEncoding.EncodeToString(rk.Public().Bytes())
 	}
+	// The reply key is the caller's only on success; every other path
+	// destroys it.
+	handed := false
+	defer func() {
+		if rk != nil && !handed {
+			rk.Destroy()
+			if testReplyKeyHook != nil {
+				testReplyKeyHook(rk)
+			}
+		}
+	}()
 	pt, err := json.Marshal(payload)
 	if err != nil {
 		return nil, nil, "", err
@@ -222,11 +237,9 @@ func (d *Device) sealedWith(ctx context.Context, typ string, u UTK, blob []byte,
 	}
 	if err := d.keep(ctx, o); err != nil {
 		wipeParsed(o)
-		if rk != nil {
-			rk.Destroy()
-		}
-		return nil, nil, "", err
+		return nil, nil, "", err // the reply key is destroyed by the defer
 	}
+	handed = true
 	return o, rk, id, nil
 }
 

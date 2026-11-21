@@ -9,7 +9,6 @@ import (
 
 	"github.com/vettid/vettid-vault/vms/envelope"
 	"github.com/vettid/vettid-vault/vms/strictjson"
-	"github.com/vettid/vettid-vault/vms/suite"
 )
 
 // Feature operations of VAULT-MESSAGING §10.6–§10.9. Each is a request to
@@ -79,7 +78,7 @@ func (d *Device) Op(ctx context.Context, typ string, v any) (strictjson.Object, 
 		if err != nil {
 			return nil, err
 		}
-		defer suite.Wipe(b)      // the request as sent; its values may be secrets
+		defer wipeRequest(b)     // the request as sent; its values may be secrets
 		if string(b) != "null" { // a nil map
 			body = b
 		}

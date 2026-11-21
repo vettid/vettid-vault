@@ -301,7 +301,9 @@ func stmtList(n ast.Node) []ast.Stmt {
 // It matches variables by name, not by declaration (go/types), so it does
 // not see a shadowed name, `var x = d.Op(...)`, a Device reached under
 // another name than d, or the *Response and *envelope.Inner that Request,
-// AwaitResponse and WaitEvent return.
+// AwaitResponse and WaitEvent return. Nor does it see a slice of a wiped
+// value that leaves inside a composite literal, or through a helper or
+// append that does not copy it.
 func TestNoUnwipedResponseParse(t *testing.T) {
 	type file struct {
 		name string
@@ -740,5 +742,89 @@ func TestDropOp(t *testing.T) {
 	}
 	if err := dropOp(nil, nil, "", nil); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// sealedWith destroys the reply key on every path that does not hand it
+// to the caller: a refused response, a body keep refuses, a wait that
+// ends; on success the caller gets it, intact.
+func TestSealedWithDestroysTheReplyKey(t *testing.T) {
+	ctx := context.Background()
+	ek, err := suite.GeneratePrivateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	u := UTK{ID: "u1", EK: ek.Public().Bytes(), Expires: time.Now().Add(time.Hour)}
+	for _, c := range []struct {
+		name    string
+		answer  *answer
+		timeout time.Duration
+		ok      bool
+	}{
+		{"refused", &answer{code: "forbidden"}, 0, false},
+		{"keep refuses the body", &answer{body: func(strictjson.Object) []byte { return []byte(`{"utks":"not a list"}`) }}, 0, false},
+		{"the wait ends", nil, 50 * time.Millisecond, false},
+		{"success", &answer{body: func(strictjson.Object) []byte { return []byte(`{}`) }}, 0, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			_, v, d := pair(t)
+			if c.answer != nil {
+				answeringWith(t, v, map[string]answer{"x.sealed": *c.answer})
+			}
+			var destroyed []*suite.PrivateKey
+			testReplyKeyHook = func(k *suite.PrivateKey) { destroyed = append(destroyed, k) }
+			defer func() { testReplyKeyHook = nil }()
+			cctx := ctx
+			if c.timeout > 0 {
+				var cancel context.CancelFunc
+				cctx, cancel = context.WithTimeout(ctx, c.timeout)
+				defer cancel()
+			}
+			o, rk, _, err := d.sealedWith(cctx, "x.sealed", u, nil, false, map[string]any{"pin": "1234"}, true, nil)
+			if c.ok {
+				if err != nil || rk == nil || len(destroyed) != 0 {
+					t.Fatalf("err %v, key %v, %d destroyed", err, rk != nil, len(destroyed))
+				}
+				if _, err := rk.Seed(); err != nil {
+					t.Fatal("the handed reply key was destroyed")
+				}
+				rk.Destroy()
+				wipeParsed(o)
+				return
+			}
+			if err == nil || rk != nil {
+				t.Fatalf("err %v, key returned %v", err, rk != nil)
+			}
+			if len(destroyed) != 1 {
+				t.Fatalf("%d reply keys destroyed, want 1", len(destroyed))
+			}
+			if _, err := destroyed[0].Seed(); !errors.Is(err, suite.ErrDestroyed) {
+				t.Fatal("the reply key was not destroyed")
+			}
+		})
+	}
+}
+
+// Op wipes the request body it marshalled once the request is sent; the
+// vault received it intact.
+func TestOpWipesTheRequest(t *testing.T) {
+	ctx := context.Background()
+	_, v, d := pair(t)
+	answeringWith(t, v, map[string]answer{"item.put": {body: func(req strictjson.Object) []byte {
+		s, _ := req.String("value")
+		return strictjson.NewBuilder().String("got", s).Bytes()
+	}}})
+	var bodies [][]byte
+	testRequestHook = func(b []byte) { bodies = append(bodies, b) }
+	defer func() { testRequestHook = nil }()
+	o, err := d.Op(ctx, "item.put", map[string]any{"value": respSecret})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := o.String("got"); got != respSecret {
+		t.Fatalf("the vault got %q", got)
+	}
+	if len(bodies) != 1 || !wiped(bodies[0]) {
+		t.Fatalf("%d request bodies wiped", len(bodies))
 	}
 }

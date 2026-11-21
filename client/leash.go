@@ -88,7 +88,8 @@ func (d *Device) LeashItemList(ctx context.Context, agentID, itemID string) ([]j
 // AgentRequest sends an agent.request (an agent within its access
 // session). A referred request waits for an app's decision (§6.8): the
 // response arrives when the app decides, so ctx should allow up to the
-// approval's 5 minutes.
+// approval's 5 minutes. The response is the caller's: it wipes the body
+// once done (envelope.Inner.Wipe).
 func (d *Device) AgentRequest(ctx context.Context, op string, members map[string]any) (*Response, error) {
 	body := map[string]any{"op": op}
 	for k, v := range members {

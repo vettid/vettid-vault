@@ -2112,6 +2112,10 @@ func VaultBundle(pr handshake.Principal) []byte {
 	return append(append(b[:len(b)-1], ','), p[1:]...)
 }
 
+// testEnrolledBodyHook, set only by tests, sees vault.enrolled's body once
+// enrollApp has wiped it.
+var testEnrolledBodyHook func([]byte)
+
 // enrollApp binds the first app (§11.3) and deposits vault.enrolled on the
 // app's open token, with the enclave's attestation over the bundle when
 // the enclave provides one (dev builds have none).
@@ -2147,7 +2151,12 @@ func (m *Manager) enrollApp(ctx context.Context, app *EnrollApp, now time.Time) 
 	}
 	body := b.Base64("vault_bundle", bundle).String("token", tok).Bytes()
 	in := &envelope.Inner{ID: reqID, Type: "vault.enrolled", TS: now, Body: body}
-	defer suite.Wipe(body) // it carries the token
+	defer func() {
+		suite.Wipe(body) // it carries the token
+		if testEnrolledBodyHook != nil {
+			testEnrolledBodyHook(body)
+		}
+	}()
 	env, _, err := envelope.SealInner(in, app.KEM, suite.Anonymous)
 	if err != nil {
 		return err

@@ -905,7 +905,8 @@ func (d *Device) sendFull(ctx context.Context, id, typ string, body json.RawMess
 	return id, nil
 }
 
-// Request sends a request and waits for its response (§8.1).
+// Request sends a request and waits for its response (§8.1). The response
+// is the caller's: it wipes the body once done (envelope.Inner.Wipe).
 func (d *Device) Request(ctx context.Context, typ string, body json.RawMessage) (*Response, error) {
 	id, err := d.Send(ctx, typ, body)
 	if err != nil {
@@ -922,6 +923,16 @@ func (d *Device) AwaitResponse(ctx context.Context, id string) (*Response, error
 		return nil, err
 	}
 	return &Response{Inner: in}, nil
+}
+
+// testRequestHook, set only by tests, sees each request body Op wiped.
+var testRequestHook func([]byte)
+
+func wipeRequest(b []byte) {
+	suite.Wipe(b)
+	if testRequestHook != nil {
+		testRequestHook(b)
+	}
 }
 
 // takeObject parses a message's body into an Object the caller owns, and

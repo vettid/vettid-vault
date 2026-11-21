@@ -298,6 +298,13 @@ func TestTokenReplyWiped(t *testing.T) {
 			return d.Poll(ctx)
 		}},
 		{"RenewVaultToken", "relay.token.issued", func(_ *fakeVault, d *Device) error { return d.RenewVaultToken(ctx) }},
+		{"maintain, the vault's token near expiry", "relay.token.issued", func(v *fakeVault, d *Device) error {
+			d.mu.Lock()
+			d.st.IssuedExp = time.Now().Add(time.Hour) // within 10 days: maintain sends a new one
+			d.mu.Unlock()
+			v.send("test.ping", []byte(`{}`)) // handle runs maintain after it
+			return d.Poll(ctx)
+		}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			_, v, d := pair(t)

@@ -103,6 +103,9 @@ func FuzzParseObject(f *testing.F) {
 	f.Add([]byte(`{"a":1,"a":2}`))
 	f.Fuzz(func(t *testing.T, b []byte) {
 		o, err := ParseObject(b)
+		if verr := validObject(b); (verr == nil) != (err == nil) || (err != nil && verr != err) {
+			t.Fatalf("validObject = %v, ParseObject = %v", verr, err)
+		}
 		if err != nil {
 			return
 		}

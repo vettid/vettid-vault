@@ -212,8 +212,21 @@ func (in *Inner) Marshal(mode Mode) ([]byte, error) {
 			return nil, ErrInner
 		}
 	}
-	b := strictjson.NewBuilder().
-		Uint("v", InnerVersion).
+	defer wipeSent("compacted body", body) // copied into the object below
+	// Sized up front: a builder that outgrew its buffer would leave the
+	// body's bytes in the old one.
+	var errObj []byte
+	if in.Error != nil {
+		eb := strictjson.NewBuilder().String("code", in.Error.Code)
+		if in.Error.Message != "" {
+			eb.String("message", in.Error.Message)
+		}
+		errObj = eb.Bytes()
+	}
+	n := marshalSize(in, len(body), len(errObj))
+	b := strictjson.NewBuilder().Grow(n)
+	reserved := b.Cap()
+	b.Uint("v", InnerVersion).
 		String("id", in.ID).
 		String("type", in.Type).
 		String("ts", FormatTS(in.TS))
@@ -230,11 +243,7 @@ func (in *Inner) Marshal(mode Mode) ([]byte, error) {
 		b.String("status", in.Status)
 	}
 	if in.Error != nil {
-		eb := strictjson.NewBuilder().String("code", in.Error.Code)
-		if in.Error.Message != "" {
-			eb.String("message", in.Error.Message)
-		}
-		b.Raw("error", eb.Bytes())
+		b.Raw("error", errObj)
 	}
 	if in.Features != nil {
 		arr := []byte{'['}
@@ -247,7 +256,11 @@ func (in *Inner) Marshal(mode Mode) ([]byte, error) {
 		b.Raw("features", append(arr, ']'))
 	}
 	b.Raw("body", body)
-	return b.Bytes(), nil
+	out := b.Bytes()
+	if testMarshalHook != nil {
+		testMarshalHook(b.Cap() != reserved)
+	}
+	return out, nil
 }
 
 // testParsedHook, set only by tests, sees each set of members ParseInner
@@ -393,12 +406,73 @@ func (in *Inner) CheckTime(now time.Time, durable bool) error {
 }
 
 // EncodeInner marshals and bucket-pads an inner plaintext.
+//
+// The unpadded JSON it makes is wiped; the padded plaintext it returns is
+// the caller's to wipe (the sealing functions do).
 func EncodeInner(in *Inner, mode Mode) ([]byte, error) {
 	j, err := in.Marshal(mode)
 	if err != nil {
 		return nil, err
 	}
+	defer wipeSent("unpadded JSON", j)
 	return Pad(j)
+}
+
+// SealInner encodes in (sealed mode), seals it to recipient, and wipes the
+// padded plaintext: no copy of the plaintext that EncodeInner made is
+// left behind. It returns what SealSealed returns.
+func SealInner(in *Inner, recipient *suite.PublicKey, senderKid suite.Kid) ([]byte, suite.Exporter, error) {
+	padded, err := EncodeInner(in, ModeSealed)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer wipeSent("padded plaintext", padded)
+	return SealSealed(recipient, senderKid, padded)
+}
+
+// SealInnerFixed is SealInner with the plaintext padded to exactly n bytes
+// (PadFixed), as the alternate channel's requests and results are.
+func SealInnerFixed(in *Inner, n int, recipient *suite.PublicKey, senderKid suite.Kid) ([]byte, suite.Exporter, error) {
+	j, err := in.Marshal(ModeSealed)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer wipeSent("unpadded JSON", j)
+	padded, err := PadFixed(j, n)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer wipeSent("padded plaintext", padded)
+	return SealSealed(recipient, senderKid, padded)
+}
+
+// marshalSize bounds the length of in's JSON, given its compacted body and
+// error object: every string is counted at its longest escaped form (6
+// bytes per byte, a \u escape), so the builder never outgrows it.
+func marshalSize(in *Inner, body, errObj int) int {
+	n := body + errObj + 160 // the member names, numbers, timestamps and punctuation
+	for _, s := range []string{in.ID, in.Type, in.Re, in.Status} {
+		n += 6*len(s) + 2
+	}
+	for _, f := range in.Features {
+		n += 6*len(f) + 3
+	}
+	return n
+}
+
+// testMarshalHook, set only by tests, learns whether Marshal's builder
+// outgrew the buffer it reserved.
+var testMarshalHook func(grew bool)
+
+// testSentHook, set only by tests, sees each buffer of an outgoing message
+// that Marshal or EncodeInner wiped: what it held, and the buffer.
+var testSentHook func(what string, b []byte)
+
+func wipeSent(what string, b []byte) {
+	suite.Wipe(b)
+	if testSentHook != nil {
+		testSentHook(what, b)
+	}
 }
 
 // DecodeInner strictly unpads and parses a bucket-padded inner plaintext.

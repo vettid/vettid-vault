@@ -24,6 +24,7 @@ type ActionConfig struct {
 // configuration's version.
 func (d *Device) ActionConfigure(ctx context.Context, c ActionConfig) (uint64, error) {
 	o, err := d.Op(ctx, "action.configure", c)
+	defer wipeParsed(o) // the response body, parsed: nothing here keeps a slice of it
 	if err != nil {
 		return 0, err
 	}
@@ -51,6 +52,7 @@ func (d *Device) ActionInvoke(ctx context.Context, connectionID, actionID string
 		params = json.RawMessage(`{}`)
 	}
 	o, err := d.Op(ctx, "action.invoke", map[string]any{"connection_id": connectionID, "action_id": actionID, "params": params})
+	defer wipeParsed(o) // the response body, parsed: nothing here keeps a slice of it
 	if err != nil {
 		return "", err
 	}
@@ -63,6 +65,7 @@ func (d *Device) ActionInvoke(ctx context.Context, connectionID, actionID string
 // credential's unlock window (credential_locked).
 func (d *Device) ActionRespond(ctx context.Context, invocationID string, approve bool) (string, error) {
 	o, err := d.Op(ctx, "action.respond", map[string]any{"invocation_id": invocationID, "approve": approve})
+	defer wipeParsed(o) // the response body, parsed: nothing here keeps a slice of it
 	if err != nil {
 		return "", err
 	}
@@ -71,16 +74,9 @@ func (d *Device) ActionRespond(ctx context.Context, invocationID string, approve
 
 // ActionResult waits for the result of an invocation.
 func (d *Device) ActionResult(ctx context.Context, invocationID string) (strictjson.Object, error) {
-	in, err := d.WaitEvent(ctx, "action.result", func(b json.RawMessage) bool {
-		o, err := strictjson.ParseObject(b)
-		if err != nil {
-			return false
-		}
-		id, _ := o.String("invocation_id")
-		return id == invocationID
-	})
+	in, err := d.WaitEvent(ctx, "action.result", bodyField("invocation_id", invocationID))
 	if err != nil {
 		return nil, err
 	}
-	return strictjson.ParseObject(in.Body)
+	return takeObject(in) // the event is wiped; the Object is the caller's
 }

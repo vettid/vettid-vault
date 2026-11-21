@@ -87,7 +87,7 @@ func (d *Device) keep(ctx context.Context, o strictjson.Object) error {
 	d.mu.Lock()
 	d.st.Credential = &CredentialCopy{Blob: blob, Version: v}
 	d.mu.Unlock()
-	_, err = d.Op(ctx, "credential.ack", map[string]any{"version": v})
+	err = d.do(ctx, "credential.ack", map[string]any{"version": v})
 	return err
 }
 
@@ -116,6 +116,7 @@ func (d *Device) takeUTK(ctx context.Context) (UTK, error) {
 			body = map[string]any{"resync": true}
 		}
 		o, err := d.Op(ctx, "credential.utk.get", body)
+		defer wipeParsed(o) // the response body, parsed: nothing here keeps a slice of it
 		if err != nil {
 			return UTK{}, err
 		}
@@ -160,6 +161,10 @@ func (d *Device) LastUTK() UTK {
 	return d.lastUTK
 }
 
+// testReplyKeyHook, set only by tests, sees each reply key sealedWith
+// destroyed because it did not hand it to the caller.
+var testReplyKeyHook func(*suite.PrivateKey)
+
 // sealedWith sends typ with the payload sealed to u, the blob, and extra
 // outer members (an item operation's item_id, version, tags, ...).
 func (d *Device) sealedWith(ctx context.Context, typ string, u UTK, blob []byte, withBlob bool, payload map[string]any, reply bool,
@@ -172,6 +177,17 @@ func (d *Device) sealedWith(ctx context.Context, typ string, u UTK, blob []byte,
 		}
 		payload["reply_key"] = base64.StdEncoding.EncodeToString(rk.Public().Bytes())
 	}
+	// The reply key is the caller's only on success; every other path
+	// destroys it.
+	handed := false
+	defer func() {
+		if rk != nil && !handed {
+			rk.Destroy()
+			if testReplyKeyHook != nil {
+				testReplyKeyHook(rk)
+			}
+		}
+	}()
 	pt, err := json.Marshal(payload)
 	if err != nil {
 		return nil, nil, "", err
@@ -213,15 +229,17 @@ func (d *Device) sealedWith(ctx context.Context, typ string, u UTK, blob []byte,
 		return nil, nil, "", err
 	}
 	if !r.OK() {
-		return nil, nil, "", &OpError{Type: typ, Code: r.ErrorCode(), Body: r.Body()}
+		return nil, nil, "", opError(typ, r)
 	}
-	o, err := strictjson.ParseObject(r.Body())
+	o, err := takeObject(r.Inner)
 	if err != nil {
 		return nil, nil, "", ErrProtocol
 	}
 	if err := d.keep(ctx, o); err != nil {
-		return nil, nil, "", err
+		wipeParsed(o)
+		return nil, nil, "", err // the reply key is destroyed by the defer
 	}
+	handed = true
 	return o, rk, id, nil
 }
 
@@ -277,13 +295,14 @@ func (d *Device) CredentialOp(ctx context.Context, typ string, extra map[string]
 // release R it carries the PIN too, so that the vault arms its recovery at
 // once (§11.14.9).
 func (d *Device) CredentialCreate(ctx context.Context, pin, password string) error {
-	_, _, _, err := d.sealedOp(ctx, "credential.create", false, map[string]any{"pin": pin, "password": password}, false)
+	err := dropOp(d.sealedOp(ctx, "credential.create", false, map[string]any{"pin": pin, "password": password}, false))
 	return err
 }
 
 // CredentialFetch fetches the latest blob the vault holds.
 func (d *Device) CredentialFetch(ctx context.Context) error {
 	o, err := d.Op(ctx, "credential.get", nil)
+	defer wipeParsed(o) // the response body, parsed: nothing here keeps a slice of it
 	if err != nil {
 		return err
 	}
@@ -298,6 +317,7 @@ func (d *Device) CredentialVersion(ctx context.Context) (strictjson.Object, erro
 // CredentialUnlock opens the unlock window and returns its expiry.
 func (d *Device) CredentialUnlock(ctx context.Context, password string) (string, error) {
 	o, _, _, err := d.credOp(ctx, "credential.unlock", func() map[string]any { return map[string]any{"password": password} }, false)
+	defer wipeParsed(o) // the response body, parsed: nothing here keeps a slice of it
 	if err != nil {
 		return "", err
 	}
@@ -306,13 +326,13 @@ func (d *Device) CredentialUnlock(ctx context.Context, password string) (string,
 
 // CredentialLock ends the unlock window.
 func (d *Device) CredentialLock(ctx context.Context) error {
-	_, err := d.Op(ctx, "credential.lock", nil)
+	err := d.do(ctx, "credential.lock", nil)
 	return err
 }
 
 // CredentialRotate rotates the credential key (and the vault's ik and kem).
 func (d *Device) CredentialRotate(ctx context.Context, password string) error {
-	_, _, _, err := d.credOp(ctx, "credential.rotate", func() map[string]any { return map[string]any{"password": password} }, false)
+	err := dropOp(d.credOp(ctx, "credential.rotate", func() map[string]any { return map[string]any{"password": password} }, false))
 	return err
 }
 
@@ -320,9 +340,9 @@ func (d *Device) CredentialRotate(ctx context.Context, password string) error {
 // from release R it carries the PIN, and the vault starts a new recovery
 // generation and replaces the DEK (§11.14.9).
 func (d *Device) CredentialChangePassword(ctx context.Context, pin, password, newPassword string) error {
-	_, _, _, err := d.credOp(ctx, "credential.password.change", func() map[string]any {
+	err := dropOp(d.credOp(ctx, "credential.password.change", func() map[string]any {
 		return map[string]any{"pin": pin, "password": password, "new_password": newPassword}
-	}, false)
+	}, false))
 	return err
 }
 
@@ -331,9 +351,9 @@ func (d *Device) CredentialChangePassword(ctx context.Context, pin, password, ne
 // next epoch when the vault answers.
 func (d *Device) PINChange(ctx context.Context, pin, newPIN, password string) error {
 	next := base64.StdEncoding.EncodeToString(d.NextUnlockSecret())
-	_, _, _, err := d.credOp(ctx, "pin.change", func() map[string]any {
+	err := dropOp(d.credOp(ctx, "pin.change", func() map[string]any {
 		return map[string]any{"pin": pin, "new_pin": newPIN, "password": password, "new_unlock_secret": next}
-	}, false)
+	}, false))
 	if err == nil {
 		d.AdvanceEpoch()
 	}
@@ -344,9 +364,9 @@ func (d *Device) PINChange(ctx context.Context, pin, newPIN, password string) er
 // (vault.secret.renew, release R, §11.14.9).
 func (d *Device) SecretRenew(ctx context.Context, pin, password string) error {
 	next := base64.StdEncoding.EncodeToString(d.NextUnlockSecret())
-	_, _, _, err := d.credOp(ctx, "vault.secret.renew", func() map[string]any {
+	err := dropOp(d.credOp(ctx, "vault.secret.renew", func() map[string]any {
 		return map[string]any{"pin": pin, "password": password, "new_unlock_secret": next}
-	}, false)
+	}, false))
 	if err == nil {
 		d.AdvanceEpoch()
 	}
@@ -359,9 +379,9 @@ func (d *Device) SecretRenew(ctx context.Context, pin, password string) error {
 // Every critical item is destroyed; the app keeps the new blob. There is
 // no credential deletion on its own.
 func (d *Device) CredentialResetHolder(ctx context.Context, pin, password, newPassword string) error {
-	_, _, _, err := d.credOp(ctx, "credential.reset", func() map[string]any {
+	err := dropOp(d.credOp(ctx, "credential.reset", func() map[string]any {
 		return map[string]any{"pin": pin, "password": password, "new_password": newPassword}
-	}, false)
+	}, false))
 	return err
 }
 
@@ -370,7 +390,7 @@ func (d *Device) CredentialResetHolder(ctx context.Context, pin, password, newPa
 // keeps the credential handed over; afterwards the app is the vault's one
 // app. A vault without a backup copy is never recovered (0.16.0).
 func (d *Device) CredentialRecover(ctx context.Context, password string) error {
-	if _, _, _, err := d.sealedOp(ctx, "credential.recover", false, map[string]any{"password": password}, false); err != nil {
+	if err := dropOp(d.sealedOp(ctx, "credential.recover", false, map[string]any{"password": password}, false)); err != nil {
 		return err
 	}
 	d.mu.Lock()
@@ -383,6 +403,7 @@ func (d *Device) CredentialRecover(ctx context.Context, password string) error {
 // was me". It returns the alarm's new state (rotation_required).
 func (d *Device) CredentialAlarmConfirm(ctx context.Context, alarmID string, mine bool) (string, error) {
 	o, err := d.Op(ctx, "credential.alarm.confirm", map[string]any{"alarm_id": alarmID, "mine": mine})
+	defer wipeParsed(o) // the response body, parsed: nothing here keeps a slice of it
 	if err != nil {
 		return "", err
 	}
@@ -393,6 +414,7 @@ func (d *Device) CredentialAlarmConfirm(ctx context.Context, alarmID string, min
 // returns its id and the QR link the new app scans.
 func (d *Device) TransferCreate(ctx context.Context) (id, link string, err error) {
 	o, err := d.Op(ctx, "device.transfer.create", nil)
+	defer wipeParsed(o) // the response body, parsed: nothing here keeps a slice of it
 	if err != nil {
 		return "", "", err
 	}
@@ -432,10 +454,9 @@ func (d *Device) TransferApproveSigner(ctx context.Context, id, pin, password, s
 	if signer != "" {
 		extra["signer"] = signer
 	}
-	_, _, _, err := d.credOpBefore(ctx, "device.transfer.approve", extra,
+	return dropOp(d.credOpBefore(ctx, "device.transfer.approve", extra,
 		func() map[string]any { return map[string]any{"password": password, "pin": pin} }, false,
-		func() { _ = d.RenewVaultToken(ctx) })
-	return err
+		func() { _ = d.RenewVaultToken(ctx) }))
 }
 
 // VaultDelete deletes the vault (§12.5) with the confirmation phrase, the
@@ -456,20 +477,19 @@ func (d *Device) VaultDelete(ctx context.Context, pin, password string) error {
 	holder := d.st.Credential != nil && d.st.Recovery == nil
 	d.mu.Unlock()
 	if holder {
-		_, _, _, err := d.credOpWith(ctx, "vault.delete", extra, payload, false)
+		err := dropOp(d.credOpWith(ctx, "vault.delete", extra, payload, false))
 		return err
 	}
 	u, err := d.takeUTK(ctx)
 	if err != nil {
 		return err
 	}
-	_, _, _, err = d.sealedWith(ctx, "vault.delete", u, nil, false, payload(), false, extra)
-	return err
+	return dropOp(d.sealedWith(ctx, "vault.delete", u, nil, false, payload(), false, extra))
 }
 
 // TransferReject ends a transfer (§6.7.1).
 func (d *Device) TransferReject(ctx context.Context, id string) error {
-	_, err := d.Op(ctx, "device.transfer.reject", map[string]any{"transfer_id": id})
+	err := d.do(ctx, "device.transfer.reject", map[string]any{"transfer_id": id})
 	return err
 }
 

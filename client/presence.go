@@ -28,6 +28,7 @@ func (d *Device) PresenceSet(ctx context.Context, version uint64, state, share s
 		body["except"] = except
 	}
 	o, err := d.Op(ctx, "presence.set", body)
+	defer wipeParsed(o) // the response body, parsed: nothing here keeps a slice of it
 	if err != nil {
 		return 0, err
 	}
@@ -42,6 +43,7 @@ func (d *Device) PresenceSet(ctx context.Context, version uint64, state, share s
 // if any, arrives as presence.result before the ping's exp.
 func (d *Device) PresenceQuery(ctx context.Context, connectionID string) (string, error) {
 	o, err := d.Op(ctx, "presence.query", map[string]any{"connection_id": connectionID})
+	defer wipeParsed(o) // the response body, parsed: nothing here keeps a slice of it
 	if err != nil {
 		return "", err
 	}

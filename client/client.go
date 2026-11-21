@@ -119,8 +119,9 @@ type Config struct {
 	// the caller's own slice, but the *Inner values in it are shared: the
 	// same values go to the waiting calls and Events once the save
 	// succeeds, as with Persist, so never modify them, and copy what you
-	// keep: the client wipes the bodies of vault.enrolled and device.paired
-	// once AwaitEnrolled or AwaitPaired has taken them. As with Events, a response may appear twice (an answer and
+	// keep: the client wipes the body of a message once the helper that
+	// takes it (AwaitEnrolled, AwaitPaired, Op and the operations built on
+	// it, ActionResult and the other event waits) is done with it. As with Events, a response may appear twice (an answer and
 	// its replay, §8.2), and a response also reaches its waiting call:
 	// key what you derive on ID and Re. Like Persist, it must not call
 	// Poll, Deliver or the waiting calls. After an error the next Poll
@@ -836,9 +837,8 @@ func (d *Device) SendWithID(ctx context.Context, id, typ string, body json.RawMe
 }
 
 // sendToken sends a standing token for the vault (§10.3) and wipes the
-// body it built; the sealed envelope keeps no reference to it. Sealing
-// itself (Inner.Marshal, EncodeInner) still makes copies of a body that
-// it does not wipe, on every send. d.mu is held.
+// body it built; the sealed envelope keeps no reference to it, and
+// sealing wipes the copies it makes. d.mu is held.
 func (d *Device) sendToken(ctx context.Context, typ, tok, re, status string) (string, error) {
 	body := strictjson.NewBuilder().String("kind", "standing").String("token", tok).Bytes()
 	defer func() {
@@ -905,7 +905,8 @@ func (d *Device) sendFull(ctx context.Context, id, typ string, body json.RawMess
 	return id, nil
 }
 
-// Request sends a request and waits for its response (§8.1).
+// Request sends a request and waits for its response (§8.1). The response
+// is the caller's: it wipes the body once done (envelope.Inner.Wipe).
 func (d *Device) Request(ctx context.Context, typ string, body json.RawMessage) (*Response, error) {
 	id, err := d.Send(ctx, typ, body)
 	if err != nil {
@@ -914,7 +915,8 @@ func (d *Device) Request(ctx context.Context, typ string, body json.RawMessage) 
 	return d.AwaitResponse(ctx, id)
 }
 
-// AwaitResponse waits for the response to request id.
+// AwaitResponse waits for the response to request id. The response is the
+// caller's: it wipes the body once done (envelope.Inner.Wipe).
 func (d *Device) AwaitResponse(ctx context.Context, id string) (*Response, error) {
 	in, err := d.waitFor(ctx, func(in *envelope.Inner) bool { return in.Re == id })
 	if err != nil {
@@ -923,8 +925,66 @@ func (d *Device) AwaitResponse(ctx context.Context, id string) (*Response, error
 	return &Response{Inner: in}, nil
 }
 
+// testRequestHook, set only by tests, sees each request body Op wiped.
+var testRequestHook func([]byte)
+
+func wipeRequest(b []byte) {
+	suite.Wipe(b)
+	if testRequestHook != nil {
+		testRequestHook(b)
+	}
+}
+
+// takeObject parses a message's body into an Object the caller owns, and
+// wipes the message, which is not handed on.
+func takeObject(in *envelope.Inner) (strictjson.Object, error) {
+	defer dropped(in)
+	return strictjson.ParseObject(in.Body)
+}
+
+// do is Op for a caller that needs nothing from the response: the parsed
+// body is wiped.
+func (d *Device) do(ctx context.Context, typ string, v any) error {
+	o, err := d.Op(ctx, typ, v)
+	wipeParsed(o)
+	return err
+}
+
+// dropOp wipes the parsed body of a credential operation whose caller
+// needs nothing from it, and destroys its reply key, if any.
+func dropOp(o strictjson.Object, rk *suite.PrivateKey, _ string, err error) error {
+	wipeParsed(o)
+	if rk != nil {
+		rk.Destroy()
+	}
+	return err
+}
+
+// opError is the OpError of a refused response. It keeps its own copy of
+// the body, and the response is wiped.
+func opError(typ string, r *Response) *OpError {
+	defer dropped(r.Inner)
+	return &OpError{Type: typ, Code: r.ErrorCode(), Body: append(json.RawMessage(nil), r.Body()...)}
+}
+
+// bodyField is a WaitEvent predicate: the body's string member name is
+// want. The copies its parse makes are wiped.
+func bodyField(name, want string) func(json.RawMessage) bool {
+	return func(b json.RawMessage) bool {
+		o, err := strictjson.ParseObject(b)
+		if err != nil {
+			return false
+		}
+		defer wipeParsed(o)
+		v, _ := o.String(name)
+		return v == want
+	}
+}
+
 // WaitEvent waits for an event of the given type (and optional predicate
 // on its body), returning it. Events seen earlier are searched first.
+// The event is the caller's: it wipes the body once done
+// (envelope.Inner.Wipe).
 func (d *Device) WaitEvent(ctx context.Context, typ string, pred func(json.RawMessage) bool) (*envelope.Inner, error) {
 	return d.waitFor(ctx, func(in *envelope.Inner) bool {
 		return in.Type == typ && in.Re == "" && (pred == nil || pred(in.Body))
@@ -2239,6 +2299,7 @@ func (d *Device) LockVault(ctx context.Context) error {
 	d.mu.Unlock()
 	if id == "" && desktop {
 		st, err := d.Op(ctx, "vault.status", nil)
+		defer wipeParsed(st) // the response body, parsed: nothing here keeps a slice of it
 		if err != nil {
 			return err
 		}
@@ -2249,6 +2310,6 @@ func (d *Device) LockVault(ctx context.Context) error {
 	if id != "" {
 		body = strictjson.NewBuilder().String("unlock_id", id).Bytes()
 	}
-	_, err := d.Op(ctx, "vault.lock", body)
+	err := d.do(ctx, "vault.lock", body)
 	return err
 }

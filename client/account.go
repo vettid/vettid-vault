@@ -28,6 +28,7 @@ func (d *Device) AccountNameSet(ctx context.Context, pin, password, first, last 
 	if err != nil {
 		return nil, err
 	}
+	defer wipeParsed(o) // the request is returned as its own copy
 	r, ok := o["request"]
 	if !ok {
 		return nil, ErrProtocol
@@ -35,7 +36,7 @@ func (d *Device) AccountNameSet(ctx context.Context, pin, password, first, last 
 	if _, err := strictjson.AsObject(r); err != nil {
 		return nil, ErrProtocol
 	}
-	return r, nil
+	return append(json.RawMessage(nil), r...), nil
 }
 
 // IKFingerprint is the fingerprint an app shows for a connection's

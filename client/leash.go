@@ -27,7 +27,7 @@ func (d *Device) LeashGrantIssue(ctx context.Context, agentID string, spec map[s
 
 // LeashGrantRevoke revokes a grant.
 func (d *Device) LeashGrantRevoke(ctx context.Context, grantID string) error {
-	_, err := d.Op(ctx, "leash.grant.revoke", map[string]any{"grant_id": grantID})
+	err := d.do(ctx, "leash.grant.revoke", map[string]any{"grant_id": grantID})
 	return err
 }
 
@@ -39,6 +39,7 @@ func (d *Device) LeashGrantList(ctx context.Context, agentID string) ([]json.Raw
 		body["agent_id"] = agentID
 	}
 	o, err := d.Op(ctx, "leash.grant.list", body)
+	defer wipeParsed(o) // the response body, parsed: nothing here keeps a slice of it
 	if err != nil {
 		return nil, err
 	}
@@ -64,7 +65,8 @@ func (d *Device) LeashItemSet(ctx context.Context, agentID, itemID string, versi
 // settings (ways use and reveal), as tests and staging agents that read
 // values must (§10.11 "Migration").
 func (d *Device) LeashReveal(ctx context.Context, agentID, itemID string) error {
-	_, err := d.LeashItemSet(ctx, agentID, itemID, 0, map[string]any{"ways": []string{"use", "reveal"}})
+	o, err := d.LeashItemSet(ctx, agentID, itemID, 0, map[string]any{"ways": []string{"use", "reveal"}})
+	wipeParsed(o)
 	return err
 }
 
@@ -76,6 +78,7 @@ func (d *Device) LeashItemList(ctx context.Context, agentID, itemID string) ([]j
 		body["item_id"] = itemID
 	}
 	o, err := d.Op(ctx, "leash.item.list", body)
+	defer wipeParsed(o) // the response body, parsed: nothing here keeps a slice of it
 	if err != nil {
 		return nil, err
 	}
@@ -85,7 +88,8 @@ func (d *Device) LeashItemList(ctx context.Context, agentID, itemID string) ([]j
 // AgentRequest sends an agent.request (an agent within its access
 // session). A referred request waits for an app's decision (§6.8): the
 // response arrives when the app decides, so ctx should allow up to the
-// approval's 5 minutes.
+// approval's 5 minutes. The response is the caller's: it wipes the body
+// once done (envelope.Inner.Wipe).
 func (d *Device) AgentRequest(ctx context.Context, op string, members map[string]any) (*Response, error) {
 	body := map[string]any{"op": op}
 	for k, v := range members {
@@ -174,6 +178,7 @@ type cachedStatus struct {
 // grants (leash.status.get, §10.11).
 func (d *Device) LeashStatus(ctx context.Context, grantID string) (status, sig []byte, chain []*handshake.Rotation, err error) {
 	o, err := d.Op(ctx, "leash.status.get", map[string]any{"grant_id": grantID})
+	defer wipeParsed(o) // the response body, parsed: nothing here keeps a slice of it
 	if err != nil {
 		return nil, nil, nil, err
 	}

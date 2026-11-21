@@ -220,3 +220,38 @@ func (m *runtimeMem) read() {
 	runtime.ReadMemStats(&s)
 	m.total = s.TotalAlloc
 }
+
+// validObject refuses exactly what ParseObject refuses, with the same
+// error, on every hand-made and generated case.
+func TestValidObjectMatchesParseObject(t *testing.T) {
+	g := newJSONGen(7)
+	inputs := append([]string(nil), treeCases...)
+	for range 20000 {
+		inputs = append(inputs, g.input())
+	}
+	for _, c := range inputs {
+		b := []byte(c)
+		_, perr := ParseObject(b)
+		if verr := validObject(b); (verr == nil) != (perr == nil) || (perr != nil && verr != perr) {
+			t.Fatalf("validObject(%q) = %v, ParseObject = %v", b, verr, perr)
+		}
+	}
+}
+
+// CompactObject copies its input once, into the result: validating makes
+// no copy, and the output is sized up front.
+func TestCompactObjectCopiesOnce(t *testing.T) {
+	const size = 1 << 16
+	in := []byte(`{ "a" : "` + strings.Repeat("x", size) + `" }`)
+	var m0, m1 runtime.MemStats
+	runtime.ReadMemStats(&m0)
+	for range 20 {
+		if _, err := CompactObject(in); err != nil {
+			t.Fatal(err)
+		}
+	}
+	runtime.ReadMemStats(&m1)
+	if per := float64(m1.TotalAlloc-m0.TotalAlloc) / 20; per > 1.5*size {
+		t.Fatalf("CompactObject allocates %.0f bytes for a %d-byte object: more than one copy", per, size)
+	}
+}

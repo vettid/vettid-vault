@@ -1407,10 +1407,10 @@ func (f *Feature) request(s *vault.Session, body []byte) (json.RawMessage, error
 
 // cacheNoValue: an op whose answer carries a secret value is never cached
 // with it (#14595). Each handler sets its copy without the value; one that
-// did not is cached as {} rather than as the answer.
+// did not is cached as {"withheld":true} rather than as the answer.
 func cacheNoValue(s *vault.Session, op string) {
 	if valueOps[op] && s.CachedResponseBody() == nil {
-		s.CacheResponseAs(emptyObject)
+		s.CacheResponseAs(withheldOnly)
 	}
 }
 

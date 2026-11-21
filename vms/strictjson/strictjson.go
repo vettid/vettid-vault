@@ -288,9 +288,12 @@ func stringEnd(b []byte, i int) (int, bool) {
 
 // memberName decodes a member name's string literal (quotes included).
 // Names are compared decoded, so that "a" and its escaped spelling (a
-// backslash-u escape of 0061) are the same name.
+// backslash-u escape of 0061) are the same name. A name that is not valid
+// UTF-8 is decoded too, which turns each bad byte into U+FFFD as the
+// decoder did, so that checkTree finds the same duplicates even on input
+// ParseObject has not checked for UTF-8.
 func memberName(lit []byte) (string, bool) {
-	if bytes.IndexByte(lit, '\\') < 0 {
+	if bytes.IndexByte(lit, '\\') < 0 && utf8.Valid(lit) {
 		return string(lit[1 : len(lit)-1]), true
 	}
 	var s string

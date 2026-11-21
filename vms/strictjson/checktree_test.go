@@ -8,7 +8,6 @@ import (
 	"runtime"
 	"strings"
 	"testing"
-	"unicode/utf8"
 )
 
 // checkTreeDecoder is checkTree as it was before it stopped using a
@@ -87,9 +86,6 @@ func checkTreeDecoder(b []byte) error {
 // before the syntax error, say) the two may name different faults.
 func sameAsDecoder(t *testing.T, b []byte) {
 	t.Helper()
-	if !utf8.Valid(b) {
-		return // ParseObject refuses it before checkTree
-	}
 	got, want := checkTree(b), checkTreeDecoder(b)
 	if (got == nil) != (want == nil) {
 		t.Fatalf("checkTree(%q) = %v, the decoder's = %v", b, got, want)
@@ -111,6 +107,10 @@ var treeCases = []string{
 	`{"` + u + `00e9":1,"é":2}`, `{"` + u + `d83d` + u + `de00":1,"😀":2}`, `{"a":{"x":1,"` + u + `0078":2}}`,
 	`{"` + u + `0061":1,"b":2}`, `{"` + u + `0022":1,"` + u + `0022":2}`, `{"` + u + `005c":1,"` + bs + bs + `":2}`,
 	`{"a` + bs + `"b":1,"a` + u + `0022b":2}`, `{"` + u + `00":1}`, `{"` + u + `zzzz":1}`, `{"a":"` + u + `0061"}`,
+	// Lone surrogates: the decoder makes each U+FFFD (ParseObject refuses
+	// them earlier, but checkTree alone must agree).
+	`{"` + u + `d800":1,"` + u + `fffd":2}`, `{"` + u + `dc00":1,"` + u + `d800":2}`, `{"` + u + `d800x":1,"` + u + `fffdx":2}`,
+	`{"` + u + `d83d` + u + `0061":1,"` + u + `fffda":2}`, "{\"\xff" + bs + "u" + "d800\":1,\"" + u + "fffd" + u + "fffd\":2}",
 	`{}`, ` { } `, `{"a":1}`, `{"a":1,"b":2}`, `{"a":1,"a":2}`,
 	`{"a":{"b":1,"b":2}}`, `{"a":[{"b":1,"b":2}]}`, `{"a":[{"b":1},{"b":2}]}`,
 	`{"a":{"b":1},"b":{"a":1}}`, `{"a":1,"a":2}`, `{"é":1,"é":2}`,
@@ -121,6 +121,8 @@ var treeCases = []string{
 	`{"a":1:2}`, `{"a":[1,]}`, `{"a":[,1]}`, `{"a":]`, `{"a":[}`, `{"a":{]}`,
 	`{1:2}`, `{[]:1}`, `{{}:1}`, `{"a":1`, `{"a":"x`, `{"a`, `{"a":tru}`,
 	`{"a":nul}`, `{"a":01}`, `{"a":"\x"}`, `{"\x":1}`, `{"a":1}}`, `{"a":1}]`,
+	"{\"\xff\":1,\"\xfe\":2}", "{\"\xff\":1,\"\xef\xbf\xbd\":2}", "{\"\xff\":1,\"" + bs + "ufffd\":2}",
+	"{\"\xff" + bs + "/\":1,\"\xfe/\":2}", "{\"a\":\"\xff\",\"b\":1}", "{\"\xc3\":1,\"\xc3\xa9\":2}",
 	`]`, `}`, `{]`, `[}`, "{\"a\":\"\t\"}", `{"a":1,"a":2`, `{"a":1 "a":2}`,
 	strings.Repeat(`{"a":`, MaxDepth-1) + `1` + strings.Repeat(`}`, MaxDepth-1),
 	strings.Repeat(`{"a":`, MaxDepth) + `1` + strings.Repeat(`}`, MaxDepth),

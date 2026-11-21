@@ -119,7 +119,8 @@ type Config struct {
 	// the caller's own slice, but the *Inner values in it are shared: the
 	// same values go to the waiting calls and Events once the save
 	// succeeds, as with Persist, so never modify them, and copy what you
-	// keep. As with Events, a response may appear twice (an answer and
+	// keep: the client wipes the bodies of vault.enrolled and device.paired
+	// once AwaitEnrolled or AwaitPaired has taken them. As with Events, a response may appear twice (an answer and
 	// its replay, §8.2), and a response also reaches its waiting call:
 	// key what you derive on ID and Re. Like Persist, it must not call
 	// Poll, Deliver or the waiting calls. After an error the next Poll
@@ -591,7 +592,8 @@ func (d *Device) policy() handshake.Policy { return handshake.PolicyVaultToDevic
 // KEM key and deposited on its open token, and pins the vault bundle. Dev
 // builds carry no attestation; real apps verify it here (phase V3/V6).
 func (d *Device) AwaitEnrolled(ctx context.Context) error {
-	_, err := d.waitFor(ctx, func(in *envelope.Inner) bool { return in.Type == "vault.enrolled" })
+	in, err := d.waitFor(ctx, func(in *envelope.Inner) bool { return in.Type == "vault.enrolled" })
+	dropped(in) // handleEnrolled has kept what it needs; the body holds the vault token
 	return err
 }
 
@@ -733,13 +735,17 @@ func (d *Device) awaitPaired(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	// handle recorded the device id, vault id, release and token; the body
+	// (device.paired holds the standing token) is wiped once checked.
+	defer dropped(in)
 	if in.Type == devicePairRejected {
 		return ErrPairRejected
 	}
-	// handle recorded the device id, vault id and release.
-	if _, err := strictjson.ParseObject(in.Body); err != nil {
+	o, err := strictjson.ParseObject(in.Body)
+	if err != nil {
 		return ErrProtocol
 	}
+	wipeParsed(o)
 	return nil
 }
 
@@ -827,6 +833,21 @@ func (d *Device) SendWithID(ctx context.Context, id, typ string, body json.RawMe
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return d.sendLocked(ctx, id, typ, body, "", "")
+}
+
+// sendToken sends a standing token for the vault (§10.3) and wipes the
+// body it built; the sealed envelope keeps no reference to it. Sealing
+// itself (Inner.Marshal, EncodeInner) still makes copies of a body that
+// it does not wipe, on every send. d.mu is held.
+func (d *Device) sendToken(ctx context.Context, typ, tok, re, status string) (string, error) {
+	body := strictjson.NewBuilder().String("kind", "standing").String("token", tok).Bytes()
+	defer func() {
+		suite.Wipe(body)
+		if testWipedHook != nil {
+			testWipedHook("token reply", body)
+		}
+	}()
+	return d.sendLocked(ctx, "", typ, body, re, status)
 }
 
 func (d *Device) sendLocked(ctx context.Context, id, typ string, body json.RawMessage, re, status string) (string, error) {
@@ -1566,9 +1587,9 @@ var testHandleHook func(relayclient.Message)
 // dropped, after its body is wiped.
 var testDropHook func(*envelope.Inner)
 
-// testPaddedHook, set only by tests, sees handleEnrolled's opened
-// plaintext once it is wiped.
-var testPaddedHook func([]byte)
+// testWipedHook, set only by tests, sees a buffer the client wiped: what
+// it held ("opened plaintext", "token reply") and the buffer.
+var testWipedHook func(what string, b []byte)
 
 // testParsedHook, set only by tests, sees a body's parsed members once
 // wipeParsed has wiped them.
@@ -1752,8 +1773,7 @@ func (d *Device) handle(ctx context.Context, m relayclient.Message) (unacked boo
 		if in.Re == "" {
 			tok, err := d.mintForVault()
 			if err == nil {
-				body := strictjson.NewBuilder().String("kind", "standing").String("token", tok).Bytes()
-				_, _ = d.sendLocked(ctx, "", in.Type, body, in.ID, envelope.StatusOK)
+				_, _ = d.sendToken(ctx, in.Type, tok, in.ID, envelope.StatusOK)
 			}
 			return false
 		}
@@ -1778,8 +1798,8 @@ func (d *Device) handleEnrolled(env *envelope.Envelope, sender ed25519.PublicKey
 	}
 	defer func() {
 		suite.Wipe(padded) // the whole plaintext; DecodeInner copies out of it
-		if testPaddedHook != nil {
-			testPaddedHook(padded)
+		if testWipedHook != nil {
+			testWipedHook("opened plaintext", padded)
 		}
 	}()
 	in, err := envelope.DecodeInner(padded, envelope.ModeSealed)
@@ -2133,8 +2153,7 @@ func (d *Device) RenewVaultToken(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	body := strictjson.NewBuilder().String("kind", "standing").String("token", tok).Bytes()
-	_, err = d.sendLocked(ctx, "", "relay.token.issued", body, "", "")
+	_, err = d.sendToken(ctx, "relay.token.issued", tok, "", "")
 	return err
 }
 
@@ -2146,8 +2165,7 @@ func (d *Device) maintain(ctx context.Context, now time.Time) {
 	}
 	if !d.st.IssuedExp.IsZero() && d.st.IssuedExp.Sub(now) < 10*24*time.Hour {
 		if tok, err := d.mintForVault(); err == nil {
-			body := strictjson.NewBuilder().String("kind", "standing").String("token", tok).Bytes()
-			_, _ = d.sendLocked(ctx, "", "relay.token.issued", body, "", "")
+			_, _ = d.sendToken(ctx, "relay.token.issued", tok, "", "")
 		}
 	}
 	if v.TokenExp.Sub(now) < 3*24*time.Hour && now.Before(v.TokenExp) {

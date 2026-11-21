@@ -3,6 +3,8 @@ package client
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
+	"errors"
 	"testing"
 	"time"
 
@@ -135,8 +137,12 @@ func TestDroppedEnrolledWiped(t *testing.T) {
 			var drops []*envelope.Inner
 			testDropHook = func(in *envelope.Inner) { drops = append(drops, in) }
 			var opened [][]byte
-			testPaddedHook = func(b []byte) { opened = append(opened, b) }
-			defer func() { testDropHook, testPaddedHook = nil, nil }()
+			testWipedHook = func(what string, b []byte) {
+				if what == "opened plaintext" {
+					opened = append(opened, b)
+				}
+			}
+			defer func() { testDropHook, testWipedHook = nil, nil }()
 			now := time.Now()
 			id, _ := envelope.NewULID(now)
 			padded, err := envelope.EncodeInner(&envelope.Inner{ID: id, Type: typ, TS: now, Body: []byte(dropSecret)}, envelope.ModeSealed)
@@ -229,5 +235,131 @@ func TestPairingRespWiped(t *testing.T) {
 	}
 	if n != 1 {
 		t.Fatalf("%d wiped hs.resp, want 1", n)
+	}
+}
+
+// The client's own waiting calls take the message they wait for and wipe
+// it once handled: vault.enrolled and device.paired carry tokens, and
+// awaitPaired's check of the body leaves no parsed copy.
+func TestAwaitsWipeWhatTheyTake(t *testing.T) {
+	ctx := context.Background()
+	for _, c := range []struct {
+		typ     string
+		await   func(*Device) error
+		wantErr error
+		parses  int
+	}{
+		{"vault.enrolled", func(d *Device) error { return d.AwaitEnrolled(ctx) }, nil, 0},
+		{"device.paired", func(d *Device) error { return d.AwaitPaired(ctx) }, nil, 1},
+		{devicePairRejected, func(d *Device) error { return d.AwaitPaired(ctx) }, ErrPairRejected, 0},
+	} {
+		t.Run(c.typ, func(t *testing.T) {
+			_, _, d := pair(t)
+			d.Events()
+			in := &envelope.Inner{ID: "01HZZZZZZZZZZZZZZZZZZZZZZZ", Type: c.typ, TS: time.Now(), Body: []byte(dropSecret)}
+			d.mu.Lock()
+			d.events = append(d.events, in)
+			d.mu.Unlock()
+			var parsed []strictjson.Object
+			testParsedHook = func(o strictjson.Object) { parsed = append(parsed, o) }
+			defer func() { testParsedHook = nil }()
+			if err := c.await(d); !errors.Is(err, c.wantErr) {
+				t.Fatalf("err = %v, want %v", err, c.wantErr)
+			}
+			if !wiped(in.Body) {
+				t.Fatalf("the taken %s kept its body", c.typ)
+			}
+			if len(parsed) != c.parses {
+				t.Fatalf("%d wiped parses, want %d", len(parsed), c.parses)
+			}
+			for _, o := range parsed {
+				for k, v := range o {
+					if !wiped(v) {
+						t.Fatalf("member %q of the parsed body kept its value", k)
+					}
+				}
+			}
+		})
+	}
+}
+
+// The standing token the device sends the vault (a relay.token.refresh
+// answer, RenewVaultToken) is wiped from the body it built once sealed and
+// sent, and the vault still receives it.
+func TestTokenReplyWiped(t *testing.T) {
+	ctx := context.Background()
+	for _, c := range []struct {
+		name, want string
+		send       func(*fakeVault, *Device) error
+	}{
+		{"relay.token.refresh answer", "relay.token.refresh", func(v *fakeVault, d *Device) error {
+			id, _ := envelope.NewULID(time.Now())
+			v.sealInner(&envelope.Inner{ID: id, Type: "relay.token.refresh", TS: time.Now(), Body: []byte(`{}`)})
+			return d.Poll(ctx)
+		}},
+		{"RenewVaultToken", "relay.token.issued", func(_ *fakeVault, d *Device) error { return d.RenewVaultToken(ctx) }},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			_, v, d := pair(t)
+			var bodies [][]byte
+			testWipedHook = func(what string, b []byte) {
+				if what == "token reply" {
+					bodies = append(bodies, b)
+				}
+			}
+			defer func() { testWipedHook = nil }()
+			if err := c.send(v, d); err != nil {
+				t.Fatal(err)
+			}
+			if len(bodies) != 1 || !wiped(bodies[0]) {
+				t.Fatalf("token replies wiped: %d", len(bodies))
+			}
+			v.process()
+			if n := len(v.receivedTypes); n == 0 || v.receivedTypes[n-1] != c.want {
+				t.Fatalf("the vault did not receive the token: %v", v.receivedTypes)
+			}
+		})
+	}
+}
+
+// An accepted vault.enrolled is emitted with its body intact; only the
+// opened plaintext and the parsed copies are wiped.
+func TestEnrolledEmittedIntact(t *testing.T) {
+	ctx := context.Background()
+	_, v, d := pair(t)
+	d.Events()
+	bundle := strictjson.NewBuilder().Uint("v", 1).Uint("suite", 2).
+		Base64("ik", v.ik.Public().(ed25519.PublicKey)).Base64("kem", v.kem.Public().Bytes()).
+		Raw("relay", handshake.MarshalRelayAddr(v.addr())).Bytes()
+	body := strictjson.NewBuilder().Base64("vault_bundle", bundle).String("vault_id", "vault-1").String("token", v.token(time.Hour)).Bytes()
+	keep := append([]byte(nil), body...)
+	now := time.Now()
+	id, _ := envelope.NewULID(now)
+	padded, err := envelope.EncodeInner(&envelope.Inner{ID: id, Type: "vault.enrolled", TS: now, Body: body}, envelope.ModeSealed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _, err := envelope.SealSealed(d.KEMKey(), d.KEMKey().Kid(), padded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	v.r.put(v.dev.Mailbox, v.relayPK(), raw)
+	if err := d.Poll(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if d.VaultID() != "vault-1" {
+		t.Fatal("vault.enrolled was not accepted")
+	}
+	n := 0
+	for _, e := range d.Events() {
+		if e.Type == "vault.enrolled" {
+			n++
+			if !bytes.Equal(e.Body, keep) {
+				t.Fatalf("the emitted vault.enrolled body was changed (%d bytes, all zero: %v)", len(e.Body), wiped(e.Body))
+			}
+		}
+	}
+	if n != 1 {
+		t.Fatalf("%d vault.enrolled emitted, want 1", n)
 	}
 }

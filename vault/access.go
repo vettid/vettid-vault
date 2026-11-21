@@ -148,6 +148,12 @@ func approvalPendingBody(h *HeldRequest, p *Peer, in *envelope.Inner) []byte {
 		// request referred again (§10.11).
 		b.String("replaces", h.Replaces)
 	}
+	if h.Proxy != nil {
+		// (0.92.0) an item.proxy's bound host, header and prefix: the values
+		// the vault will send, which the app shows (§10.11).
+		b.Raw("proxy", strictjson.NewBuilder().String("host", h.Proxy.Host).String("header", h.Proxy.Header).
+			String("prefix", h.Proxy.Prefix).Bytes())
+	}
 	return b.Bytes()
 }
 
@@ -308,7 +314,8 @@ func (m *Manager) endAccess(ctx context.Context, p *Peer, notify bool, reason, e
 // cached, errors included.
 //
 // For an agent, a holds what the LEASH policy set (flags, the previous
-// pin, its note); for anyone else it is ignored. It returns the new
+// pin, an item.proxy's shown values, its note); for anyone else it is
+// ignored. It returns the new
 // approval's id, or the error code the request was answered with instead
 // (limit, internal).
 func (m *Manager) hold(p *Peer, in *envelope.Inner, key string, volatile bool, a Approval, now time.Time) (id, code string) {
@@ -350,6 +357,7 @@ func (m *Manager) hold(p *Peer, in *envelope.Inner, key string, volatile bool, a
 		if len(a.Note) > 0 {
 			h.Note = a.Note
 		}
+		h.Proxy = a.Proxy       // an item.proxy's host, header and prefix, shown (0.92.0)
 		h.Replaces = a.replaces // a re-referral names the approval it replaces
 	}
 	m.st.Held[h.ID] = h

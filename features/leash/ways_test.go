@@ -272,6 +272,9 @@ func TestRevealDecision(t *testing.T) {
 		if d != vault.AgentAsk || strings.Join(s.ApprovalFlags(), ",") != FlagHistory || s.AgentRefusal() != nil {
 			t.Fatalf("reveal %d: %v %v", i, d, s.ApprovalFlags())
 		}
+		if p := s.HeldApproval().Proxy; p != nil {
+			t.Fatalf("reveal %d: a get's approval with proxy %+v", i, p)
+		}
 	}
 	if g.HourN != 3 {
 		t.Fatalf("windows: %d counted, want 3 (per_hour)", g.HourN)

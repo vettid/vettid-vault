@@ -79,6 +79,10 @@ func TestProxyAlwaysReferred(t *testing.T) {
 	if a := s.HeldApproval(); string(a.Note) != heldNote || len(a.Flags) != 0 || a.PreviousSHA256 != "" {
 		t.Fatalf("held with %+v", a)
 	}
+	// (0.92.0) the approval shows the note's three values.
+	if p := s.HeldApproval().Proxy; p == nil || *p != (vault.ApprovalProxy{Host: "api.example.com", Header: "Authorization", Prefix: "Bearer "}) {
+		t.Fatalf("approval.pending proxy %+v", p)
+	}
 	if r.f.d.Agents[agent].Referred != 1 {
 		t.Fatalf("referral not counted")
 	}
@@ -255,6 +259,10 @@ func TestProxyChangedWhileHeld(t *testing.T) {
 		if json.Unmarshal(ra.Approval.Note, &n) != nil || n.Host != c.host || n.Header != c.header || n.Prefix != c.prefix {
 			t.Fatalf("%s: new note %s", c.name, ra.Approval.Note)
 		}
+		// (0.92.0) the new approval shows the new note's values.
+		if p := ra.Approval.Proxy; p == nil || *p != (vault.ApprovalProxy{Host: c.host, Header: c.header, Prefix: c.prefix}) {
+			t.Fatalf("%s: new approval's proxy %+v", c.name, p)
+		}
 		if r.it.used[r.wifi] != 0 || r.f.d.Agents[agent].Referred != 1 {
 			t.Fatalf("%s: read %d, referred %d", c.name, r.it.used[r.wifi], r.f.d.Agents[agent].Referred)
 		}
@@ -270,6 +278,43 @@ func TestProxyChangedWhileHeld(t *testing.T) {
 		r := proxyRig(t)
 		if _, err := r.approved(t0, body(r), json.RawMessage(note)); codeOf(err) != "forbidden" || r.it.used[r.wifi] != 0 {
 			t.Fatalf("note %q: %v", note, err)
+		}
+	}
+}
+
+// §10.11 (0.92.0): an item with no prefix shows prefix "" (the vault
+// package always sends it).
+func TestProxyApprovalWithoutPrefix(t *testing.T) {
+	r := newRig(t)
+	r.rule(t, Auto, 0, 60, r.wifi)
+	r.setProxy(r.wifi, 3, "X-Api-Key", "", "api.example.com")
+	r.session(t0.Add(time.Hour))
+	d, s := r.decideS(t0, proxyBody(r.wifi, "f1", "api.example.com", ""))
+	if p := s.HeldApproval().Proxy; d != vault.AgentAsk || p == nil || *p != (vault.ApprovalProxy{Host: "api.example.com", Header: "X-Api-Key"}) {
+		t.Fatalf("%v %+v", d, p)
+	}
+}
+
+// §10.11 (0.92.0): a request that spells the bound host another way (with
+// or without its default port) shows the host as the settings spell it, in
+// the approval and in its note.
+func TestProxyApprovalRespelledHost(t *testing.T) {
+	for _, c := range []struct{ bound, asked string }{
+		{"api.example.com", "api.example.com:443"},
+		{"api.example.com:443", "api.example.com"},
+	} {
+		r := newRig(t)
+		r.rule(t, Auto, 0, 60, r.wifi)
+		r.setProxy(r.wifi, 3, "Authorization", "Bearer ", c.bound)
+		r.session(t0.Add(time.Hour))
+		d, s := r.decideS(t0, proxyBody(r.wifi, "f1", c.asked, ""))
+		a := s.HeldApproval()
+		if p := a.Proxy; d != vault.AgentAsk || p == nil || *p != (vault.ApprovalProxy{Host: c.bound, Header: "Authorization", Prefix: "Bearer "}) {
+			t.Fatalf("bound %s, asked %s: %v %+v", c.bound, c.asked, d, p)
+		}
+		var n proxyNote
+		if json.Unmarshal(a.Note, &n) != nil || n.Host != c.bound {
+			t.Fatalf("bound %s, asked %s: note %s", c.bound, c.asked, a.Note)
 		}
 	}
 }

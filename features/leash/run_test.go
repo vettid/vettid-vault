@@ -156,6 +156,9 @@ func TestRunReferrals(t *testing.T) {
 		if d != vault.AgentAsk || strings.Join(a.Flags, ",") != c.flags || strings.TrimSpace(a.PreviousSHA256+" "+a.PreviousPath) != c.previous {
 			t.Fatalf("%s: %v %+v", c.name, d, a)
 		}
+		if a.Proxy != nil {
+			t.Fatalf("%s: a run's approval with proxy %+v", c.name, a.Proxy)
+		}
 		var n runNote
 		if err := json.Unmarshal(a.Note, &n); err != nil || n.Version != 4 || strings.Join(n.Flags, ",") != c.flags {
 			t.Fatalf("%s: note %s", c.name, a.Note)

@@ -53,6 +53,7 @@ func ParseAskState(raw json.RawMessage) (*AskState, error) {
 // ConnectionAsks reads a connection's ask state (connection.get's asks).
 func (d *Device) ConnectionAsks(ctx context.Context, connectionID string) (*AskState, error) {
 	o, err := d.Op(ctx, "connection.get", map[string]any{"connection_id": connectionID})
+	defer wipeParsed(o) // the response body, parsed: nothing here keeps a slice of it
 	if err != nil {
 		return nil, err
 	}
@@ -65,14 +66,14 @@ func (d *Device) ConnectionAsks(ctx context.Context, connectionID string) (*AskS
 
 // ConnectionAsksMute mutes (or unmutes) a connection's asks.
 func (d *Device) ConnectionAsksMute(ctx context.Context, connectionID string, muted bool) error {
-	_, err := d.Op(ctx, "connection.asks.mute", map[string]any{"connection_id": connectionID, "muted": muted})
+	err := d.do(ctx, "connection.asks.mute", map[string]any{"connection_id": connectionID, "muted": muted})
 	return err
 }
 
 // ConnectionAsksResume always clears a connection's decline times and
 // cooldowns and ends a pause of its asks, if any (0.23.1).
 func (d *Device) ConnectionAsksResume(ctx context.Context, connectionID string) error {
-	_, err := d.Op(ctx, "connection.asks.resume", map[string]any{"connection_id": connectionID})
+	err := d.do(ctx, "connection.asks.resume", map[string]any{"connection_id": connectionID})
 	return err
 }
 
@@ -102,6 +103,7 @@ func (d *Device) ShareRuleDryRun(ctx context.Context, body map[string]any) (*Rul
 	}
 	b["dry_run"] = true
 	o, err := d.Op(ctx, "share.rule.set", b)
+	defer wipeParsed(o) // the response body, parsed: nothing here keeps a slice of it
 	if err != nil {
 		return nil, err
 	}

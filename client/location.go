@@ -28,6 +28,7 @@ type LocationShare struct {
 // LocationShareStart starts a share and returns its id and expiry.
 func (d *Device) LocationShareStart(ctx context.Context, s LocationShare) (string, time.Time, error) {
 	o, err := d.Op(ctx, "location.share.start", s)
+	defer wipeParsed(o) // the response body, parsed: nothing here keeps a slice of it
 	if err != nil {
 		return "", time.Time{}, err
 	}
@@ -49,7 +50,7 @@ func (d *Device) LocationShareStart(ctx context.Context, s LocationShare) (strin
 // LocationShareStop stops an outgoing share, or asks the sharer of an
 // incoming one to stop (and forgets it).
 func (d *Device) LocationShareStop(ctx context.Context, shareID string) error {
-	_, err := d.Op(ctx, "location.share.stop", map[string]any{"share_id": shareID})
+	err := d.do(ctx, "location.share.stop", map[string]any{"share_id": shareID})
 	return err
 }
 
@@ -75,6 +76,7 @@ func (d *Device) LocationRequest(ctx context.Context, connectionID, note string)
 		body["note"] = note
 	}
 	o, err := d.Op(ctx, "location.request", body)
+	defer wipeParsed(o) // the response body, parsed: nothing here keeps a slice of it
 	if err != nil {
 		return "", err
 	}
@@ -145,12 +147,16 @@ func (d *Device) LocationRequestPending(ctx context.Context, connectionID string
 func (d *Device) waitObj(ctx context.Context, typ string, pred func(strictjson.Object) bool) (strictjson.Object, error) {
 	in, err := d.WaitEvent(ctx, typ, func(b json.RawMessage) bool {
 		o, err := strictjson.ParseObject(b)
-		return err == nil && pred(o)
+		if err != nil {
+			return false
+		}
+		defer wipeParsed(o)
+		return pred(o)
 	})
 	if err != nil {
 		return nil, err
 	}
-	return strictjson.ParseObject(in.Body)
+	return takeObject(in) // the event is wiped; the Object is the caller's
 }
 
 // LocationHistoryList returns the member's own location log (§10.16), a
@@ -163,6 +169,7 @@ func (d *Device) LocationHistoryList(ctx context.Context, from, to time.Time, af
 // bounds: open; both zero: everything) and returns how many.
 func (d *Device) LocationHistoryDelete(ctx context.Context, from, to time.Time) (uint64, error) {
 	o, err := d.Op(ctx, "location.history.delete", historyRange(from, to, "", 0, ""))
+	defer wipeParsed(o) // the response body, parsed: nothing here keeps a slice of it
 	if err != nil {
 		return 0, err
 	}
@@ -173,6 +180,7 @@ func (d *Device) LocationHistoryDelete(ctx context.Context, from, to time.Time) 
 // snapshot of the log between from and to, at the share's precision.
 func (d *Device) LocationHistoryShare(ctx context.Context, shareID string, from, to time.Time) (uint64, error) {
 	o, err := d.Op(ctx, "location.history.share", historyRange(from, to, "", 0, shareID))
+	defer wipeParsed(o) // the response body, parsed: nothing here keeps a slice of it
 	if err != nil {
 		return 0, err
 	}

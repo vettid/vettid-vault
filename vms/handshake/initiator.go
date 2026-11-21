@@ -183,17 +183,11 @@ func NewInitiator(cfg InitiatorConfig) (*Initiator, error) {
 			return nil, err
 		}
 	} else {
-		padded, err := envelope.EncodeInner(in, envelope.ModeSealed)
-		if err != nil {
-			eph.Destroy()
-			return nil, err
-		}
 		senderKid := cfg.StaticKEM.Kid()
 		if cfg.AnonymousSender {
 			senderKid = suite.Anonymous
 		}
-		env, exp, err := envelope.SealSealed(cfg.ResponderEK, senderKid, padded)
-		suite.Wipe(padded)
+		env, exp, err := envelope.SealInner(in, cfg.ResponderEK, senderKid)
 		if err != nil {
 			eph.Destroy()
 			return nil, err

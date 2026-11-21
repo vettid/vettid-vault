@@ -9,6 +9,7 @@ import (
 
 	"github.com/vettid/vettid-vault/vms/envelope"
 	"github.com/vettid/vettid-vault/vms/strictjson"
+	"github.com/vettid/vettid-vault/vms/suite"
 )
 
 // Feature operations of VAULT-MESSAGING §10.6–§10.9. Each is a request to
@@ -39,6 +40,7 @@ func LimitOf(err error) (Limit, bool) {
 		return Limit{}, false
 	}
 	o, perr := strictjson.ParseObject(oe.Body)
+	defer wipeParsed(o) // the response body, parsed: nothing here keeps a slice of it
 	if perr != nil {
 		return Limit{}, false
 	}
@@ -69,7 +71,7 @@ func Code(err error) string {
 }
 
 // Op sends a request whose body is v marshalled as JSON and returns the
-// parsed response body.
+// parsed response body, the caller's own copy. The response is wiped.
 func (d *Device) Op(ctx context.Context, typ string, v any) (strictjson.Object, error) {
 	body := json.RawMessage(`{}`)
 	if v != nil {
@@ -77,6 +79,7 @@ func (d *Device) Op(ctx context.Context, typ string, v any) (strictjson.Object, 
 		if err != nil {
 			return nil, err
 		}
+		defer suite.Wipe(b)      // the request as sent; its values may be secrets
 		if string(b) != "null" { // a nil map
 			body = b
 		}
@@ -86,13 +89,12 @@ func (d *Device) Op(ctx context.Context, typ string, v any) (strictjson.Object, 
 		return nil, err
 	}
 	if !r.OK() {
-		return nil, &OpError{Type: typ, Code: r.ErrorCode(), Body: r.Body()}
+		return nil, opError(typ, r)
 	}
-	b := r.Body()
-	if len(b) == 0 {
-		b = json.RawMessage(`{}`)
+	if len(r.Body()) == 0 {
+		return strictjson.ParseObject(json.RawMessage(`{}`))
 	}
-	return strictjson.ParseObject(b)
+	return takeObject(r.Inner) // the response is wiped; the Object is the caller's
 }
 
 // ProfileGet returns the owner's profile object: the display name and
@@ -105,6 +107,7 @@ func (d *Device) ProfileGet(ctx context.Context) (strictjson.Object, error) {
 // returns the new version.
 func (d *Device) ProfileSet(ctx context.Context, body map[string]any) (uint64, error) {
 	o, err := d.Op(ctx, "profile.set", body)
+	defer wipeParsed(o) // the response body, parsed: nothing here keeps a slice of it
 	if err != nil {
 		return 0, err
 	}
@@ -119,6 +122,7 @@ func (d *Device) SettingsGet(ctx context.Context) (strictjson.Object, error) {
 // SettingsSet sets keys at a version and returns the new version.
 func (d *Device) SettingsSet(ctx context.Context, version uint64, set map[string]any) (uint64, error) {
 	o, err := d.Op(ctx, "settings.set", map[string]any{"version": version, "set": set})
+	defer wipeParsed(o) // the response body, parsed: nothing here keeps a slice of it
 	if err != nil {
 		return 0, err
 	}
@@ -204,6 +208,7 @@ func (d *Device) AuditSearch(ctx context.Context, q AuditQuery, perConnection bo
 	if err != nil {
 		return nil, err
 	}
+	defer wipeParsed(o) // the entries are unmarshalled into their own copies
 	p := &AuditPage{}
 	if err := json.Unmarshal(o["entries"], &p.Entries); err != nil {
 		return nil, ErrProtocol
@@ -332,6 +337,7 @@ func (d *Device) AuditExportPreview(ctx context.Context, q AuditQuery, format st
 		b["format"] = format
 	}
 	o, err := d.Op(ctx, "audit.export", b)
+	defer wipeParsed(o) // the response body, parsed: nothing here keeps a slice of it
 	if err != nil {
 		return nil, err
 	}
@@ -355,6 +361,7 @@ func (d *Device) AuditExport(ctx context.Context, q AuditQuery, format string, u
 	if err != nil {
 		return nil, err
 	}
+	defer wipeParsed(o) // the response body, parsed: nothing here keeps a slice of it
 	return parseAuditExport(o)
 }
 
@@ -394,7 +401,7 @@ func (d *Device) FeedUpdate(ctx context.Context, id, status, priority string) (s
 
 // FeedDelete deletes a feed item.
 func (d *Device) FeedDelete(ctx context.Context, id string) error {
-	_, err := d.Op(ctx, "feed.delete", map[string]any{"item_id": id})
+	err := d.do(ctx, "feed.delete", map[string]any{"item_id": id})
 	return err
 }
 

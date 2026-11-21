@@ -27,6 +27,7 @@ func (d *Device) SessionRequest(ctx context.Context, seconds int) (string, error
 		body["seconds"] = seconds
 	}
 	o, err := d.Op(ctx, "device.session.request", body)
+	defer wipeParsed(o) // the response body, parsed: nothing here keeps a slice of it
 	if err != nil {
 		return "", err
 	}
@@ -41,6 +42,7 @@ func (d *Device) SessionApprove(ctx context.Context, requestID string, seconds i
 		body["seconds"] = seconds
 	}
 	o, err := d.Op(ctx, "device.session.approve", body)
+	defer wipeParsed(o) // the response body, parsed: nothing here keeps a slice of it
 	if err != nil {
 		return time.Time{}, err
 	}
@@ -53,7 +55,7 @@ func (d *Device) SessionApprove(ctx context.Context, requestID string, seconds i
 
 // SessionDeny denies a request (apps).
 func (d *Device) SessionDeny(ctx context.Context, requestID string) error {
-	_, err := d.Op(ctx, "device.session.deny", map[string]any{"request_id": requestID})
+	err := d.do(ctx, "device.session.deny", map[string]any{"request_id": requestID})
 	return err
 }
 
@@ -64,7 +66,7 @@ func (d *Device) SessionEnd(ctx context.Context, deviceID string) error {
 	if deviceID != "" {
 		body["device_id"] = deviceID
 	}
-	_, err := d.Op(ctx, "device.session.end", body)
+	err := d.do(ctx, "device.session.end", body)
 	return err
 }
 
@@ -72,6 +74,7 @@ func (d *Device) SessionEnd(ctx context.Context, deviceID string) error {
 // held request's result ("ok" or its error code).
 func (d *Device) ApprovalDecide(ctx context.Context, approvalID string, approve bool) (string, error) {
 	o, err := d.Op(ctx, "approval.decide", map[string]any{"approval_id": approvalID, "approve": approve})
+	defer wipeParsed(o) // the response body, parsed: nothing here keeps a slice of it
 	if err != nil {
 		return "", err
 	}
@@ -95,6 +98,7 @@ func (d *Device) block(ctx context.Context, body map[string]any, note string) (s
 		body["note"] = note
 	}
 	o, err := d.Op(ctx, "block.add", body)
+	defer wipeParsed(o) // the response body, parsed: nothing here keeps a slice of it
 	if err != nil {
 		return "", err
 	}
@@ -103,7 +107,7 @@ func (d *Device) block(ctx context.Context, body map[string]any, note string) (s
 
 // BlockRemove lifts a block.
 func (d *Device) BlockRemove(ctx context.Context, blockID string) error {
-	_, err := d.Op(ctx, "block.remove", map[string]any{"block_id": blockID})
+	err := d.do(ctx, "block.remove", map[string]any{"block_id": blockID})
 	return err
 }
 
@@ -120,6 +124,7 @@ func (d *Device) ConnectionUpdate(ctx context.Context, connectionID string, vers
 		body[k] = v
 	}
 	o, err := d.Op(ctx, "connection.update", body)
+	defer wipeParsed(o) // the response body, parsed: nothing here keeps a slice of it
 	if err != nil {
 		return 0, err
 	}
@@ -143,6 +148,7 @@ func (d *Device) AuthRequestFor(ctx context.Context, connectionID, context, purp
 		body["purpose"] = purpose
 	}
 	o, err := d.Op(ctx, "connection.authenticate.request", body)
+	defer wipeParsed(o) // the response body, parsed: nothing here keeps a slice of it
 	if err != nil {
 		return "", err
 	}
@@ -152,13 +158,13 @@ func (d *Device) AuthRequestFor(ctx context.Context, connectionID, context, purp
 // AuthApprove signs a pending challenge with the credential key; the app
 // first opens the unlock window with CredentialUnlock (§3.5.3).
 func (d *Device) AuthApprove(ctx context.Context, requestID string) error {
-	_, err := d.Op(ctx, "connection.authenticate.approve", map[string]any{"request_id": requestID})
+	err := d.do(ctx, "connection.authenticate.approve", map[string]any{"request_id": requestID})
 	return err
 }
 
 // AuthDeny refuses a pending challenge.
 func (d *Device) AuthDeny(ctx context.Context, requestID string) error {
-	_, err := d.Op(ctx, "connection.authenticate.deny", map[string]any{"request_id": requestID})
+	err := d.do(ctx, "connection.authenticate.deny", map[string]any{"request_id": requestID})
 	return err
 }
 
@@ -227,6 +233,7 @@ func (d *Device) CallStart(ctx context.Context, connectionID, media, sdp string)
 	}
 	o, err := d.Op(ctx, "call.start", map[string]any{"connection_id": connectionID, "call_id": cid, "media": media, "sdp": sdp,
 		"ek": ek, "ek_sig": esig})
+	defer wipeParsed(o) // the response body, parsed: nothing here keeps a slice of it
 	if err != nil {
 		sk.Destroy()
 		return nil, err
@@ -251,6 +258,7 @@ func (d *Device) IncomingCall(ev *envelope.Inner) (*Call, error) {
 		return nil, ErrCall
 	}
 	o, err := strictjson.ParseObject(ev.Body)
+	defer wipeParsed(o) // our parse of the caller's event: nothing here keeps a slice of it
 	if err != nil {
 		return nil, ErrCall
 	}
@@ -278,6 +286,7 @@ func (d *Device) IncomingCall(ev *envelope.Inner) (*Call, error) {
 // ek (the media key stays on this device) and sends call.answer.
 func (d *Device) CallAnswer(ctx context.Context, c *Call, sdp string) error {
 	o, err := strictjson.ParseObject(c.Offer.Body)
+	defer wipeParsed(o) // the response body, parsed: nothing here keeps a slice of it
 	if err != nil {
 		return ErrCall
 	}
@@ -307,6 +316,7 @@ func (d *Device) CallAnswer(ctx context.Context, c *Call, sdp string) error {
 // key on the calling device.
 func (d *Device) CallAccept(c *Call, ev *envelope.Inner) (sdp string, err error) {
 	o, err := strictjson.ParseObject(ev.Body)
+	defer wipeParsed(o) // our parse of the caller's event: nothing here keeps a slice of it
 	if err != nil {
 		return "", ErrCall
 	}

@@ -318,6 +318,7 @@ type DeviceSigner struct {
 // sending its chain with unlocks.
 func (d *Device) Signer(ctx context.Context) (*DeviceSigner, error) {
 	o, err := d.Op(ctx, "device.list", nil)
+	defer wipeParsed(o) // the response body, parsed: nothing here keeps a slice of it
 	if err != nil {
 		return nil, err
 	}

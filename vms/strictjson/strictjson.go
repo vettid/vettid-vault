@@ -46,13 +46,7 @@ type Object map[string]json.RawMessage
 // duplicate member names at any depth, nesting deeper than MaxDepth, and
 // any non-whitespace data after the object.
 func ParseObject(b []byte) (Object, error) {
-	if !utf8.Valid(b) {
-		return nil, ErrUTF8
-	}
-	if err := checkSurrogates(b); err != nil {
-		return nil, err
-	}
-	if err := checkTree(b); err != nil {
+	if err := validObject(b); err != nil {
 		return nil, err
 	}
 	var m map[string]json.RawMessage
@@ -60,6 +54,20 @@ func ParseObject(b []byte) (Object, error) {
 		return nil, ErrNotObject
 	}
 	return Object(m), nil
+}
+
+// validObject applies ParseObject's checks without decoding anything: it
+// copies no value. Once it passes, b is a JSON object (checkTree saw '{'
+// first and json.Valid accepted the whole), so ParseObject's unmarshal into
+// a map cannot fail.
+func validObject(b []byte) error {
+	if !utf8.Valid(b) {
+		return ErrUTF8
+	}
+	if err := checkSurrogates(b); err != nil {
+		return err
+	}
+	return checkTree(b)
 }
 
 // checkSurrogates scans the raw bytes once, in linear time, and refuses a
@@ -557,6 +565,17 @@ type Builder struct {
 	first bool
 }
 
+// Grow makes room for n more bytes, so that writing them leaves no stale
+// copy of what is already written in a buffer the builder outgrew.
+func (b *Builder) Grow(n int) *Builder {
+	b.buf.Grow(n)
+	return b
+}
+
+// Cap is the capacity of the builder's buffer: a change after writing means
+// the buffer was outgrown and copied.
+func (b *Builder) Cap() int { return b.buf.Cap() }
+
 // NewBuilder starts an object.
 func NewBuilder() *Builder {
 	b := &Builder{first: true}
@@ -615,12 +634,16 @@ func (b *Builder) Bytes() []byte {
 
 // CompactObject validates raw as a strict JSON object (ParseObject rules) and
 // returns its compact form.
+//
+// It copies raw once, into the returned slice, which is the caller's to
+// wipe: validating makes no copy, and the output is sized up front, so no
+// growth leaves a stale copy behind.
 func CompactObject(raw []byte) ([]byte, error) {
-	if _, err := ParseObject(raw); err != nil {
+	if err := validObject(raw); err != nil {
 		return nil, err
 	}
-	var buf bytes.Buffer
-	if err := json.Compact(&buf, raw); err != nil {
+	buf := bytes.NewBuffer(make([]byte, 0, len(raw)))
+	if err := json.Compact(buf, raw); err != nil {
 		return nil, ErrSyntax
 	}
 	return buf.Bytes(), nil

@@ -75,6 +75,7 @@ func (d *Device) PushRegister(ctx context.Context, r pushwire.Registration) (*Pu
 		body["environment"] = r.Environment
 	}
 	o, err := d.Op(ctx, "push.register", body)
+	defer wipeParsed(o) // the response body, parsed: nothing here keeps a slice of it
 	if err != nil {
 		return nil, err
 	}
@@ -93,6 +94,7 @@ func (d *Device) PushRegister(ctx context.Context, r pushwire.Registration) (*Pu
 // forbidden, unavailable.
 func (d *Device) PushConfirm(ctx context.Context, code string) (*PushState, error) {
 	o, err := d.Op(ctx, "push.confirm", map[string]any{"code": code})
+	defer wipeParsed(o) // the response body, parsed: nothing here keeps a slice of it
 	if err != nil {
 		return nil, err
 	}
@@ -105,7 +107,7 @@ func (d *Device) PushConfirm(ctx context.Context, code string) (*PushState, erro
 
 // PushUnregister drops the app's registration (§14.1).
 func (d *Device) PushUnregister(ctx context.Context) error {
-	_, err := d.Op(ctx, "push.unregister", nil)
+	err := d.do(ctx, "push.unregister", nil)
 	return err
 }
 
@@ -113,6 +115,7 @@ func (d *Device) PushUnregister(ctx context.Context) error {
 // without a registration).
 func (d *Device) PushStatus(ctx context.Context) (*PushState, error) {
 	o, err := d.Op(ctx, "device.list", nil)
+	defer wipeParsed(o) // the response body, parsed: nothing here keeps a slice of it
 	if err != nil {
 		return nil, err
 	}

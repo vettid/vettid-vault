@@ -2147,11 +2147,8 @@ func (m *Manager) enrollApp(ctx context.Context, app *EnrollApp, now time.Time) 
 	}
 	body := b.Base64("vault_bundle", bundle).String("token", tok).Bytes()
 	in := &envelope.Inner{ID: reqID, Type: "vault.enrolled", TS: now, Body: body}
-	padded, err := envelope.EncodeInner(in, envelope.ModeSealed)
-	if err != nil {
-		return err
-	}
-	env, _, err := envelope.SealSealed(app.KEM, suite.Anonymous, padded)
+	defer suite.Wipe(body) // it carries the token
+	env, _, err := envelope.SealInner(in, app.KEM, suite.Anonymous)
 	if err != nil {
 		return err
 	}

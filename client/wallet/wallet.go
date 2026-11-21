@@ -65,6 +65,7 @@ func Accounts(ctx context.Context, d *client.Device, walletID string) (map[strin
 	if err != nil {
 		return nil, "", err
 	}
+	defer o.Wipe() // the response body, parsed: nothing here keeps a slice of it
 	n, _ := o.String("network")
 	fp, _ := o.String("fingerprint")
 	recv, _ := o.String("address_type")
@@ -96,6 +97,7 @@ func Update(ctx context.Context, d *client.Device, walletID string, version uint
 	if err != nil {
 		return 0, err
 	}
+	defer o.Wipe() // the response body, parsed: nothing here keeps a slice of it
 	return o.Uint("version", 1, strictjson.MaxSafeInteger)
 }
 
@@ -190,6 +192,7 @@ func CapsSet(ctx context.Context, d *client.Device, walletID string, version uin
 	if err != nil {
 		return 0, err
 	}
+	defer o.Wipe() // the response body, parsed: nothing here keeps a slice of it
 	return o.Uint("version", 1, strictjson.MaxSafeInteger)
 }
 

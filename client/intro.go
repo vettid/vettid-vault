@@ -19,6 +19,7 @@ type IntroPeer struct {
 // toC to C about A. It returns the introduction's id.
 func (d *Device) IntroCreate(ctx context.Context, a, c string, toA, toC IntroPeer) (string, error) {
 	o, err := d.Op(ctx, "intro.create", map[string]any{"a": a, "c": c, "to_a": toA, "to_c": toC})
+	defer wipeParsed(o) // the response body, parsed: nothing here keeps a slice of it
 	if err != nil {
 		return "", err
 	}
@@ -27,7 +28,7 @@ func (d *Device) IntroCreate(ctx context.Context, a, c string, toA, toC IntroPee
 
 // IntroCancel cancels an introduction this member made.
 func (d *Device) IntroCancel(ctx context.Context, id string) error {
-	_, err := d.Op(ctx, "intro.cancel", map[string]any{"intro_id": id})
+	err := d.do(ctx, "intro.cancel", map[string]any{"intro_id": id})
 	return err
 }
 
@@ -38,12 +39,12 @@ func (d *Device) IntroList(ctx context.Context) (strictjson.Object, error) {
 
 // IntroAccept accepts an introduction offered to this member.
 func (d *Device) IntroAccept(ctx context.Context, id string) error {
-	_, err := d.Op(ctx, "intro.accept", map[string]any{"intro_id": id})
+	err := d.do(ctx, "intro.accept", map[string]any{"intro_id": id})
 	return err
 }
 
 // IntroDecline declines an introduction offered to this member.
 func (d *Device) IntroDecline(ctx context.Context, id string) error {
-	_, err := d.Op(ctx, "intro.decline", map[string]any{"intro_id": id})
+	err := d.do(ctx, "intro.decline", map[string]any{"intro_id": id})
 	return err
 }

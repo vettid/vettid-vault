@@ -334,15 +334,7 @@ func ParseUnlockRequest(o strictjson.Object) (*UnlockRequest, error) {
 // request_id, sender_kid all-zero, padded to exactly 12,288 bytes.
 func SealRequest(etk *suite.PublicKey, typ, requestID string, ts time.Time, body []byte) ([]byte, error) {
 	in := &envelope.Inner{ID: requestID, Type: typ, TS: ts, Body: body}
-	b, err := in.Marshal(envelope.ModeSealed)
-	if err != nil {
-		return nil, err
-	}
-	padded, err := envelope.PadFixed(b, RequestPaddedSize)
-	if err != nil {
-		return nil, err
-	}
-	env, _, err := envelope.SealSealed(etk, suite.Anonymous, padded)
+	env, _, err := envelope.SealInnerFixed(in, RequestPaddedSize, etk, suite.Anonymous) // the plaintext is wiped
 	return env, err
 }
 
@@ -354,15 +346,7 @@ func SealResult(kem *suite.PublicKey, typ, requestID string, body []byte, now ti
 		return nil, err
 	}
 	in := &envelope.Inner{ID: id, Type: typ, TS: now, Re: requestID, Status: envelope.StatusOK, Body: body}
-	b, err := in.Marshal(envelope.ModeSealed)
-	if err != nil {
-		return nil, err
-	}
-	padded, err := envelope.PadFixed(b, PaddedSize)
-	if err != nil {
-		return nil, err
-	}
-	env, _, err := envelope.SealSealed(kem, suite.Anonymous, padded)
+	env, _, err := envelope.SealInnerFixed(in, PaddedSize, kem, suite.Anonymous) // the plaintext is wiped
 	return env, err
 }
 

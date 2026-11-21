@@ -45,6 +45,7 @@ func (d *Device) OwnerCheck(ctx context.Context, pin, password string, hold *boo
 		return p
 	}
 	o, _, _, err := d.credOpWith(ctx, TypeOwnerCheck, nil, payload, false)
+	defer wipeParsed(o) // the response body, parsed: nothing here keeps a slice of it
 	if err != nil {
 		return nil, err
 	}
@@ -90,6 +91,7 @@ type OwnerCheckStatus struct {
 // it after an unlock, and shows the failures left before the lock).
 func (d *Device) OwnerCheckState(ctx context.Context) (*OwnerCheckStatus, error) {
 	o, err := d.Op(ctx, "vault.status", nil)
+	defer wipeParsed(o) // the response body, parsed: nothing here keeps a slice of it
 	if err != nil {
 		return nil, err
 	}

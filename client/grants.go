@@ -47,6 +47,7 @@ func (d *Device) GrantRequest(ctx context.Context, connectionID string, items []
 		body["reason"] = reason
 	}
 	o, err := d.Op(ctx, "grant.request", body)
+	defer wipeParsed(o) // the response body, parsed: nothing here keeps a slice of it
 	if err != nil {
 		return "", err
 	}
@@ -106,6 +107,7 @@ func (d *Device) GrantFetch(ctx context.Context, grantID string) (*GrantResult, 
 	defer k.Destroy()
 	o, err := d.Op(ctx, "grant.fetch", map[string]any{"grant_id": grantID,
 		"reply_key": base64.StdEncoding.EncodeToString(k.Public().Bytes())})
+	defer wipeParsed(o) // the response body, parsed: nothing here keeps a slice of it
 	if err != nil {
 		return nil, err
 	}
@@ -113,21 +115,15 @@ func (d *Device) GrantFetch(ctx context.Context, grantID string) (*GrantResult, 
 	if err != nil {
 		return nil, ErrProtocol
 	}
-	ev, err := d.WaitEvent(ctx, "grant.value", func(b json.RawMessage) bool {
-		v, err := strictjson.ParseObject(b)
-		if err != nil {
-			return false
-		}
-		id, _ := v.String("fetch_id")
-		return id == fid
-	})
+	ev, err := d.WaitEvent(ctx, "grant.value", bodyField("fetch_id", fid))
 	if err != nil {
 		return nil, err
 	}
-	v, err := strictjson.ParseObject(ev.Body)
+	v, err := takeObject(ev)
 	if err != nil {
 		return nil, ErrProtocol
 	}
+	defer wipeParsed(v) // what is returned is decoded out of it
 	if e, ok, _ := v.OptString("error"); ok {
 		ra, _, err := v.OptUint("retry_after", 1, 86400)
 		if err != nil {
@@ -152,7 +148,7 @@ func (d *Device) GrantFetch(ctx context.Context, grantID string) (*GrantResult, 
 
 // GrantRevoke revokes a grant given or gives up one received.
 func (d *Device) GrantRevoke(ctx context.Context, grantID string) error {
-	_, err := d.Op(ctx, "grant.revoke", map[string]any{"grant_id": grantID})
+	err := d.do(ctx, "grant.revoke", map[string]any{"grant_id": grantID})
 	return err
 }
 
@@ -169,6 +165,7 @@ func (d *Device) GrantList(ctx context.Context) (strictjson.Object, error) {
 // only).
 func (d *Device) GrantCatalog(ctx context.Context, connectionID string) (json.RawMessage, error) {
 	o, err := d.Op(ctx, "grant.catalog", map[string]any{"connection_id": connectionID})
+	defer wipeParsed(o) // the response body, parsed: nothing here keeps a slice of it
 	if err != nil {
 		return nil, err
 	}
@@ -176,20 +173,13 @@ func (d *Device) GrantCatalog(ctx context.Context, connectionID string) (json.Ra
 	if err != nil {
 		return nil, ErrProtocol
 	}
-	ev, err := d.WaitEvent(ctx, "grant.catalog.result", func(b json.RawMessage) bool {
-		v, err := strictjson.ParseObject(b)
-		if err != nil {
-			return false
-		}
-		id, _ := v.String("request_id")
-		return id == rid
-	})
+	ev, err := d.WaitEvent(ctx, "grant.catalog.result", bodyField("request_id", rid))
 	if err != nil {
 		return nil, err
 	}
-	v, err := strictjson.ParseObject(ev.Body)
+	v, err := takeObject(ev)
 	if err != nil {
 		return nil, ErrProtocol
 	}
-	return v["items"], nil
+	return v["items"], nil // the caller's
 }

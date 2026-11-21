@@ -85,6 +85,7 @@ func (d *Device) ItemPut(ctx context.Context, id string, version uint64, sensiti
 		body["tags"] = tags
 	}
 	o, err := d.Op(ctx, "item.put", body)
+	defer wipeParsed(o) // the response body, parsed: nothing here keeps a slice of it
 	if err != nil {
 		return "", 0, err
 	}
@@ -108,6 +109,7 @@ func (d *Device) ItemPutCritical(ctx context.Context, password, id string, versi
 		}
 		return p
 	}, false)
+	defer wipeParsed(o) // the response body, parsed: nothing here keeps a slice of it
 	if err != nil {
 		return "", 0, err
 	}
@@ -148,6 +150,7 @@ func (d *Device) ItemRevealCriticalPIN(ctx context.Context, password, pin, id st
 		}
 		return p
 	}, true)
+	defer wipeParsed(o) // the response body, parsed: nothing here keeps a slice of it
 	if err != nil {
 		return nil, err
 	}
@@ -171,6 +174,7 @@ func (d *Device) ItemTag(ctx context.Context, id string, version uint64, tags []
 		tags = []string{}
 	}
 	o, err := d.Op(ctx, "item.tag", map[string]any{"item_id": id, "version": version, "tags": tags})
+	defer wipeParsed(o) // the response body, parsed: nothing here keeps a slice of it
 	if err != nil {
 		return 0, err
 	}
@@ -186,10 +190,12 @@ func (d *Device) ItemSensitivity(ctx context.Context, id string, version uint64,
 	var err error
 	if password == "" {
 		o, err = d.Op(ctx, "item.sensitivity", body)
+		defer wipeParsed(o) // the response body, parsed: nothing here keeps a slice of it
 	} else {
 		o, _, _, err = d.credOpWith(ctx, "item.sensitivity", body, func() map[string]any {
 			return map[string]any{"password": password, "item_id": id}
 		}, false)
+		defer wipeParsed(o) // the response body, parsed: nothing here keeps a slice of it
 	}
 	if err != nil {
 		return 0, err
@@ -200,12 +206,12 @@ func (d *Device) ItemSensitivity(ctx context.Context, id string, version uint64,
 // ItemDelete deletes an item; a critical item needs the password.
 func (d *Device) ItemDelete(ctx context.Context, id, password string) error {
 	if password == "" {
-		_, err := d.Op(ctx, "item.delete", map[string]any{"item_id": id})
+		err := d.do(ctx, "item.delete", map[string]any{"item_id": id})
 		return err
 	}
-	_, _, _, err := d.credOpWith(ctx, "item.delete", map[string]any{"item_id": id}, func() map[string]any {
+	err := dropOp(d.credOpWith(ctx, "item.delete", map[string]any{"item_id": id}, func() map[string]any {
 		return map[string]any{"password": password, "item_id": id}
-	}, false)
+	}, false))
 	return err
 }
 
@@ -233,7 +239,7 @@ func (d *Device) ShareRuleList(ctx context.Context, filter map[string]any) (stri
 
 // ShareRuleDelete deletes a share rule.
 func (d *Device) ShareRuleDelete(ctx context.Context, ruleID string) error {
-	_, err := d.Op(ctx, "share.rule.delete", map[string]any{"rule_id": ruleID})
+	err := d.do(ctx, "share.rule.delete", map[string]any{"rule_id": ruleID})
 	return err
 }
 
@@ -273,19 +279,27 @@ func (d *Device) SharePendingAll(ctx context.Context, filter map[string]any) ([]
 		body[k] = v
 	}
 	var out []json.RawMessage
-	for {
+	// page reads one page and wipes it: Array copies the entries.
+	page := func() (next string, more bool, err error) {
 		o, err := d.SharePendingList(ctx, body)
 		if err != nil {
-			return nil, err
+			return "", false, err
 		}
+		defer wipeParsed(o)
 		arr, err := o.Array("pending")
 		if err != nil {
-			return nil, ErrProtocol
+			return "", false, ErrProtocol
 		}
 		out = append(out, arr...)
-		next, more, err := o.OptString("next")
+		if next, more, err = o.OptString("next"); err != nil {
+			return "", false, ErrProtocol
+		}
+		return next, more, nil
+	}
+	for {
+		next, more, err := page()
 		if err != nil {
-			return nil, ErrProtocol
+			return nil, err
 		}
 		if !more {
 			return out, nil

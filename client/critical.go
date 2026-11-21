@@ -25,6 +25,7 @@ func (d *Device) CriticalUseRequest(ctx context.Context, connectionID, itemID, f
 		body["context"] = note
 	}
 	o, err := d.Op(ctx, "critical-secret-use.request", body)
+	defer wipeParsed(o) // the response body, parsed: nothing here keeps a slice of it
 	if err != nil {
 		return "", err
 	}
@@ -44,6 +45,7 @@ func (d *Device) CriticalUseApprove(ctx context.Context, password, requestID str
 // (critical-secret-use.pending carries payload_sha256).
 func (d *Device) CriticalUseApproveHash(ctx context.Context, password, requestID string, payloadSHA256 []byte) (string, error) {
 	o, err := d.criticalApprove(ctx, password, requestID, payloadSHA256)
+	defer func() { wipeParsed(o) }() // whichever response o ends with
 	if Code(err) == "stale_credential" {
 		if ferr := d.CredentialFetch(ctx); ferr == nil {
 			o, err = d.criticalApprove(ctx, password, requestID, payloadSHA256)
@@ -93,13 +95,14 @@ func (d *Device) criticalApprove(ctx context.Context, password, requestID string
 		return nil, err
 	}
 	if !r.OK() {
-		return nil, &OpError{Type: typ, Code: r.ErrorCode(), Body: r.Body()}
+		return nil, opError(typ, r)
 	}
-	o, err := strictjson.ParseObject(r.Body())
+	o, err := takeObject(r.Inner)
 	if err != nil {
 		return nil, ErrProtocol
 	}
 	if err := d.keep(ctx, o); err != nil {
+		wipeParsed(o)
 		return nil, err
 	}
 	return o, nil
@@ -107,7 +110,7 @@ func (d *Device) criticalApprove(ctx context.Context, password, requestID string
 
 // CriticalUseDeny refuses a pending use.
 func (d *Device) CriticalUseDeny(ctx context.Context, requestID string) error {
-	_, err := d.Op(ctx, "critical-secret-use.deny", map[string]any{"request_id": requestID})
+	err := d.do(ctx, "critical-secret-use.deny", map[string]any{"request_id": requestID})
 	return err
 }
 

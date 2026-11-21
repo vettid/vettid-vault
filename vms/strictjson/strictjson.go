@@ -13,7 +13,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"io"
+	"runtime"
 	"strconv"
 	"unicode/utf8"
 )
@@ -137,72 +137,170 @@ func hex4(b []byte, i int) (rune, bool) {
 	return v, true
 }
 
-// checkTree walks the token stream once, verifying syntax, depth, a single
-// top-level object, and member-name uniqueness per object.
+// checkTree verifies syntax, depth, a single top-level object, and
+// member-name uniqueness per object.
+//
+// It walks b in place and copies no value: member names are decoded (they
+// are not secret), but strings, numbers and literals in value position are
+// only skipped. A json.Decoder would keep its own copy of the whole input
+// and a Go string for every value token, neither of which can be wiped, and
+// the plaintext of a message body (a secret value included) would linger
+// in them until the garbage collector reused the memory.
+//
+// The walk reports a duplicate name, too deep a nesting, a top level that is
+// not an object and trailing data in input order, as the token stream did;
+// json.Valid, which validates in place, then checks the syntax of the rest.
+// Where an input is wrong in two ways, the error the walk meets first wins.
 func checkTree(b []byte) error {
-	dec := json.NewDecoder(bytes.NewReader(b))
-	dec.UseNumber()
 	var stack []frame
 	first := true
+	i := 0
 	for {
-		tok, err := dec.Token()
-		if err == io.EOF {
+		i = skipSpace(b, i)
+		if i >= len(b) {
 			break
 		}
-		if err != nil {
-			return ErrSyntax
-		}
 		if first {
-			if d, ok := tok.(json.Delim); !ok || d != '{' {
+			if b[i] != '{' {
 				return ErrNotObject
 			}
 		} else if len(stack) == 0 {
 			return ErrSyntax // trailing data after the top-level object
 		}
 		first = false
-		if len(stack) > 0 && stack[len(stack)-1].obj && stack[len(stack)-1].key {
-			top := &stack[len(stack)-1]
-			if d, ok := tok.(json.Delim); ok && d == '}' {
-				stack = stack[:len(stack)-1]
+		c := b[i]
+		if top := len(stack) - 1; top >= 0 && stack[top].obj && stack[top].key {
+			switch c {
+			case '}':
+				stack = stack[:top]
 				markValueDone(stack)
+				i++
+				continue
+			case '"':
+				end, ok := stringEnd(b, i)
+				if !ok {
+					return ErrSyntax
+				}
+				name, ok := memberName(b[i:end])
+				if !ok {
+					return ErrSyntax
+				}
+				if _, dup := stack[top].names[name]; dup {
+					return ErrDuplicate
+				}
+				stack[top].names[name] = struct{}{}
+				stack[top].key = false
+				i = end
+				continue
+			case ',':
+				i++ // between members; json.Valid checks its place
 				continue
 			}
-			name, ok := tok.(string)
+			return ErrSyntax
+		}
+		switch c {
+		case '{':
+			if len(stack) >= MaxDepth {
+				return ErrDepth
+			}
+			stack = append(stack, frame{obj: true, names: map[string]struct{}{}, key: true})
+			i++
+		case '[':
+			if len(stack) >= MaxDepth {
+				return ErrDepth
+			}
+			stack = append(stack, frame{})
+			i++
+		case '}', ']':
+			top := len(stack) - 1
+			if top < 0 || stack[top].obj != (c == '}') {
+				return ErrSyntax
+			}
+			stack = stack[:top]
+			markValueDone(stack)
+			i++
+		case ':', ',':
+			i++ // json.Valid checks their places
+		case '"':
+			end, ok := stringEnd(b, i)
 			if !ok {
 				return ErrSyntax
 			}
-			if _, dup := top.names[name]; dup {
-				return ErrDuplicate
-			}
-			top.names[name] = struct{}{}
-			top.key = false
-			continue
-		}
-		switch t := tok.(type) {
-		case json.Delim:
-			switch t {
-			case '{':
-				if len(stack) >= MaxDepth {
-					return ErrDepth
-				}
-				stack = append(stack, frame{obj: true, names: map[string]struct{}{}, key: true})
-			case '[':
-				if len(stack) >= MaxDepth {
-					return ErrDepth
-				}
-				stack = append(stack, frame{})
-			case '}', ']':
-				stack = stack[:len(stack)-1]
-				markValueDone(stack)
-			}
-		default:
 			markValueDone(stack)
+			i = end
+		default:
+			// A number or literal: skipped, never decoded.
+			end := i
+			for end < len(b) && !isDelim(b[end]) {
+				end++
+			}
+			markValueDone(stack)
+			i = end
 		}
 	}
 	if first || len(stack) != 0 {
 		return ErrSyntax
 	}
+	if !json.Valid(b) {
+		return ErrSyntax
+	}
 	return nil
+}
+
+// skipSpace returns the index of the first byte at or after i that is not
+// JSON whitespace.
+func skipSpace(b []byte, i int) int {
+	for i < len(b) {
+		switch b[i] {
+		case ' ', '\t', '\n', '\r':
+			i++
+		default:
+			return i
+		}
+	}
+	return i
+}
+
+// isDelim reports whether c ends a number or literal.
+func isDelim(c byte) bool {
+	switch c {
+	case ' ', '\t', '\n', '\r', ',', ':', '[', ']', '{', '}', '"':
+		return true
+	}
+	return false
+}
+
+// stringEnd returns the index just past the string literal that starts
+// with the quote at b[i], or false if it is not closed. An escape skips
+// the byte after the backslash; the escapes themselves are left to
+// json.Valid.
+func stringEnd(b []byte, i int) (int, bool) {
+	for j := i + 1; j < len(b); j++ {
+		switch b[j] {
+		case '\\':
+			j++
+		case '"':
+			return j + 1, true
+		}
+	}
+	return 0, false
+}
+
+// memberName decodes a member name's string literal (quotes included).
+// Names are compared decoded, so that "a" and its escaped spelling (a
+// backslash-u escape of 0061) are the same name. A name that is not valid
+// UTF-8 is decoded too, which turns each bad byte into U+FFFD as the
+// decoder did, so that checkTree finds the same duplicates even on input
+// ParseObject has not checked for UTF-8.
+func memberName(lit []byte) (string, bool) {
+	if bytes.IndexByte(lit, '\\') < 0 && utf8.Valid(lit) {
+		return string(lit[1 : len(lit)-1]), true
+	}
+	var s string
+	if err := json.Unmarshal(lit, &s); err != nil {
+		return "", false
+	}
+	return s, true
 }
 
 type frame struct {
@@ -215,6 +313,25 @@ func markValueDone(stack []frame) {
 	if len(stack) > 0 && stack[len(stack)-1].obj {
 		stack[len(stack)-1].key = true
 	}
+}
+
+// Wipe zeroes every member's raw value. ParseObject copies each value out
+// of its input, so a caller that parsed a secret plaintext wipes the copies
+// once it has taken what it needs. Strings already returned by String and
+// the like are Go strings and cannot be wiped.
+func (o Object) Wipe() {
+	for _, v := range o {
+		clear(v)
+		runtime.KeepAlive(v)
+	}
+}
+
+// IsObjectMember reports whether the member is present and holds an object.
+// Unlike Object it makes no copy of the members: o must come from
+// ParseObject (or AsObject), which has already checked the whole value.
+func (o Object) IsObjectMember(name string) bool {
+	raw := o[name]
+	return len(raw) > 0 && raw[0] == '{'
 }
 
 // Has reports whether the member is present (including as JSON null).

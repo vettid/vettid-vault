@@ -1,6 +1,7 @@
 package handshake
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"testing"
@@ -175,6 +176,10 @@ func TestRestoreInitiatorVerifyOnly(t *testing.T) {
 	defer res.Epoch.Destroy()
 	if res.Fin != nil || res.Inner == nil || res.Inner.Type != TypeResp {
 		t.Fatalf("fin %d bytes, inner %+v", len(res.Fin), res.Inner)
+	}
+	// Handed on, so not wiped.
+	if b := res.Inner.Body; len(b) == 0 || bytes.Count(b, []byte{0}) == len(b) {
+		t.Fatal("the verify-only Result's hs.resp body was wiped")
 	}
 	// A responder under another identity: sig_R does not verify.
 	other := newParty(t, 0x30)

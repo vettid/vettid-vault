@@ -718,6 +718,10 @@ func (r *Resp) Marshal(p Purpose) ([]byte, error) {
 	return b.Bytes(), nil
 }
 
+// testRespParsedHook, set only by tests, sees ParseResp's parsed members
+// once they are wiped.
+var testRespParsedHook func(strictjson.Object)
+
 // ParseResp parses and validates an hs.resp body for a handshake of
 // purpose p.
 func ParseResp(body []byte, p Purpose) (*Resp, error) {
@@ -725,6 +729,14 @@ func ParseResp(body []byte, p Purpose) (*Resp, error) {
 	if err != nil {
 		return nil, ErrBody
 	}
+	// The copies of token and reconnect_token; every Resp field is decoded
+	// into its own string or bytes.
+	defer func() {
+		o.Wipe()
+		if testRespParsedHook != nil {
+			testRespParsedHook(o)
+		}
+	}()
 	r := &Resp{}
 	if t, ok, err := o.OptString("token"); err != nil || (ok && t == "") {
 		return nil, ErrBody

@@ -151,8 +151,9 @@ func (d *Device) CompleteRecoveryHandshakeAs(ctx context.Context, recoveryID str
 	}
 	d.mu.Lock()
 	if d.st.Vault == nil || d.st.Vault.Token == "" || d.st.Recovery == nil {
+		perr := d.notPairedLocked() // read under the lock
 		d.mu.Unlock()
-		return d.notPairedLocked()
+		return perr
 	}
 	if recoveryID == "" {
 		recoveryID = d.st.Recovery.RecoveryID

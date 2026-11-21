@@ -60,17 +60,8 @@ type Enclave struct {
 // VerifyManifest verifies a served manifest (§11.10.1) and the serial rule
 // against the highest serial this device has seen for its vault.
 func (d *Device) VerifyManifest(served []byte, t Trust) (*manifest.Served, *manifest.Manifest, error) {
-	if d.isClosed() {
-		return nil, nil, ErrClosed
-	}
-	s, err := manifest.ParseServed(served)
-	if err != nil {
-		return nil, nil, err
-	}
-	m, err := manifest.Verify(s, t.ManifestKeys)
-	if err != nil {
-		return nil, nil, err
-	}
+	// The closed check and the read of the device's state in one lock
+	// hold, before the (unlocked) parse and verification.
 	d.mu.Lock()
 	if d.closed {
 		d.mu.Unlock()
@@ -81,6 +72,14 @@ func (d *Device) VerifyManifest(served []byte, t Trust) (*manifest.Served, *mani
 		seen = d.st.Alt.ManifestSerial
 	}
 	d.mu.Unlock()
+	s, err := manifest.ParseServed(served)
+	if err != nil {
+		return nil, nil, err
+	}
+	m, err := manifest.Verify(s, t.ManifestKeys)
+	if err != nil {
+		return nil, nil, err
+	}
 	if m.Serial < seen {
 		return nil, nil, ErrManifestOlder
 	}

@@ -12,7 +12,7 @@ import (
 // crypto/ed25519 values), so this is best-effort hygiene that shortens the
 // lifetime of the copies this module controls.
 func Wipe(b []byte) {
-	clear(b)
+	wipe(b)
 	runtime.KeepAlive(b)
 }
 

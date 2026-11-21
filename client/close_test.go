@@ -3,6 +3,7 @@ package client
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"errors"
 	"reflect"
 	"sync"
@@ -12,6 +13,7 @@ import (
 	"github.com/vettid/vettid-relay/relayauth"
 	"github.com/vettid/vettid-relay/relayclient"
 	"github.com/vettid/vettid-vault/vms/envelope"
+	"github.com/vettid/vettid-vault/vms/strictjson"
 	"github.com/vettid/vettid-vault/vms/suite"
 )
 
@@ -645,8 +647,10 @@ func TestCloseDropsKeysAndSkipsPersist(t *testing.T) {
 
 // LeashGrants returns its own copies, and wipes the copy it parsed, not
 // the Device's set: a second read still sees the grant, and Close wiping
-// the Device's set leaves what was returned. (The race with Close's wipe
-// of the set is the race test's LeashGrants entry.)
+// the Device's set leaves what was returned. (Parsing the Device's own set
+// while Close wipes it is caught by the race test's LeashGrants entry,
+// through the decoder's panic on bytes changing underfoot, and under
+// -race now as a race too.)
 func TestLeashGrantsCopies(t *testing.T) {
 	_, _, d := pair(t)
 	d.mu.Lock()
@@ -752,5 +756,70 @@ func TestDropVaultWipesSessions(t *testing.T) {
 		if !zeroed(b) {
 			t.Fatalf("sessions buffer %d not wiped", i)
 		}
+	}
+}
+
+// export wipes the sessions and handshake snapshots it replaces, not just
+// the record's pointers.
+func TestExportWipesOldSnapshots(t *testing.T) {
+	_, _, d := pair(t)
+	d.mu.Lock()
+	d.export()
+	var old [][]byte
+	collectBytes(reflect.ValueOf(&d.st.Vault.Sessions), &old)
+	d.export() // a second Save: the snapshot is replaced
+	d.mu.Unlock()
+	if len(old) == 0 {
+		t.Fatal("no snapshot: the fixture is not paired")
+	}
+	for i, b := range old {
+		if !zeroed(b) {
+			t.Fatalf("old snapshot buffer %d not wiped", i)
+		}
+	}
+}
+
+// wipeBytes wipes a byte slice to its capacity: a shorter slice may hide
+// older bytes of the same array.
+func TestWipeBytesToCapacity(t *testing.T) {
+	arr := []byte("secret-secret-secret")
+	v := struct{ B []byte }{arr[:4]}
+	wipeBytes(reflect.ValueOf(&v))
+	if !zeroed(arr) {
+		t.Fatalf("only the length was wiped: %q", arr)
+	}
+}
+
+// keep writes nothing into a closed Device: neither the UTKs nor the
+// credential copy.
+func TestKeepRefusesAClosedDevice(t *testing.T) {
+	ctx := context.Background()
+	ek, err := suite.GeneratePrivateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	utks := `[{"utk_id":"u1","ek":"` + base64.StdEncoding.EncodeToString(ek.Public().Bytes()) + `","expires_at":"2030-01-01T00:00:00.000Z"}]`
+	for name, body := range map[string]string{
+		"utks":       `{"utks":` + utks + `}`,
+		"credential": `{"credential":"` + base64.StdEncoding.EncodeToString([]byte("blob")) + `","version":2}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, _, d := pair(t)
+			if err := d.Close(); err != nil {
+				t.Fatal(err)
+			}
+			o, err := strictjson.ParseObject([]byte(body))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := d.keep(ctx, o); !errors.Is(err, ErrClosed) {
+				t.Fatalf("keep after Close: %v", err)
+			}
+			d.mu.Lock()
+			defer d.mu.Unlock()
+			if len(d.st.UTKs) != 0 || d.st.Credential != nil {
+				t.Fatal("keep wrote into the closed Device")
+			}
+		})
 	}
 }

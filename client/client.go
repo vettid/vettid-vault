@@ -684,8 +684,9 @@ func (d *Device) CompleteEnrollment(ctx context.Context) error {
 	}
 	d.mu.Lock()
 	if d.st.Vault == nil || d.st.Vault.Token == "" {
+		perr := d.notPairedLocked() // read under the lock
 		d.mu.Unlock()
-		return d.notPairedLocked()
+		return perr
 	}
 	err := d.startInit(handshake.PurposeApp, d.st.VaultID, d.st.Vault.Token, nil)
 	d.mu.Unlock()

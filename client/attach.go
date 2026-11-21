@@ -29,8 +29,9 @@ func (d *Device) UploadAttachment(ctx context.Context, content []byte, mime stri
 	d.mu.Lock()
 	v := d.st.Vault
 	if v == nil || v.Token == "" {
+		perr := d.notPairedLocked() // read under the lock
 		d.mu.Unlock()
-		return nil, d.notPairedLocked()
+		return nil, perr
 	}
 	url, mailbox, token := v.RelayURL, v.Mailbox, v.Token
 	d.mu.Unlock()
@@ -69,8 +70,9 @@ func (d *Device) UploadBytes(ctx context.Context, data []byte) (string, error) {
 	d.mu.Lock()
 	v := d.st.Vault
 	if v == nil || v.Token == "" {
+		perr := d.notPairedLocked() // read under the lock
 		d.mu.Unlock()
-		return "", d.notPairedLocked()
+		return "", perr
 	}
 	url, mailbox, token := v.RelayURL, v.Mailbox, v.Token
 	d.mu.Unlock()

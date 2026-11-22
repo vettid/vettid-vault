@@ -54,6 +54,9 @@ type Program struct {
 type RunWays struct {
 	Programs []Program `json:"programs"`
 	Each     bool      `json:"each"`
+	// Folders are the member folders a run may use (0.93.0); nil, as in
+	// settings stored before it, is none.
+	Folders []Folder `json:"folders,omitempty"`
 }
 
 // ProxyWays are the settings of the proxy way.
@@ -117,6 +120,7 @@ func (w *ItemWays) Clone() *ItemWays {
 			p.Env = append([]string{}, p.Env...)
 			r.Programs[i] = p
 		}
+		r.Folders = append([]Folder(nil), w.Run.Folders...)
 		c.Run = &r
 	}
 	if w.Proxy != nil {
@@ -144,7 +148,10 @@ func (w *ItemWays) JSON(agent, item string) []byte {
 	}
 	b.Raw("ways", StrList(w.WayList()))
 	if w != nil && w.Run != nil {
-		b.Raw("run", strictjson.NewBuilder().Raw("programs", programsJSON(w.Run.Programs, true)).Bool("each", w.Run.Each).Bytes())
+		// (0.93.0) folders always, an empty list when none: how an app learns
+		// the vault is 0.93.0 or later (§10.11).
+		b.Raw("run", strictjson.NewBuilder().Raw("programs", programsJSON(w.Run.Programs, true)).Bool("each", w.Run.Each).
+			Raw("folders", foldersJSON(w.Run.Folders)).Bytes())
 	}
 	if w != nil && w.Proxy != nil {
 		b.Raw("proxy", strictjson.NewBuilder().Raw("hosts", StrList(w.Proxy.Hosts)).String("header", w.Proxy.Header).
@@ -163,6 +170,16 @@ func (w *ItemWays) CatalogPrograms() []byte {
 		return nil
 	}
 	return programsJSON(w.Run.Programs, false)
+}
+
+// CatalogFolders is the catalog's folders (§10.11, 0.93.0): [{path,
+// write}], an empty list when none, for every item with a run way (how a
+// connector learns the vault is 0.93.0 or later); nil without one.
+func (w *ItemWays) CatalogFolders() []byte {
+	if w == nil || w.Run == nil {
+		return nil
+	}
+	return foldersJSON(w.Run.Folders)
 }
 
 // CatalogHosts is the catalog's hosts (never header or prefix).
@@ -281,6 +298,11 @@ func parseRun(raw []byte, cur *ItemWays) (*RunWays, error) {
 	if !r.Each && len(r.Programs) == 0 {
 		return nil, ErrWays // each: false only for a bound item
 	}
+	if fr, present := o["folders"]; present {
+		if r.Folders, err = parseFolders(fr); err != nil {
+			return nil, err
+		}
+	}
 	// (0.85.3) No two entries match the same path: compared without case
 	// and without a final .exe, no two entries are equal, and no bare name
 	// equals an absolute entry's last path element.
@@ -386,9 +408,11 @@ func parseProxy(raw []byte) (*ProxyWays, error) {
 
 // Widens reports whether next allows more than cur (nil: ["use"]): a way,
 // a program or a host added, programs emptied, a name added to an entry's
-// env (0.85.3), or each set to false. Such a change needs the credential's
-// unlock window. Dropping a pin, a program, a host, a name or a way, and
-// each set to true, only narrow.
+// env (0.85.3), each set to false, or (0.93.0) a folders entry added (a
+// changed path is one added) or its write turned on. Such a change needs
+// the credential's unlock window. Dropping a pin, a program, a host, a
+// name, a folder or a way, write turned off, and each set to true, only
+// narrow.
 //
 // Binding an unbound item (programs from empty to a list) narrows, unless
 // an entry lists env names: an unbound item allows no env at all. An
@@ -439,6 +463,14 @@ func Widens(cur, next *ItemWays) bool {
 		if !next.Run.Each && cur.Run.Each {
 			return true
 		}
+		// (0.93.0) A folder added (a changed path is one added) or write
+		// turned on; removing one, write turned off and emptying folders
+		// narrow.
+		for _, f := range next.Run.Folders {
+			if g, ok := findFolder(cur.Run.Folders, f.Path); !ok || f.Write && !g.Write {
+				return true
+			}
+		}
 	}
 	if next.Proxy != nil && cur != nil && cur.Proxy != nil && !strings.EqualFold(next.Proxy.Header, cur.Proxy.Header) {
 		return true
@@ -455,6 +487,16 @@ func Widens(cur, next *ItemWays) bool {
 		}
 	}
 	return false
+}
+
+// findFolder finds the folders entry whose path is exactly p.
+func findFolder(fs []Folder, p string) (Folder, bool) {
+	for _, f := range fs {
+		if f.Path == p {
+			return f, true
+		}
+	}
+	return Folder{}, false
 }
 
 // findBare finds the bare entry whose program is exactly name.
@@ -612,6 +654,8 @@ func init() {
 		"XDG_CONFIG_DIRS", "XDG_DATA_HOME", "XDG_DATA_DIRS", "ELECTRON_RUN_AS_NODE", "PYTHONWARNINGS",
 		"LUA_INIT", "VIMINIT", "EXINIT", "CLASSPATH",
 		"__COMPAT_LAYER", "PROGRAMFILES", "COMMONPROGRAMFILES", "PROGRAMDATA",
+		// 0.93.0: the connector's own, the run's work/in/ and work/out/.
+		"VETTID_IN", "VETTID_OUT",
 	} {
 		envExact[n] = true
 	}

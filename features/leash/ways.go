@@ -18,7 +18,8 @@ import (
 
 // Approval flags the vault sets (approval.pending{flags}, §10.11, 0.42.0).
 // item.run's (shell, inline_code, unbound_program, program_unrecorded,
-// program_changed) come with item.run (AGENT-PLAN AV10).
+// program_changed, member_folder, member_files) come with item.run
+// (AGENT-PLAN AV10).
 const FlagHistory = "history" // an item.get: the agent's app may keep the value in its history
 
 // wayNotAllowed is the answer to a request of a way the item's settings do
@@ -29,12 +30,17 @@ func wayNotAllowed(w *itemspec.ItemWays) error {
 
 // catalogEntry is one item of the catalog (§10.11): its metadata, its
 // ways and, when present, its programs ({program, env, path?}: the pinned
-// path, never the hash) and hosts (never header or prefix).
+// path, never the hash), (0.93.0) folders ([{path, write}], an empty list
+// when none, for every item with a run way) and hosts (never header or
+// prefix).
 func catalogEntry(e itemspec.AgentEntry) []byte {
 	b := strictjson.NewBuilder().String("item_id", e.Meta.ItemID).String("name", e.Meta.Name).String("category", e.Meta.Category).
 		Raw("labels", itemspec.LabelsJSON(e.Meta.Labels)).Raw("ways", itemspec.StrList(e.Ways.WayList()))
 	if p := e.Ways.CatalogPrograms(); p != nil {
 		b.Raw("programs", p)
+	}
+	if f := e.Ways.CatalogFolders(); f != nil {
+		b.Raw("folders", f)
 	}
 	if h := e.Ways.CatalogHosts(); h != nil {
 		b.Raw("hosts", h)

@@ -248,6 +248,9 @@ type Approval struct {
 	// Proxy is what approval.pending{proxy} shows for an agent's
 	// item.proxy (§10.11, 0.92.0): the values the vault will send.
 	Proxy *ApprovalProxy
+	// Folders is what approval.pending{folders} shows for an agent's
+	// item.run with a cwd, inputs or an output (§10.11, 0.93.0).
+	Folders *ApprovalFolders
 	// replaces is the approval a re-referral replaces (set by runHeld only).
 	replaces string
 }
@@ -259,6 +262,10 @@ func (a Approval) clone() Approval {
 		p := *a.Proxy
 		a.Proxy = &p
 	}
+	if a.Folders != nil {
+		f := a.Folders.clone()
+		a.Folders = &f
+	}
 	return a
 }
 
@@ -269,6 +276,33 @@ type ApprovalProxy struct {
 	Host   string `json:"host"`
 	Header string `json:"header"`
 	Prefix string `json:"prefix"`
+}
+
+// ApprovalFolders is approval.pending{folders} (§6.8, §10.11, 0.93.0): the
+// folders entries an agent's item.run matched, from the held settings:
+// Cwd for its cwd and Output for its output folder, each absent when the
+// run has none ({} for a run with inputs only).
+type ApprovalFolders struct {
+	Cwd    *ApprovalFolder `json:"cwd,omitempty"`
+	Output *ApprovalFolder `json:"output,omitempty"`
+}
+
+// ApprovalFolder is one folders entry {path, write}.
+type ApprovalFolder struct {
+	Path  string `json:"path"`
+	Write bool   `json:"write"`
+}
+
+func (f ApprovalFolders) clone() ApprovalFolders {
+	if f.Cwd != nil {
+		c := *f.Cwd
+		f.Cwd = &c
+	}
+	if f.Output != nil {
+		o := *f.Output
+		f.Output = &o
+	}
+	return f
 }
 
 // ReferAgainError is what a handler running an approved agent request
@@ -324,6 +358,15 @@ func (s *Session) NoteApproval(note json.RawMessage) {
 // during AgentDecision.
 func (s *Session) ProxyApproval(p ApprovalProxy) {
 	s.approval.Proxy = &p
+}
+
+// FoldersApproval sets what the approval of an agent's item.run with a
+// cwd, inputs or an output shows (approval.pending{folders}, §10.11,
+// 0.93.0): the folders entries it matched. Only an AgentPolicy calls it,
+// during AgentDecision.
+func (s *Session) FoldersApproval(f ApprovalFolders) {
+	c := f.clone()
+	s.approval.Folders = &c
 }
 
 // AgentRefusal and ApprovalFlags return what RefuseAgentWith and

@@ -54,7 +54,8 @@ func TestLeashValueNotCached(t *testing.T) {
 	rid, _ := ro.String("rule_id")
 	waitEvent(t, agent, "leash.grant.updated", func(b json.RawMessage) bool { return strings.Contains(string(b), rid) })
 	if _, err := a.app.LeashItemSet(ctx, agent.DeviceID(), item, 0, map[string]any{"ways": []string{"use", "run", "proxy", "reveal"},
-		"run":   map[string]any{"programs": []any{map[string]any{"program": "git"}}, "each": false},
+		"run": map[string]any{"programs": []any{map[string]any{"program": "git"}}, "each": false,
+			"folders": []any{map[string]any{"path": "/home/al/work", "write": true}}},
 		"proxy": map[string]any{"hosts": []string{"api.example.com"}, "header": "Authorization", "prefix": "Bearer "}}); err != nil {
 		t.Fatal(err)
 	}
@@ -66,7 +67,12 @@ func TestLeashValueNotCached(t *testing.T) {
 	}{
 		{"item.get", map[string]any{"item_id": item}, []string{`"name":"api"`, `"label":"Key"`}},
 		{"item.run", map[string]any{"item_id": item, "field_id": "f1", "program": "/usr/bin/git", "sha256": strings.Repeat("a", 64),
-			"argv": []string{"git", "push"}, "cwd": "/home/a", "how": "env", "name": "TOKEN"}, []string{`"field_id":"f1"`}},
+			"argv": []string{"git", "push"}, "how": "env", "name": "TOKEN"}, []string{`"field_id":"f1"`}},
+		// (0.93.0) A run in a member folder, with files in and out.
+		{"item.run", map[string]any{"item_id": item, "field_id": "f1", "program": "/usr/bin/git", "sha256": strings.Repeat("a", 64),
+			"argv": []string{"git", "push"}, "how": "env", "name": "TOKEN", "cwd": "/home/al/work",
+			"inputs": []any{map[string]any{"path": "/home/al/work/in.txt", "size": 4}},
+			"output": map[string]any{"folder": "/home/al/work", "names": []string{"out.txt"}}}, []string{`"field_id":"f1"`}},
 		{"item.proxy", map[string]any{"item_id": item, "field_id": "f1", "host": "api.example.com"},
 			[]string{`"header":"Authorization"`, `"prefix":"Bearer "`, `"expires_at"`}},
 	}

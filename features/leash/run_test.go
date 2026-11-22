@@ -23,7 +23,7 @@ var (
 // extra members are spliced in as given (`,"env":{…}`).
 func runBody(item, program, sha, extra string) string {
 	return `{"op":"item.run","item_id":"` + item + `","field_id":"f1","program":"` + program + `","sha256":"` + sha +
-		`","argv":["x","push"],"cwd":"/home/a","how":"env","name":"TOKEN"` + extra + `}`
+		`","argv":["x","push"],"how":"env","name":"TOKEN"` + extra + `}`
 }
 
 // setRun gives the agent's item the run way with programs and each.
@@ -100,7 +100,7 @@ func TestRunRefusals(t *testing.T) {
 		t.Fatalf("not included: %v %+v", d, s.AgentRefusal())
 	}
 	// Malformed: left to the handler, which says bad_request.
-	bad := strings.Replace(runBody(r.wifi, "/usr/bin/git", shaA, ""), `"cwd":"/home/a"`, `"cwd":"home"`, 1)
+	bad := strings.Replace(runBody(r.wifi, "/usr/bin/git", shaA, ""), `"how":"env"`, `"cwd":"home","how":"env"`, 1)
 	if d, _ := r.decideS(next(), bad); d != vault.AgentAllow {
 		t.Fatalf("malformed decided: %v", d)
 	}

@@ -113,7 +113,6 @@ func TestParseRunRefuses(t *testing.T) {
 		"argv too long":       func(m map[string]any) { m["argv"] = []any{strings.Repeat("a", MaxRunArg+1)} },
 		"argv over total":     func(m map[string]any) { m["argv"] = over },
 		"argv not strings":    func(m map[string]any) { m["argv"] = []any{1} },
-		"no cwd":              func(m map[string]any) { delete(m, "cwd") },
 		"relative cwd":        func(m map[string]any) { m["cwd"] = "repo" },
 		"cwd control":         func(m map[string]any) { m["cwd"] = "/home/a\nb" },
 		"bad how":             func(m map[string]any) { m["how"] = "arg" },
@@ -210,7 +209,7 @@ func TestShellsAndInterpreters(t *testing.T) {
 }
 
 func runOf(program, sha string, argv []string, env ...string) *Run {
-	r := &Run{FieldID: "password", Program: program, SHA256: sha, Argv: argv, Cwd: "/", How: HowEnv, Name: "TOKEN"}
+	r := &Run{FieldID: "password", Program: program, SHA256: sha, Argv: argv, How: HowEnv, Name: "TOKEN"}
 	for _, n := range env {
 		r.Env = append(r.Env, EnvVar{n, "v"})
 	}

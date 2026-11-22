@@ -33,6 +33,9 @@ const (
 	FlagUnboundProgram    = "unbound_program"
 	FlagProgramUnrecorded = "program_unrecorded"
 	FlagProgramChanged    = "program_changed"
+	// (0.93.0) a run with a cwd, and one with inputs or output.
+	FlagMemberFolder = "member_folder"
+	FlagMemberFiles  = "member_files"
 )
 
 // Run is a parsed item.run request, without its item_id.
@@ -41,11 +44,16 @@ type Run struct {
 	Program string
 	SHA256  string
 	Argv    []string
-	Cwd     string
-	How     string
-	Name    string
+	// Cwd is "" when absent: the run's work/ (0.93.0).
+	Cwd  string
+	How  string
+	Name string
 	// Env is the further variables, sorted by name.
 	Env []EnvVar
+	// Inputs and Output are the files handed in and out (0.93.0); none
+	// and nil when absent.
+	Inputs []RunInput
+	Output *RunOutput
 }
 
 // EnvVar is one of a run's further variables.
@@ -54,19 +62,18 @@ type EnvVar struct{ Name, Value string }
 // ErrRun is a malformed item.run (bad_request).
 var ErrRun = errors.New("itemspec: bad item.run")
 
-// ParseRun parses an item.run request's members other than op and
-// item_id (§10.11): field_id; program, an absolute path (the one the
-// connector resolved); sha256, 64 lowercase hex digits; argv, 1–64
-// strings of at most 4,096 bytes each and 32,768 in all, none holding NUL
-// (no process could receive it, so what runs would differ from what the
-// approval shows; other characters the app shows escaped); cwd, a clean
-// absolute path; how, env, stdin or file; name, required for env and file, and
-// absent for stdin (the spec is silent; a name with stdin would be shown
-// for nothing); env, 0–32 further variables whose names follow the name
-// rule and differ from name, with values of at most 4,096 bytes and no
-// NUL. The name
-// rule is checked here (bad_request); whether a name is allowed is the
-// caller's (env_not_allowed).
+// ParseRun parses an item.run request's members other than op and item_id
+// (§10.11): field_id; program, an absolute path (the one the connector
+// resolved); sha256, 64 lowercase hex digits; argv, 1–64 strings of at most
+// 4,096 bytes each and 32,768 in all, none holding NUL (no process could
+// receive it, so what runs would differ from what the approval shows; other
+// characters the app shows escaped); cwd, optional (0.93.0: absent is the
+// run's work/), a clean absolute path; how, env, stdin or file; name,
+// required for env and file, and absent for stdin (the spec is silent; a
+// name with stdin would be shown for nothing); env, 0–32 further variables
+// whose names follow the name rule and differ from name, with values of at
+// most 4,096 bytes and no NUL. The name rule is checked here (bad_request);
+// whether a name is allowed is the caller's (env_not_allowed).
 func ParseRun(o strictjson.Object) (*Run, error) {
 	r := &Run{}
 	var err error
@@ -95,9 +102,11 @@ func ParseRun(o strictjson.Object) (*Run, error) {
 	if total > MaxRunArgTotal {
 		return nil, ErrRun
 	}
-	if r.Cwd, err = o.String("cwd"); err != nil || !validCwd(r.Cwd) {
+	cwd, hasCwd, err := o.OptString("cwd")
+	if err != nil || hasCwd && !validCwd(cwd) {
 		return nil, ErrRun
 	}
+	r.Cwd = cwd
 	if r.How, err = o.String("how"); err != nil || r.How != HowEnv && r.How != HowStdin && r.How != HowFile {
 		return nil, ErrRun
 	}
@@ -121,6 +130,17 @@ func ParseRun(o strictjson.Object) (*Run, error) {
 			r.Env = append(r.Env, EnvVar{n, v})
 		}
 		sort.Slice(r.Env, func(i, j int) bool { return r.Env[i].Name < r.Env[j].Name })
+	}
+	// (0.93.0) inputs and output (parseInputs, parseOutput).
+	if raw, present := o["inputs"]; present {
+		if r.Inputs, err = parseInputs(raw); err != nil {
+			return nil, err
+		}
+	}
+	if raw, present := o["output"]; present {
+		if r.Output, err = parseOutput(raw); err != nil {
+			return nil, err
+		}
 	}
 	return r, nil
 }
@@ -306,11 +326,15 @@ func IsInterpreter(program string) bool {
 
 // RunJudgement is how an item's settings judge a run (§10.11).
 type RunJudgement struct {
-	// Refusal is way_not_allowed, program_not_allowed or env_not_allowed,
-	// or "" when the run is not refused; Names are env_not_allowed's
-	// refused names, sorted.
+	// Refusal is way_not_allowed, program_not_allowed, env_not_allowed or
+	// (0.93.0) cwd_not_allowed, or "" when the run is not refused; Names
+	// are env_not_allowed's refused names, sorted; Where and Path are
+	// cwd_not_allowed's: "cwd", "input" or "output", and the path that
+	// failed, as sent.
 	Refusal string
 	Names   []string
+	Where   string
+	Path    string
 	// Entry is the matched program entry, Bound whether programs is not
 	// empty (so Entry is set).
 	Entry Program
@@ -324,6 +348,14 @@ type RunJudgement struct {
 	Flags          []string
 	PreviousSHA256 string
 	PreviousPath   string
+	// CwdFolder and OutputFolder are the folders entries the run's cwd and
+	// output folder matched (0.93.0), nil when it has none: what the
+	// approval shows (approval.pending{folders}).
+	CwdFolder    *Folder
+	OutputFolder *Folder
+	// Folders: the run has a cwd, inputs or an output (member_folder or
+	// member_files), so its approval carries folders.
+	Folders bool
 }
 
 // RecordsPin reports whether approving the run records its pin: it is
@@ -343,9 +375,13 @@ func (j RunJudgement) RecordsPin() bool {
 //     program matches none of it;
 //   - refused env_not_allowed when r sets a variable the matched entry's
 //     env does not list, or any variable when programs is empty;
+//   - (0.93.0) refused cwd_not_allowed when the cwd, an input (in order)
+//     or the output folder is not covered by folders: the cwd and an input
+//     under any entry, the output folder under an entry with write;
 //   - otherwise referred when each is true, programs is empty, the run
-//     does not match the entry's pin, or the program is a shell or an
-//     interpreter, with its flags.
+//     does not match the entry's pin, the program is a shell or an
+//     interpreter, or (0.93.0) the run has a cwd, inputs or an output,
+//     with its flags.
 func JudgeRun(w *ItemWays, r *Run) RunJudgement {
 	var j RunJudgement
 	if !w.Has(WayRun) || w.Run == nil {
@@ -370,6 +406,25 @@ func JudgeRun(w *ItemWays, r *Run) RunJudgement {
 		sort.Strings(names)
 		return RunJudgement{Refusal: "env_not_allowed", Names: names}
 	}
+	if r.Cwd != "" {
+		f, ok := MatchFolder(w.Run.Folders, r.Cwd, false)
+		if !ok {
+			return RunJudgement{Refusal: "cwd_not_allowed", Where: "cwd", Path: r.Cwd}
+		}
+		j.CwdFolder = &f
+	}
+	for _, in := range r.Inputs {
+		if _, ok := MatchFolder(w.Run.Folders, in.Path, false); !ok {
+			return RunJudgement{Refusal: "cwd_not_allowed", Where: "input", Path: in.Path}
+		}
+	}
+	if r.Output != nil {
+		f, ok := MatchFolder(w.Run.Folders, r.Output.Folder, true)
+		if !ok {
+			return RunJudgement{Refusal: "cwd_not_allowed", Where: "output", Path: r.Output.Folder}
+		}
+		j.OutputFolder = &f
+	}
 	shell, interp := IsShell(r.Program), IsInterpreter(r.Program)
 	if shell {
 		j.Flags = append(j.Flags, FlagShell)
@@ -392,7 +447,14 @@ func JudgeRun(w *ItemWays, r *Run) RunJudgement {
 	} else {
 		j.PinMatch = true
 	}
-	j.Refer = w.Run.Each || !j.Bound || !j.PinMatch || shell || interp
+	if r.Cwd != "" {
+		j.Flags = append(j.Flags, FlagMemberFolder)
+	}
+	if len(r.Inputs) > 0 || r.Output != nil {
+		j.Flags = append(j.Flags, FlagMemberFiles)
+	}
+	j.Folders = r.Cwd != "" || len(r.Inputs) > 0 || r.Output != nil
+	j.Refer = w.Run.Each || !j.Bound || !j.PinMatch || shell || interp || j.Folders
 	return j
 }
 

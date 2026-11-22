@@ -723,11 +723,13 @@ func (f *Feature) AgentDecision(s *vault.Session, typ string, body json.RawMessa
 	// refused, with its cooldown; one that does is decided as an items.read
 	// request and then always referred, flagged history (§10.11).
 	//
-	// An item.run is judged by the item's settings (0.42.0, 0.85.3):
-	// way_not_allowed, program_not_allowed and env_not_allowed are counted
-	// as refused, with the cooldown; otherwise it is decided as an
-	// items.read request and referred when the settings say so (each,
-	// unbound, no pin match, a shell or an interpreter), with its flags.
+	// An item.run is judged by the item's settings (0.42.0, 0.85.3,
+	// 0.93.0): way_not_allowed, program_not_allowed, env_not_allowed and
+	// cwd_not_allowed are counted as refused, with the cooldown; otherwise
+	// it is decided as an items.read request and referred when the
+	// settings say so (each, unbound, no pin match, a shell or an
+	// interpreter) and always when it has a cwd, inputs or an output, with
+	// its flags and, then, the folders entries it matched.
 	//
 	// An item.proxy (0.42.0) for an item whose settings do not hold proxy
 	// is answered way_not_allowed, and one for a host the item does not

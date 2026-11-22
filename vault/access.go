@@ -154,6 +154,18 @@ func approvalPendingBody(h *HeldRequest, p *Peer, in *envelope.Inner) []byte {
 		b.Raw("proxy", strictjson.NewBuilder().String("host", h.Proxy.Host).String("header", h.Proxy.Header).
 			String("prefix", h.Proxy.Prefix).Bytes())
 	}
+	if h.Folders != nil {
+		// (0.93.0) an item.run's matched folders entries, from the held
+		// settings: what the app shows, never its own copy (§10.11).
+		f := strictjson.NewBuilder()
+		if h.Folders.Cwd != nil {
+			f.Raw("cwd", strictjson.NewBuilder().String("path", h.Folders.Cwd.Path).Bool("write", h.Folders.Cwd.Write).Bytes())
+		}
+		if h.Folders.Output != nil {
+			f.Raw("output", strictjson.NewBuilder().String("path", h.Folders.Output.Path).Bool("write", h.Folders.Output.Write).Bytes())
+		}
+		b.Raw("folders", f.Bytes())
+	}
 	return b.Bytes()
 }
 
@@ -358,6 +370,7 @@ func (m *Manager) hold(p *Peer, in *envelope.Inner, key string, volatile bool, a
 			h.Note = a.Note
 		}
 		h.Proxy = a.Proxy       // an item.proxy's host, header and prefix, shown (0.92.0)
+		h.Folders = a.Folders   // an item.run's matched folders entries, shown (0.93.0)
 		h.Replaces = a.replaces // a re-referral names the approval it replaces
 	}
 	m.st.Held[h.ID] = h

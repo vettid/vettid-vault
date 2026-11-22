@@ -200,14 +200,14 @@ func (m *Manager) freshKeyAtOpen(ctx context.Context, pr *PendingRelay, now time
 	rel := m.withKey(key)
 	rr, ok := rel.(RelayRotator)
 	if !ok {
-		releaseRelay(rel)
+		m.release(rel)
 		suite.Wipe(seed)
 		suite.Wipe(key)
 		return false
 	}
 	lim, _, err := rr.RegisterCreated(ctx)
 	if err != nil {
-		releaseRelay(rel)
+		m.release(rel)
 		suite.Wipe(seed)
 		suite.Wipe(key)
 		return false

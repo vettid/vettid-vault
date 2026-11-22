@@ -172,16 +172,34 @@ func newClientRelay(baseURL string, key ed25519.PrivateKey, httpClient *http.Cli
 // after Close is not used: the call returns ErrRelayClosed. Every later
 // call returns ErrRelayClosed. Close is for the end of the vault's keys
 // (zeroize); to drop one relay, use Release.
-func (r *ClientRelay) Close() { r.fam.close(relayCloseWait) }
+func (r *ClientRelay) Close() { r.cut()(time.Now().Add(relayCloseWait)) }
+
+// cut is Close in two steps: it refuses new calls and cancels those in
+// flight of the whole family now, and returns the wait and wipe, which the
+// caller runs later against a deadline of its own (zeroize: one deadline
+// for every family, after it has destroyed its other secrets).
+func (r *ClientRelay) cut() func(deadline time.Time) {
+	gs := r.fam.begin()
+	return func(deadline time.Time) {
+		for _, g := range gs {
+			g.close(deadline)
+		}
+	}
+}
 
 // Release closes this relay alone, as Close does, and wipes its key copy:
 // for a key the vault drops while its other relays go on (a pending key
-// given up, a recovery's relays rebuilt).
-func (r *ClientRelay) Release() { r.g.close(time.Now().Add(relayCloseWait)) }
+// given up, a recovery's relays rebuilt). The family no longer holds it.
+func (r *ClientRelay) Release() {
+	r.fam.remove(r.g)
+	r.g.close(time.Now().Add(relayCloseWait))
+}
 
-// relayCloseWait bounds how long Close waits for the requests in flight
-// it has cancelled.
-var relayCloseWait = 10 * time.Second
+// relayCloseWait bounds how long a close waits for the requests in flight
+// it has cancelled. Real transports end a cancelled request in
+// milliseconds; the bound is for one that does not (the key copy is wiped
+// at it anyway), and it is spent under the Manager's lock.
+var relayCloseWait = 2 * time.Second
 
 // ErrRelayClosed is returned by a relay call once the relay is closed
 // (the vault zeroized).
@@ -207,9 +225,10 @@ func (f *relayFamily) add(g *relayGuard) {
 	}
 }
 
-// close cancels every guard's calls at once, then waits for them all
-// against one deadline, so that the bound is wait, not wait per relay.
-func (f *relayFamily) close(wait time.Duration) {
+// begin closes the family: it cancels every guard's calls at once and
+// returns the guards, for the caller to wait for against one deadline (the
+// bound is one wait, not one per relay). A second begin returns none.
+func (f *relayFamily) begin() []*relayGuard {
 	f.mu.Lock()
 	f.closed = true
 	gs := f.guards
@@ -218,9 +237,18 @@ func (f *relayFamily) close(wait time.Duration) {
 	for _, g := range gs {
 		g.begin()
 	}
-	deadline := time.Now().Add(wait)
-	for _, g := range gs {
-		g.close(deadline)
+	return gs
+}
+
+// remove takes a released relay's guard out of the family.
+func (f *relayFamily) remove(g *relayGuard) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for i, x := range f.guards {
+		if x == g {
+			f.guards = append(f.guards[:i], f.guards[i+1:]...)
+			return
+		}
 	}
 }
 
@@ -307,7 +335,20 @@ func (g *relayGuard) close(deadline time.Time) bool {
 	if g.key == nil {
 		return true // a concurrent close wiped it
 	}
-	suite.Wipe(g.key)
+	if g.inflight == 0 {
+		suite.Wipe(g.key)
+	} else {
+		// The timeout path: a call that ignored its cancel may still be
+		// signing with the copy. Only the seed is wiped. Ed25519 signing
+		// reads the seed and the public half separately and does not check
+		// one against the other, so a real seed read with a zeroed public
+		// half would sign with the true scalar under a wrong public key,
+		// and two such signatures over one message give the scalar away.
+		// With the public half (public) left, a torn read gives a seed, and
+		// so a scalar and nonce, unrelated to the real ones: nothing leaks.
+		// The call's answer is dropped (ErrRelayClosed).
+		suite.Wipe(g.key[:ed25519.SeedSize])
+	}
 	g.key = nil
 	if testRelayClosedHook != nil {
 		testRelayClosedHook(g.inflight == 0)

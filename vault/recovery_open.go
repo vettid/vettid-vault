@@ -598,9 +598,9 @@ func (m *Manager) finishOpen(ctx context.Context, p RecoveryOpenParams, mv *Mani
 	now time.Time) (*Manager, *RecoveryOpenOutcome) {
 	var err error
 	m.relay = m.track(p.Relay(m.st.Relay.URL, m.keys.relay))
-	releaseRelay(m.rk.pending) // their key copies wiped: built again on this Relay
+	m.release(m.rk.pending) // their key copies wiped: built again on this Relay
 	for _, o := range m.rk.old {
-		releaseRelay(o)
+		m.release(o)
 	}
 	m.rk.pending, m.rk.old = nil, nil
 	if !m.openRegisters() {

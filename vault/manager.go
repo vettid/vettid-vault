@@ -1352,14 +1352,17 @@ func (m *Manager) splitBrain() {
 // zeroize wipes the DEK and every key, and marks the manager locked.
 func (m *Manager) zeroize() {
 	m.locked = true
-	// The relay cut off first: the collector, then every relay (their
-	// requests ended, their key copies wiped), so that nothing signs with
-	// a key while it is destroyed below.
+	// The relay cut off first: the collector, then every relay's calls
+	// refused and cancelled. The relays sign with key copies of their own,
+	// so the secrets below are destroyed at once; the wait for the
+	// cancelled calls (one deadline for all) and the wipe of those copies
+	// come last.
 	if m.collector != nil {
 		_ = m.collector.Close()
 		m.collector = nil
 	}
-	m.closeRelays()
+	finishRelays := m.cutRelays()
+	defer finishRelays() // last: wait for the cancelled calls, wipe their key copies
 	m.attStop()
 	if m.push != nil {
 		m.push.stop()
@@ -1456,15 +1459,44 @@ func (m *Manager) track(r Relay) Relay {
 	return r
 }
 
-// closeRelays closes every Relay the Manager made that can be closed (a
-// ClientRelay waits for its requests, then wipes its keys). m.mu is held.
-func (m *Manager) closeRelays() {
+// cutRelays closes every Relay the Manager made that can be closed: it
+// refuses and cancels their calls now, and returns the rest of the close
+// (a ClientRelay's wait for its calls and the wipe of its key copies),
+// which zeroize runs last against one deadline for them all. m.mu is held.
+func (m *Manager) cutRelays() func() {
+	deadline := time.Now().Add(relayCloseWait)
+	var finish []func(time.Time)
 	for _, r := range m.relays {
-		if c, ok := r.(interface{ Close() }); ok {
+		switch c := r.(type) {
+		case interface{ cut() func(time.Time) }:
+			finish = append(finish, c.cut())
+		case interface{ Close() }:
 			c.Close()
 		}
 	}
 	m.relays = nil
+	return func() {
+		for _, f := range finish {
+			f(deadline)
+		}
+	}
+}
+
+// release closes one relay the vault drops, its key copy wiped (not its
+// family), and forgets it.
+func (m *Manager) release(r Relay) {
+	if r == nil {
+		return
+	}
+	for i, x := range m.relays {
+		if x == r {
+			m.relays = append(m.relays[:i], m.relays[i+1:]...)
+			break
+		}
+	}
+	if c, ok := r.(interface{ Release() }); ok {
+		c.Release()
+	}
 }
 
 // Locked reports whether the vault is locked (by request, split brain or

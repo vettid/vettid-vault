@@ -40,7 +40,8 @@ type MemRelays struct {
 
 // New returns a relay for a vault (the shape of vault.Options.Relay).
 func (rs *MemRelays) New(base string, key ed25519.PrivateKey) *MemRelay {
-	r := &MemRelay{base: base, key: key}
+	// Its own copy, as a ClientRelay keeps: the vault wipes its keys.
+	r := &MemRelay{base: base, key: append(ed25519.PrivateKey(nil), key...)}
 	rs.mu.Lock()
 	rs.all = append(rs.all, r)
 	rs.mu.Unlock()

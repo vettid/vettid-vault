@@ -120,7 +120,8 @@ func (m *Manager) Run(ctx context.Context) error {
 			refused = 0
 			continue
 		}
-		if errors.Is(err, ErrLocked) || errors.Is(err, ErrSplitBrain) || errors.Is(err, ErrCrash) || ctx.Err() != nil {
+		// ErrRelayClosed: the vault was zeroized mid-collect; it is locked.
+		if errors.Is(err, ErrLocked) || errors.Is(err, ErrSplitBrain) || errors.Is(err, ErrCrash) || errors.Is(err, ErrRelayClosed) || ctx.Err() != nil {
 			return err
 		}
 		switch RelayCode(err) {

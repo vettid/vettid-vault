@@ -597,8 +597,12 @@ const completionStatusTimeout = 10 * time.Second
 func (m *Manager) finishOpen(ctx context.Context, p RecoveryOpenParams, mv *ManifestView, out *RecoveryOpenOutcome, passwordProved bool,
 	now time.Time) (*Manager, *RecoveryOpenOutcome) {
 	var err error
-	m.relay = p.Relay(m.st.Relay.URL, m.keys.relay)
-	m.rk.pending, m.rk.old = nil, nil // built again on this Relay
+	m.relay = m.track(p.Relay(m.st.Relay.URL, m.keys.relay))
+	m.release(m.rk.pending) // their key copies wiped: built again on this Relay
+	for _, o := range m.rk.old {
+		m.release(o)
+	}
+	m.rk.pending, m.rk.old = nil, nil
 	if !m.openRegisters() {
 		if pr := m.st.Relay.Pending; pr != nil && pr.Limits != nil && m.limits == (Limits{}) {
 			m.limits = *pr.Limits

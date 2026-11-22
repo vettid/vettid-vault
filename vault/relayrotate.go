@@ -153,7 +153,7 @@ func (m *Manager) relayBase() string {
 // the Relay cannot rotate.
 func (m *Manager) withKey(k ed25519.PrivateKey) Relay {
 	if rot, ok := m.relay.(RelayRotator); ok {
-		return rot.WithKey(k)
+		return m.track(rot.WithKey(k))
 	}
 	return nil
 }
@@ -546,6 +546,7 @@ func (m *Manager) dropPendingRelay() {
 		suite.Wipe(pr.Seed)
 	}
 	suite.Wipe(m.keys.pendingRelay)
+	m.release(m.rk.pending) // its own key copy too
 	m.st.Relay.Pending, m.keys.pendingRelay, m.rk.pending = nil, nil, nil
 	m.dirty = true
 }

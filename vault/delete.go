@@ -402,7 +402,7 @@ func (m *Manager) finishMarked(ctx context.Context) {
 	m.beginDelete("", m.now())
 	m.deletePending = false
 	if err := m.loadKeys(); err == nil && m.opt.Relay != nil {
-		m.relay = m.opt.Relay(m.st.Relay.URL, m.keys.relay)
+		m.relay = m.track(m.opt.Relay(m.st.Relay.URL, m.keys.relay))
 	}
 	_ = m.finishDelete(ctx)
 	if !m.locked {

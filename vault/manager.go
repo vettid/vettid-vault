@@ -338,6 +338,10 @@ type Manager struct {
 	relay     Relay
 	limits    Limits
 	collector Collector
+	// relays are every Relay the Manager made (track): zeroize closes
+	// them, ending their requests and wiping their key copies, before it
+	// destroys the keys.
+	relays []Relay
 	// rk is the runtime of the vault's own relay-key rotation (§3.4;
 	// relayrotate.go).
 	rk relayKeyRun
@@ -706,7 +710,7 @@ func Create(ctx context.Context, p CreateParams) (*Manager, error) {
 		return nil, err
 	}
 	st.Relay.Mailbox = mailboxOf(m.keys.relay)
-	m.relay = p.Relay(p.RelayURL, m.keys.relay)
+	m.relay = m.track(p.Relay(p.RelayURL, m.keys.relay))
 	if m.limits, err = m.relay.Register(ctx); err != nil {
 		m.zeroize()
 		return nil, err
@@ -1348,6 +1352,14 @@ func (m *Manager) splitBrain() {
 // zeroize wipes the DEK and every key, and marks the manager locked.
 func (m *Manager) zeroize() {
 	m.locked = true
+	// The relay cut off first: the collector, then every relay (their
+	// requests ended, their key copies wiped), so that nothing signs with
+	// a key while it is destroyed below.
+	if m.collector != nil {
+		_ = m.collector.Close()
+		m.collector = nil
+	}
+	m.closeRelays()
 	m.attStop()
 	if m.push != nil {
 		m.push.stop()
@@ -1433,10 +1445,26 @@ func (m *Manager) zeroize() {
 		}
 	}
 	m.st = nil
-	if m.collector != nil {
-		_ = m.collector.Close()
-		m.collector = nil
+}
+
+// track records a Relay the Manager made, for zeroize to close. m.mu is
+// held.
+func (m *Manager) track(r Relay) Relay {
+	if r != nil {
+		m.relays = append(m.relays, r)
 	}
+	return r
+}
+
+// closeRelays closes every Relay the Manager made that can be closed (a
+// ClientRelay waits for its requests, then wipes its keys). m.mu is held.
+func (m *Manager) closeRelays() {
+	for _, r := range m.relays {
+		if c, ok := r.(interface{ Close() }); ok {
+			c.Close()
+		}
+	}
+	m.relays = nil
 }
 
 // Locked reports whether the vault is locked (by request, split brain or

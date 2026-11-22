@@ -64,7 +64,7 @@ func (m *Manager) inheritedKeyAtOpen(ctx context.Context, p RecoveryOpenParams, 
 	// a recovered phone (recoveryWaits), whichever recovery stored it.
 	pr.Recovery = ""
 	if m.relay == nil {
-		m.relay = p.Relay(m.st.Relay.URL, m.keys.relay)
+		m.relay = m.track(p.Relay(m.st.Relay.URL, m.keys.relay))
 	}
 	if now.Before(pr.RetryAfter) {
 		// A retry_after still running is honoured here too (§3.4
@@ -197,14 +197,17 @@ func (m *Manager) freshKeyAtOpen(ctx context.Context, pr *PendingRelay, now time
 		return false
 	}
 	key := ed25519.NewKeyFromSeed(seed)
-	rr, ok := m.withKey(key).(RelayRotator)
+	rel := m.withKey(key)
+	rr, ok := rel.(RelayRotator)
 	if !ok {
+		releaseRelay(rel)
 		suite.Wipe(seed)
 		suite.Wipe(key)
 		return false
 	}
 	lim, _, err := rr.RegisterCreated(ctx)
 	if err != nil {
+		releaseRelay(rel)
 		suite.Wipe(seed)
 		suite.Wipe(key)
 		return false
@@ -222,7 +225,7 @@ func (m *Manager) freshKeyAtOpen(ctx context.Context, pr *PendingRelay, now time
 	m.dropPendingRelay()
 	m.st.Relay.Pending = &PendingRelay{Seed: seed, Held: map[string]*HeldTokens{}, Marks: marks, Named: named}
 	m.keys.pendingRelay = key
-	m.rk.pending = m.withKey(key)
+	m.rk.pending = rel              // the relay that registered it
 	m.makePendingCurrent(true, now) // every held token minted, iat now; no next key drawn (above)
 	m.rk.relayMet = true
 	return true

@@ -847,7 +847,7 @@ func (m *Manager) resume(ctx context.Context, p AltUnlockParams, out *AltUnlockO
 		m.abortTransfer("locked", now)
 	}
 	var err error
-	m.relay = p.Relay(m.st.Relay.URL, m.keys.relay)
+	m.relay = m.track(p.Relay(m.st.Relay.URL, m.keys.relay))
 	if pr := m.st.Relay.Pending; m.relayRotation() && pr != nil {
 		// §3.4 "Retrying with the same key": while a relay key is pending
 		// the unlock registers no key (after the grace that would make the

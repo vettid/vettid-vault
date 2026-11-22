@@ -888,12 +888,14 @@ func (d *Device) startInitWith(purpose handshake.Purpose, ctxID, depositToken st
 		Policy: d.policy(), Now: now, ID: id, DeviceAttest: da, APIKey: apiKey, UnlockSecret: secret,
 		Features: Features(),
 	})
+	suite.Wipe(secret) // the Initiator keeps a copy of its own
 	if err != nil {
 		return err
 	}
 	dctx, cancel := d.bound(context.Background()) // Close ends it
 	defer cancel()
 	if _, err := d.relayClient(v.RelayURL).Deposit(dctx, v.Mailbox, depositToken, ini.Envelope()); err != nil {
+		ini.Abort() // never kept: its keys and secrets go now
 		return err
 	}
 	d.ini = ini
@@ -2397,7 +2399,7 @@ func (d *Device) handleResp(ctx context.Context, raw []byte, sender ed25519.Publ
 	now := d.cfg.Now()
 	res, err := d.ini.HandleResp(raw, sender, now)
 	if err != nil {
-		if _, xerr := d.ini.Export(); errors.Is(xerr, handshake.ErrDone) {
+		if d.ini.Done() { // aborted (§6.3); Export would marshal the hs.init again
 			d.ini, d.hsFailed = nil, true
 		}
 		return

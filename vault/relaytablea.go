@@ -83,10 +83,12 @@ func (m *Manager) peekResp(p *Peer, ini *handshake.Initiator, raw []byte, sender
 	if err != nil {
 		return nil
 	}
+	defer st.Wipe() // a copy taken only to try the answer
 	c, err := handshake.RestoreInitiator(st, m.keys.ik)
 	if err != nil {
 		return nil
 	}
+	defer c.Abort() // the copy's eph and K_s, whatever the answer
 	from := sender
 	if pinned := c.ResponderRelayKey(); p.keepsRelayKey(pinned) && p.keepsRelayKey(sender) {
 		from = pinned

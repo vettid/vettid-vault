@@ -159,15 +159,20 @@ func NewInitiator(cfg InitiatorConfig) (*Initiator, error) {
 		Rotations:      cfg.Rotations,
 		RelayLinks:     cfg.RelayLinks,
 		DeviceAttest:   cfg.DeviceAttest,
-		APIKey:         cfg.APIKey,
-		UnlockSecret:   cfg.UnlockSecret,
-		SASCommit:      commit,
+		// Copies of their own, wiped when the handshake ends (abortLocked):
+		// the caller may wipe its own as soon as NewInitiator returns.
+		APIKey:       cp(cfg.APIKey),
+		UnlockSecret: cp(cfg.UnlockSecret),
+		SASCommit:    commit,
 	}
 	bj, err := body.Marshal()
 	if err != nil {
 		eph.Destroy()
 		return nil, err
 	}
+	// Wiped once sealed, on every path: it may hold the app key, the unlock
+	// secret and tokens; the Initiator keeps only the sealed envelope.
+	defer wipeBody(TypeInit, bj)
 	in := &envelope.Inner{ID: cfg.ID, Type: TypeInit, TS: cfg.Now, Body: bj, Features: cfg.Features}
 
 	i := &Initiator{cfg: cfg, body: body, eph: eph, nI: nI}
@@ -238,6 +243,22 @@ func (i *Initiator) abortLocked() {
 	i.ks = nil
 	suite.Wipe(i.nI)
 	i.nI = nil
+	if i.body != nil {
+		// The app key and unlock secret the hs.init carried (the
+		// Initiator's own copies): nothing needs them once it ends.
+		suite.Wipe(i.body.APIKey)
+		suite.Wipe(i.body.UnlockSecret)
+		i.body.APIKey, i.body.UnlockSecret = nil, nil
+	}
+}
+
+// Done reports whether the handshake has ended (completed or aborted): what
+// a caller asks after a failed HandleResp, without Export, which would
+// marshal the hs.init body (its secrets) again.
+func (i *Initiator) Done() bool {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	return i.done
 }
 
 // Result is the outcome of a completed handshake on the initiator side.
@@ -390,6 +411,8 @@ func (i *Initiator) completeResp(env *envelope.Envelope, padded []byte, exp suit
 		epoch.Destroy()
 		return nil, err
 	}
+	defer wipeBody(TypeFin, fb) // it carries n_I
+
 	finID, finNow, err := innerMeta(i.cfg.FinID, now)
 	if err != nil {
 		epoch.Destroy()

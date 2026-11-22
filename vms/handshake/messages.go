@@ -485,42 +485,91 @@ func (in *Init) checkRelayLinksEnd() error {
 	return nil
 }
 
-// Marshal encodes the hs.init body.
+// wipeBody wipes a handshake body once it is sealed (hs.init, hs.resp).
+func wipeBody(typ string, b []byte) {
+	suite.Wipe(b)
+	if testBodyWipedHook != nil {
+		testBodyWipedHook(typ, b)
+	}
+}
+
+// testBodyWipedHook, set only by tests, sees each hs.init and hs.resp body
+// once it is wiped.
+var testBodyWipedHook func(typ string, body []byte)
+
+// testMarshalHook, set only by tests, learns after each hs.init or
+// hs.resp body is built whether its builder outgrew the room reserved for
+// it (it must not: an outgrown buffer leaves a copy of what was written).
+var testMarshalHook func(grew bool)
+
+// Marshal encodes the hs.init body. It may carry the app key, the unlock
+// secret and tokens (§6.2), so it is built in a buffer sized up front: no
+// outgrown buffer is left behind with a copy of them. The result is the
+// caller's to wipe once it is sealed.
 func (in *Init) Marshal() ([]byte, error) {
 	if err := in.validate(); err != nil {
 		return nil, err
 	}
-	b := strictjson.NewBuilder().
-		String("purpose", string(in.Purpose)).
-		String("ctx", in.Ctx).
-		Raw("from", MarshalPrincipal(in.From)).
-		Base64("eph", in.Eph.Bytes())
-	if in.Token != "" {
-		b.String("token", in.Token)
-	}
-	if in.ReconnectToken != "" {
-		b.String("reconnect_token", in.ReconnectToken)
-	}
-	b.Raw("suites", marshalInts(in.Suites))
+	// The members that hold no secret, encoded first.
+	from := MarshalPrincipal(in.From)
+	suites := marshalInts(in.Suites)
+	var profile, rotations, links, attest []byte
 	if len(in.Profile) > 0 {
 		c, err := strictjson.CompactObject(in.Profile)
 		if err != nil || len(c) > MaxOpaqueJSON {
 			return nil, ErrBody
 		}
-		b.Raw("profile", c)
+		profile = c
 	}
 	if len(in.Rotations) > 0 {
-		b.Raw("rotations", marshalRotations(in.Rotations))
+		rotations = marshalRotations(in.Rotations)
 	}
 	if len(in.RelayLinks) > 0 {
-		b.Raw("relay_links", MarshalRelayLinks(in.RelayLinks))
+		links = MarshalRelayLinks(in.RelayLinks)
 	}
 	if in.DeviceAttest != nil {
 		c, err := in.DeviceAttest.Marshal()
 		if err != nil {
 			return nil, ErrBody
 		}
-		b.Raw("device_attest", c)
+		attest = c
+	}
+	eph := in.Eph.Bytes()
+	// 2: the closing brace, and the opening one NewBuilder writes (slack).
+	n := 2 + strictjson.MemberSize("purpose", strictjson.StringSize(string(in.Purpose))) +
+		strictjson.MemberSize("ctx", strictjson.StringSize(in.Ctx)) + strictjson.MemberSize("from", len(from)) +
+		strictjson.MemberSize("eph", strictjson.Base64Size(eph)) +
+		strictjson.MemberSize("token", strictjson.StringSize(in.Token)) +
+		strictjson.MemberSize("reconnect_token", strictjson.StringSize(in.ReconnectToken)) +
+		strictjson.MemberSize("suites", len(suites)) + strictjson.MemberSize("profile", len(profile)) +
+		strictjson.MemberSize("rotations", len(rotations)) + strictjson.MemberSize("relay_links", len(links)) +
+		strictjson.MemberSize("device_attest", len(attest)) + strictjson.MemberSize("api_key", strictjson.Base64Size(in.APIKey)) +
+		strictjson.MemberSize("unlock_secret", strictjson.Base64Size(in.UnlockSecret)) +
+		strictjson.MemberSize("sas_commit", strictjson.Base64Size(in.SASCommit))
+	b := strictjson.NewBuilder().Grow(n)
+	reserved := b.Cap()
+	b.String("purpose", string(in.Purpose)).
+		String("ctx", in.Ctx).
+		Raw("from", from).
+		Base64("eph", eph)
+	if in.Token != "" {
+		b.String("token", in.Token)
+	}
+	if in.ReconnectToken != "" {
+		b.String("reconnect_token", in.ReconnectToken)
+	}
+	b.Raw("suites", suites)
+	if profile != nil {
+		b.Raw("profile", profile)
+	}
+	if rotations != nil {
+		b.Raw("rotations", rotations)
+	}
+	if links != nil {
+		b.Raw("relay_links", links)
+	}
+	if attest != nil {
+		b.Raw("device_attest", attest)
 	}
 	if in.APIKey != nil {
 		b.Base64("api_key", in.APIKey)
@@ -531,7 +580,11 @@ func (in *Init) Marshal() ([]byte, error) {
 	if in.SASCommit != nil {
 		b.Base64("sas_commit", in.SASCommit)
 	}
-	return b.Bytes(), nil
+	out := b.Bytes()
+	if testMarshalHook != nil {
+		testMarshalHook(b.Cap() != reserved)
+	}
+	return out, nil
 }
 
 func marshalInts(v []int) []byte {
@@ -691,12 +744,29 @@ func (r *Resp) checkRelayLinksEnd() error {
 	return nil
 }
 
-// Marshal encodes the hs.resp body for a handshake of purpose p.
+// Marshal encodes the hs.resp body for a handshake of purpose p. It
+// carries the request and reconnect tokens (§6.3), so it is built in a
+// buffer sized up front, as Init.Marshal; the result is the caller's to
+// wipe once it is sealed.
 func (r *Resp) Marshal(p Purpose) ([]byte, error) {
 	if err := r.validate(p); err != nil {
 		return nil, err
 	}
-	b := strictjson.NewBuilder()
+	var rotations, relay, links []byte
+	if len(r.Rotations) > 0 {
+		rotations = marshalRotations(r.Rotations)
+	}
+	if r.Relay != nil {
+		relay, links = marshalRelay(*r.Relay), MarshalRelayLinks(r.RelayLinks)
+	}
+	// 2: the closing brace, and the opening one NewBuilder writes (slack).
+	n := 2 + strictjson.MemberSize("token", strictjson.StringSize(r.Token)) +
+		strictjson.MemberSize("reconnect_token", strictjson.StringSize(r.ReconnectToken)) + strictjson.MemberSize("suite", 20) +
+		strictjson.MemberSize("rotations", len(rotations)) + strictjson.MemberSize("sas_nonce", strictjson.Base64Size(r.SASNonce)) +
+		strictjson.MemberSize("sig", strictjson.Base64Size(r.Sig)) + strictjson.MemberSize("relay", len(relay)) +
+		strictjson.MemberSize("relay_links", len(links))
+	b := strictjson.NewBuilder().Grow(n)
+	reserved := b.Cap()
 	if r.Token != "" {
 		b.String("token", r.Token)
 	}
@@ -704,18 +774,22 @@ func (r *Resp) Marshal(p Purpose) ([]byte, error) {
 		b.String("reconnect_token", r.ReconnectToken)
 	}
 	b.Uint("suite", uint64(r.Suite))
-	if len(r.Rotations) > 0 {
-		b.Raw("rotations", marshalRotations(r.Rotations))
+	if rotations != nil {
+		b.Raw("rotations", rotations)
 	}
 	if r.SASNonce != nil {
 		b.Base64("sas_nonce", r.SASNonce)
 	}
 	b.Base64("sig", r.Sig)
 	if r.Relay != nil {
-		b.Raw("relay", marshalRelay(*r.Relay))
-		b.Raw("relay_links", MarshalRelayLinks(r.RelayLinks))
+		b.Raw("relay", relay)
+		b.Raw("relay_links", links)
 	}
-	return b.Bytes(), nil
+	out := b.Bytes()
+	if testMarshalHook != nil {
+		testMarshalHook(b.Cap() != reserved)
+	}
+	return out, nil
 }
 
 // testRespParsedHook, set only by tests, sees ParseResp's parsed members

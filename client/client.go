@@ -848,6 +848,11 @@ func (d *Device) startInit(purpose handshake.Purpose, ctxID, depositToken string
 	return d.startInitWith(purpose, ctxID, depositToken, profile, nil, "", d.cfg.Now(), nil)
 }
 
+// testInitiatorHook, set only by tests, sees each handshake this device
+// begins and the unlock secret it was given (wiped by then), before it is
+// deposited.
+var testInitiatorHook func(ini *handshake.Initiator, secret []byte)
+
 func (d *Device) startInitWith(purpose handshake.Purpose, ctxID, depositToken string, profile json.RawMessage, da *altchan.DeviceAttest, id string, now time.Time,
 	apiKey []byte) error {
 	if d.closed { // d.mu is held
@@ -891,6 +896,9 @@ func (d *Device) startInitWith(purpose handshake.Purpose, ctxID, depositToken st
 	suite.Wipe(secret) // the Initiator keeps a copy of its own
 	if err != nil {
 		return err
+	}
+	if testInitiatorHook != nil {
+		testInitiatorHook(ini, secret)
 	}
 	dctx, cancel := d.bound(context.Background()) // Close ends it
 	defer cancel()

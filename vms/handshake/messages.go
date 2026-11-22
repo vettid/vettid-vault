@@ -485,7 +485,8 @@ func (in *Init) checkRelayLinksEnd() error {
 	return nil
 }
 
-// wipeBody wipes a handshake body once it is sealed (hs.init, hs.resp).
+// wipeBody wipes a handshake body once it is sealed (hs.init, hs.resp,
+// hs.fin).
 func wipeBody(typ string, b []byte) {
 	suite.Wipe(b)
 	if testBodyWipedHook != nil {
@@ -497,10 +498,41 @@ func wipeBody(typ string, b []byte) {
 // once it is wiped.
 var testBodyWipedHook func(typ string, body []byte)
 
-// testMarshalHook, set only by tests, learns after each hs.init or
-// hs.resp body is built whether its builder outgrew the room reserved for
-// it (it must not: an outgrown buffer leaves a copy of what was written).
-var testMarshalHook func(grew bool)
+// testMarshalHook, set only by tests, sees each hs.init, hs.resp and
+// hs.fin body once built: the room reserved for each member (terms),
+// the body, and whether its builder outgrew that room (it must not: an
+// outgrown buffer leaves a copy of what was written).
+var testMarshalHook func(typ string, terms []sizeTerm, body []byte, grew bool)
+
+// sizeTerm is the room a body's builder reserves for one member: at
+// least its encoded length, its comma included.
+type sizeTerm struct {
+	name  string
+	bound int
+}
+
+func term(name string, valueLen int) sizeTerm {
+	return sizeTerm{name, strictjson.MemberSize(name, valueLen)}
+}
+
+// sized starts a builder with room for every term, plus 2: the closing
+// brace, and the opening one NewBuilder writes (slack).
+func sized(terms []sizeTerm) (*strictjson.Builder, int) {
+	n := 2
+	for _, t := range terms {
+		n += t.bound
+	}
+	b := strictjson.NewBuilder().Grow(n)
+	return b, b.Cap()
+}
+
+func marshalled(typ string, terms []sizeTerm, b *strictjson.Builder, reserved int) []byte {
+	out := b.Bytes()
+	if testMarshalHook != nil {
+		testMarshalHook(typ, terms, out, b.Cap() != reserved)
+	}
+	return out
+}
 
 // Marshal encodes the hs.init body. It may carry the app key, the unlock
 // secret and tokens (§6.2), so it is built in a buffer sized up front: no
@@ -535,19 +567,15 @@ func (in *Init) Marshal() ([]byte, error) {
 		attest = c
 	}
 	eph := in.Eph.Bytes()
-	// 2: the closing brace, and the opening one NewBuilder writes (slack).
-	n := 2 + strictjson.MemberSize("purpose", strictjson.StringSize(string(in.Purpose))) +
-		strictjson.MemberSize("ctx", strictjson.StringSize(in.Ctx)) + strictjson.MemberSize("from", len(from)) +
-		strictjson.MemberSize("eph", strictjson.Base64Size(eph)) +
-		strictjson.MemberSize("token", strictjson.StringSize(in.Token)) +
-		strictjson.MemberSize("reconnect_token", strictjson.StringSize(in.ReconnectToken)) +
-		strictjson.MemberSize("suites", len(suites)) + strictjson.MemberSize("profile", len(profile)) +
-		strictjson.MemberSize("rotations", len(rotations)) + strictjson.MemberSize("relay_links", len(links)) +
-		strictjson.MemberSize("device_attest", len(attest)) + strictjson.MemberSize("api_key", strictjson.Base64Size(in.APIKey)) +
-		strictjson.MemberSize("unlock_secret", strictjson.Base64Size(in.UnlockSecret)) +
-		strictjson.MemberSize("sas_commit", strictjson.Base64Size(in.SASCommit))
-	b := strictjson.NewBuilder().Grow(n)
-	reserved := b.Cap()
+	terms := []sizeTerm{
+		term("purpose", strictjson.StringSize(string(in.Purpose))), term("ctx", strictjson.StringSize(in.Ctx)),
+		term("from", len(from)), term("eph", strictjson.Base64Size(eph)), term("token", strictjson.StringSize(in.Token)),
+		term("reconnect_token", strictjson.StringSize(in.ReconnectToken)), term("suites", len(suites)),
+		term("profile", len(profile)), term("rotations", len(rotations)), term("relay_links", len(links)),
+		term("device_attest", len(attest)), term("api_key", strictjson.Base64Size(in.APIKey)),
+		term("unlock_secret", strictjson.Base64Size(in.UnlockSecret)), term("sas_commit", strictjson.Base64Size(in.SASCommit)),
+	}
+	b, reserved := sized(terms)
 	b.String("purpose", string(in.Purpose)).
 		String("ctx", in.Ctx).
 		Raw("from", from).
@@ -580,11 +608,7 @@ func (in *Init) Marshal() ([]byte, error) {
 	if in.SASCommit != nil {
 		b.Base64("sas_commit", in.SASCommit)
 	}
-	out := b.Bytes()
-	if testMarshalHook != nil {
-		testMarshalHook(b.Cap() != reserved)
-	}
-	return out, nil
+	return marshalled(TypeInit, terms, b, reserved), nil
 }
 
 func marshalInts(v []int) []byte {
@@ -759,14 +783,12 @@ func (r *Resp) Marshal(p Purpose) ([]byte, error) {
 	if r.Relay != nil {
 		relay, links = marshalRelay(*r.Relay), MarshalRelayLinks(r.RelayLinks)
 	}
-	// 2: the closing brace, and the opening one NewBuilder writes (slack).
-	n := 2 + strictjson.MemberSize("token", strictjson.StringSize(r.Token)) +
-		strictjson.MemberSize("reconnect_token", strictjson.StringSize(r.ReconnectToken)) + strictjson.MemberSize("suite", 20) +
-		strictjson.MemberSize("rotations", len(rotations)) + strictjson.MemberSize("sas_nonce", strictjson.Base64Size(r.SASNonce)) +
-		strictjson.MemberSize("sig", strictjson.Base64Size(r.Sig)) + strictjson.MemberSize("relay", len(relay)) +
-		strictjson.MemberSize("relay_links", len(links))
-	b := strictjson.NewBuilder().Grow(n)
-	reserved := b.Cap()
+	terms := []sizeTerm{
+		term("token", strictjson.StringSize(r.Token)), term("reconnect_token", strictjson.StringSize(r.ReconnectToken)),
+		term("suite", 20), term("rotations", len(rotations)), term("sas_nonce", strictjson.Base64Size(r.SASNonce)),
+		term("sig", strictjson.Base64Size(r.Sig)), term("relay", len(relay)), term("relay_links", len(links)),
+	}
+	b, reserved := sized(terms)
 	if r.Token != "" {
 		b.String("token", r.Token)
 	}
@@ -785,11 +807,7 @@ func (r *Resp) Marshal(p Purpose) ([]byte, error) {
 		b.Raw("relay", relay)
 		b.Raw("relay_links", links)
 	}
-	out := b.Bytes()
-	if testMarshalHook != nil {
-		testMarshalHook(b.Cap() != reserved)
-	}
-	return out, nil
+	return marshalled(TypeResp, terms, b, reserved), nil
 }
 
 // testRespParsedHook, set only by tests, sees ParseResp's parsed members
@@ -871,16 +889,19 @@ func ParseResp(body []byte, p Purpose) (*Resp, error) {
 }
 
 // Marshal encodes the hs.fin body {sig, sas_nonce?} for a handshake of
-// purpose p.
+// purpose p. It carries n_I, so it is built in a buffer sized up front,
+// as Init.Marshal; the result is the caller's to wipe once it is sealed.
 func (f *Fin) Marshal(p Purpose) ([]byte, error) {
 	if len(f.Sig) != ed25519.SignatureSize || checkSASField(p, f.SASNonce) != nil {
 		return nil, ErrBody
 	}
-	b := strictjson.NewBuilder().Base64("sig", f.Sig)
+	terms := []sizeTerm{term("sig", strictjson.Base64Size(f.Sig)), term("sas_nonce", strictjson.Base64Size(f.SASNonce))}
+	b, reserved := sized(terms)
+	b.Base64("sig", f.Sig)
 	if f.SASNonce != nil {
 		b.Base64("sas_nonce", f.SASNonce)
 	}
-	return b.Bytes(), nil
+	return marshalled(TypeFin, terms, b, reserved), nil
 }
 
 // ParseFin parses an hs.fin body for a handshake of purpose p.

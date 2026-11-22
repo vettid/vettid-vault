@@ -165,27 +165,36 @@ func NewInitiator(cfg InitiatorConfig) (*Initiator, error) {
 		UnlockSecret: cp(cfg.UnlockSecret),
 		SASCommit:    commit,
 	}
+	// The Initiator uses only its own copies (body): it names none of the
+	// caller's, which stay the caller's to wipe.
+	cfg.APIKey, cfg.UnlockSecret = nil, nil
+	i := &Initiator{cfg: cfg, body: body, eph: eph, nI: nI}
+	// fail ends the half-built handshake on any error from here: its eph,
+	// n_I, K_s and the copies of the app key and unlock secret go with it.
+	fail := func(err error) (*Initiator, error) {
+		if testNewInitiatorFailHook != nil {
+			testNewInitiatorFailHook(i)
+		}
+		i.Abort()
+		return nil, err
+	}
 	bj, err := body.Marshal()
 	if err != nil {
-		eph.Destroy()
-		return nil, err
+		return fail(err)
 	}
 	// Wiped once sealed, on every path: it may hold the app key, the unlock
 	// secret and tokens; the Initiator keeps only the sealed envelope.
 	defer wipeBody(TypeInit, bj)
 	in := &envelope.Inner{ID: cfg.ID, Type: TypeInit, TS: cfg.Now, Body: bj, Features: cfg.Features}
 
-	i := &Initiator{cfg: cfg, body: body, eph: eph, nI: nI}
 	if rekey {
 		// §6.2: on rekey, hs.init travels in session mode under the current
 		// epoch, and K_s is that epoch's rk.
 		if i.ks, err = cfg.Current.rkCopy(); err != nil {
-			eph.Destroy()
-			return nil, err
+			return fail(err)
 		}
 		if i.env, err = cfg.Current.Seal(in); err != nil {
-			i.Abort()
-			return nil, err
+			return fail(err)
 		}
 	} else {
 		senderKid := cfg.StaticKEM.Kid()
@@ -194,13 +203,11 @@ func NewInitiator(cfg InitiatorConfig) (*Initiator, error) {
 		}
 		env, exp, err := envelope.SealInner(in, cfg.ResponderEK, senderKid)
 		if err != nil {
-			eph.Destroy()
-			return nil, err
+			return fail(err)
 		}
 		i.env = env
 		if i.ks, err = exp.Export(suite.LabelHsKs, suite.KeySize); err != nil {
-			i.Abort()
-			return nil, err
+			return fail(err)
 		}
 	}
 	i.th1 = Th1(i.env)
@@ -216,8 +223,13 @@ func (i *Initiator) Th1() [32]byte { return i.th1 }
 // EphKid returns the kid that hs.resp will carry as recipient_kid.
 func (i *Initiator) EphKid() suite.Kid { return i.body.Eph.Kid() }
 
-// Body returns the hs.init body.
+// Body returns the hs.init body. Once the handshake has ended (Done), its
+// APIKey and UnlockSecret are nil: they were wiped.
 func (i *Initiator) Body() *Init { return i.body }
+
+// testNewInitiatorFailHook, set only by tests, sees the half-built
+// Initiator of a NewInitiator that fails, just before it is aborted.
+var testNewInitiatorFailHook func(*Initiator)
 
 // ResponderRelayKey is the relay key the handshake expects hs.resp to be
 // deposited with (InitiatorConfig.ResponderRelayKey): the responder's relay

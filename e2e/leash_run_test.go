@@ -64,7 +64,7 @@ func TestLeashItemRun(t *testing.T) {
 	shaA, shaB := strings.Repeat("a", 64), strings.Repeat("b", 64)
 	run := func(item, program, sha string, env map[string]any) map[string]any {
 		m := map[string]any{"item_id": item, "field_id": "f1", "program": program, "sha256": sha, "argv": []string{"git", "push"},
-			"cwd": "/home/a", "how": "env", "name": "TOKEN"}
+			"how": "env", "name": "TOKEN"}
 		if env != nil {
 			m["env"] = env
 		}
@@ -201,5 +201,113 @@ func TestLeashItemRun(t *testing.T) {
 	}
 	if l, _ := a.app.LeashItemList(ctx, agent.DeviceID(), gh); !strings.Contains(string(l[0]), `"sha256":"`+shaB+`"`) || !strings.Contains(string(l[0]), `"version":3`) {
 		t.Fatalf("second pin: %s", l)
+	}
+}
+
+// §10.11 (0.93.0) member folders and files through the real relay: the
+// catalog carries folders; a cwd outside them is cwd_not_allowed {where,
+// path}; a run in a member folder with an output is referred, flagged
+// member_folder and member_files, its approval carrying the matched
+// entries, and approved it is answered the value; a held run whose output
+// entry lost write is refused at approval, never answered the value.
+func TestLeashItemRunFolders(t *testing.T) {
+	r := relaytest.Start(t, nil)
+	a := newTestVault(t, r.URL, "a", nil)
+	ctx := ctxT(t, 180*time.Second)
+	wifi, _, err := a.app.ItemPut(ctx, "", 0, "secret", []string{"agent ok"}, client.ItemContent{Name: "wifi",
+		Fields: []client.ItemField{{Label: "Password", Kind: "password", Value: "hunter22"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent, err := client.New(ctx, client.Config{Role: vault.KindAgent, Name: "r-agent", RelayURL: r.URL, PollWait: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pc := mustOK(t, a.request(a.app, "device.pair.create", `{"role":"agent"}`))
+	link, _ := pc.String("link")
+	pid, _ := pc.String("pairing_id")
+	if _, err := agent.Pair(ctx, link); err != nil {
+		t.Fatal(err)
+	}
+	waitEvent(t, a.app, "device.pair.pending", has("pairing_id", pid))
+	if _, err := a.app.CredentialUnlock(ctx, credPW); err != nil {
+		t.Fatal(err)
+	}
+	mustOK(t, a.request(a.app, "device.pair.approve", `{"pairing_id":"`+pid+`","session_seconds":600,"grants":[{"scope":"connection.list","approval":"auto"}]}`))
+	if err := agent.AwaitPaired(ctx); err != nil {
+		t.Fatal(err)
+	}
+	ro, err := a.app.ShareRuleSet(ctx, map[string]any{"subject": map[string]any{"agent_id": agent.DeviceID()}, "tags": []string{"agent ok"}, "mode": "auto"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rid, _ := ro.String("rule_id")
+	waitEvent(t, agent, "leash.grant.updated", func(b json.RawMessage) bool { return strings.Contains(string(b), rid) })
+	bind := func(version uint64, outWrite bool) {
+		t.Helper()
+		if _, err := a.app.LeashItemSet(ctx, agent.DeviceID(), wifi, version, map[string]any{"ways": []string{"use", "run"},
+			"run": map[string]any{"programs": []any{map[string]any{"program": "git"}}, "each": false,
+				"folders": []any{map[string]any{"path": "/home/al/work"}, map[string]any{"path": "/home/al/out", "write": outWrite}}}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	bind(0, true)
+	if cat, err := agent.AgentRequest(ctx, "catalog", map[string]any{}); err != nil || !cat.OK() ||
+		!strings.Contains(string(cat.Body()), `"folders":[{"path":"/home/al/work","write":false},{"path":"/home/al/out","write":true}]`) {
+		t.Fatalf("catalog: %v %+v", err, cat)
+	}
+	run := func(extra map[string]any) map[string]any {
+		m := map[string]any{"item_id": wifi, "field_id": "f1", "program": "/usr/bin/git", "sha256": strings.Repeat("a", 64),
+			"argv": []string{"git", "push"}, "how": "env", "name": "TOKEN"}
+		for k, v := range extra {
+			m[k] = v
+		}
+		return m
+	}
+	type res struct {
+		r   *client.Response
+		err error
+	}
+	async := func(m map[string]any) chan res {
+		ch := make(chan res, 1)
+		go func() {
+			rr, err := agent.AgentRequest(ctxT(t, 90*time.Second), "item.run", m)
+			ch <- res{rr, err}
+		}()
+		return ch
+	}
+
+	if rr, err := agent.AgentRequest(ctx, "item.run", run(map[string]any{"cwd": "/home/al/work2"})); err != nil ||
+		rr.ErrorCode() != "cwd_not_allowed" || string(rr.Body()) != `{"where":"cwd","path":"/home/al/work2"}` {
+		t.Fatalf("cwd outside: %v %+v", err, rr)
+	}
+	time.Sleep(1200 * time.Millisecond) // past the refusal's cooldown
+
+	files := map[string]any{"cwd": "/home/al/work/site", "inputs": []any{map[string]any{"path": "/home/al/work/in.pdf", "size": 3}},
+		"output": map[string]any{"folder": "/home/al/out", "names": []string{"report.pdf"}}}
+	ch := async(run(files))
+	ap := waitEvent(t, a.app, "approval.pending", has("type", "agent.request"))
+	body := string(ap.Body)
+	if !strings.Contains(body, `"flags":["program_unrecorded","member_folder","member_files"]`) ||
+		!strings.Contains(body, `"folders":{"cwd":{"path":"/home/al/work","write":false},"output":{"path":"/home/al/out","write":true}}`) {
+		t.Fatalf("approval: %s", body)
+	}
+	if result, err := a.app.ApprovalDecide(ctx, field(t, ap.Body, "approval_id"), true); err != nil || result != "ok" {
+		t.Fatalf("approve: %q %v", result, err)
+	}
+	if got := <-ch; got.err != nil || !got.r.OK() || !strings.Contains(string(got.r.Body()), `"value":"hunter22"`) {
+		t.Fatalf("approved: %+v", got)
+	}
+
+	// Held, then the output's entry loses write (a narrowing, no window
+	// needed): refused at approval.
+	ch = async(run(files))
+	ap = waitEvent(t, a.app, "approval.pending", has("type", "agent.request"))
+	bind(2, false)
+	if _, err := a.app.ApprovalDecide(ctx, field(t, ap.Body, "approval_id"), true); err != nil {
+		t.Fatal(err)
+	}
+	if got := <-ch; got.err != nil || got.r.ErrorCode() != "cwd_not_allowed" || strings.Contains(string(got.r.Body()), "hunter22") {
+		t.Fatalf("write off while held: %+v", got)
 	}
 }

@@ -352,7 +352,7 @@ func TestWaysJSON(t *testing.T) {
 		Programs: []Program{{Program: "git", SHA256: sha, Path: "/usr/bin/git", Env: []string{"GH_HOST"}}, {Program: "/usr/bin/gh"}}},
 		Proxy: &ProxyWays{Hosts: []string{"api.example.com"}, Header: "Authorization", Prefix: "Bearer "}}
 	want := `{"agent_id":"a","item_id":"i","version":3,"ways":["use","run","proxy"],"run":{"programs":[{"program":"git","sha256":"` + sha +
-		`","path":"/usr/bin/git","env":["GH_HOST"]},{"program":"/usr/bin/gh","env":[]}],"each":true},"proxy":{"hosts":["api.example.com"],"header":"Authorization","prefix":"Bearer "}}`
+		`","path":"/usr/bin/git","env":["GH_HOST"]},{"program":"/usr/bin/gh","env":[]}],"each":true,"folders":[]},"proxy":{"hosts":["api.example.com"],"header":"Authorization","prefix":"Bearer "}}`
 	if got := string(w.JSON("a", "i")); got != want {
 		t.Fatalf("item_ways:\n%s\n%s", got, want)
 	}

@@ -790,6 +790,9 @@ type HeldRequest struct {
 	// Proxy is what the approval of an agent's item.proxy shows
 	// (approval.pending{proxy}, §10.11, 0.92.0).
 	Proxy *ApprovalProxy `json:"proxy,omitempty"`
+	// Folders is what the approval of an agent's item.run with a cwd,
+	// inputs or an output shows (approval.pending{folders}, 0.93.0).
+	Folders *ApprovalFolders `json:"folders,omitempty"`
 }
 
 // PeerRelay is a peer's relay address.

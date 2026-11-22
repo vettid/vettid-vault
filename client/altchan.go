@@ -60,6 +60,18 @@ type Enclave struct {
 // VerifyManifest verifies a served manifest (§11.10.1) and the serial rule
 // against the highest serial this device has seen for its vault.
 func (d *Device) VerifyManifest(served []byte, t Trust) (*manifest.Served, *manifest.Manifest, error) {
+	// The closed check and the read of the device's state in one lock
+	// hold, before the (unlocked) parse and verification.
+	d.mu.Lock()
+	if d.closed {
+		d.mu.Unlock()
+		return nil, nil, ErrClosed
+	}
+	seen := uint64(0)
+	if d.st.Alt != nil {
+		seen = d.st.Alt.ManifestSerial
+	}
+	d.mu.Unlock()
 	s, err := manifest.ParseServed(served)
 	if err != nil {
 		return nil, nil, err
@@ -68,12 +80,6 @@ func (d *Device) VerifyManifest(served []byte, t Trust) (*manifest.Served, *mani
 	if err != nil {
 		return nil, nil, err
 	}
-	d.mu.Lock()
-	seen := uint64(0)
-	if d.st.Alt != nil {
-		seen = d.st.Alt.ManifestSerial
-	}
-	d.mu.Unlock()
 	if m.Serial < seen {
 		return nil, nil, ErrManifestOlder
 	}
@@ -153,6 +159,9 @@ func (d *Device) alt() *AltState {
 func (d *Device) Alt() AltState {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	if d.closed {
+		return AltState{} // not re-created in the wiped state
+	}
 	a := *d.alt()
 	a.HeaderSeq = map[string]uint64{}
 	for k, v := range d.st.Alt.HeaderSeq {
@@ -184,8 +193,14 @@ type Request struct {
 // (§11.3), attesting a fresh device key with the request's challenge. m is
 // the verified manifest; the request names it by hash and serial (0.10.0).
 func (d *Device) BuildEnroll(userGUID, pin string, e *Enclave, m *manifest.Manifest, att Attester) (*Request, error) {
+	if d.isClosed() {
+		return nil, ErrClosed
+	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	if d.closed { // checked again under the lock: Close may have run since
+		return nil, ErrClosed
+	}
 	now := d.cfg.Now()
 	rid, err := envelope.NewULID(now)
 	if err != nil {
@@ -213,13 +228,13 @@ func (d *Device) BuildEnroll(userGUID, pin string, e *Enclave, m *manifest.Manif
 	if err != nil {
 		return nil, err
 	}
-	ra := d.RelayAddr()
+	ra := d.relayAddrLocked()
 	if err := d.newPhoneKeyLocked(d.st.VaultID); err != nil { // release R: a new phone key (§11.14.1)
 		return nil, err
 	}
 	body, err := (&altchan.EnrollRequest{APIKey: apiKey, UserGUID: userGUID, RequestID: rid, Nonce: nonce, PIN: pin,
 		UnlockSecret: d.unlockSecretLocked(d.st.Epoch),
-		IK:           d.IdentityKey(), KEM: d.kem.Public(), Relay: altchan.RelayAddr{URL: ra.URL, Mailbox: ra.Mailbox, PK: ra.PK},
+		IK:           d.identityKeyLocked(), KEM: d.kem.Public(), Relay: altchan.RelayAddr{URL: ra.URL, Mailbox: ra.Mailbox, PK: ra.PK},
 		OpenToken: open, Name: d.st.Name, Attest: da, ManifestSHA256: manifest.SHA256Hex(m.Bytes), ManifestSerial: m.Serial}).Marshal()
 	if err != nil {
 		return nil, err
@@ -238,15 +253,18 @@ func (d *Device) BuildEnroll(userGUID, pin string, e *Enclave, m *manifest.Manif
 
 // OpenEnrollResult reads vault.enroll.result from the response slot.
 func (d *Device) OpenEnrollResult(raw []byte, requestID string) (*altchan.EnrollResult, error) {
+	d.mu.Lock() // the KEM key is used under the lock: Close wipes it under the lock
+	defer d.mu.Unlock()
+	if d.closed {
+		return nil, ErrClosed
+	}
 	body, err := altchan.OpenResult(raw, d.kem, altchan.TypeEnrollResult, requestID)
 	if err != nil {
 		return nil, ErrResult
 	}
 	r, err := altchan.ParseEnrollResult(body)
 	if err == nil && r.OK {
-		d.mu.Lock()
 		d.unlockID = r.UnlockID
-		d.mu.Unlock()
 	}
 	return r, err
 }
@@ -346,6 +364,10 @@ func (d *Device) Signer(ctx context.Context) (*DeviceSigner, error) {
 			return nil, ErrProtocol
 		}
 		d.mu.Lock()
+		if d.closed {
+			d.mu.Unlock()
+			return nil, ErrClosed
+		}
 		d.st.SignerBound = true
 		d.mu.Unlock()
 		return sg, nil
@@ -368,11 +390,17 @@ type pendingUnlock struct {
 // (0.10.0), an optional release approval, and the Ed25519 signature by
 // this app's identity key.
 func (d *Device) BuildUnlock(userGUID, pin string, e *Enclave, m *manifest.Manifest, att Attester, o UnlockOptions) (*Request, error) {
+	if d.isClosed() {
+		return nil, ErrClosed
+	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	if d.closed { // checked again under the lock: Close may have run since
+		return nil, ErrClosed
+	}
 	recovering := d.st.Vault == nil && d.st.Recovery != nil
 	if (d.st.Vault == nil && !recovering) || d.st.VaultID == "" {
-		return nil, ErrNotPaired
+		return nil, d.notPairedLocked()
 	}
 	a := d.alt()
 	if m.Serial < a.ManifestSerial {
@@ -442,7 +470,7 @@ func (d *Device) BuildUnlock(userGUID, pin string, e *Enclave, m *manifest.Manif
 		}
 		toPCR0 = upd.To
 	}
-	req := &altchan.UnlockRequest{UserGUID: userGUID, VaultID: d.st.VaultID, RequestID: rid, DeviceIK: d.IdentityKey(),
+	req := &altchan.UnlockRequest{UserGUID: userGUID, VaultID: d.st.VaultID, RequestID: rid, DeviceIK: d.identityKeyLocked(),
 		PIN: pin, MinStateSeq: a.StateSeq, MinHeaderSeq: a.HeaderSeq[e.Release.PCR0], Token: tok, Assertion: as,
 		ManifestSHA256: manifest.SHA256Hex(m.Bytes), ManifestSerial: m.Serial, Update: upd, CancelRecovery: o.CancelRecovery,
 		UnlockSecret: d.unlockSecretLocked(d.st.Epoch)}
@@ -475,8 +503,14 @@ func (d *Device) BuildUnlock(userGUID, pin string, e *Enclave, m *manifest.Manif
 // sequence numbers, release and token it carries. On state_rollback the
 // app MUST warn the user (§13.2).
 func (d *Device) OpenUnlockResult(raw []byte) (*altchan.UnlockResult, error) {
+	if d.isClosed() {
+		return nil, ErrClosed
+	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	if d.closed { // checked again under the lock: Close may have run since
+		return nil, ErrClosed
+	}
 	p := d.pending
 	if p == nil {
 		return nil, ErrNoPending

@@ -23,11 +23,15 @@ var ErrBlob = errors.New("client: blob failed its checks")
 // UploadAttachment seals content and uploads it to the vault's mailbox.
 // It returns the blob reference to put in message.send's attachment.
 func (d *Device) UploadAttachment(ctx context.Context, content []byte, mime string) (*attwire.Blob, error) {
+	if d.isClosed() {
+		return nil, ErrClosed
+	}
 	d.mu.Lock()
 	v := d.st.Vault
 	if v == nil || v.Token == "" {
+		perr := d.notPairedLocked() // read under the lock
 		d.mu.Unlock()
-		return nil, ErrNotPaired
+		return nil, perr
 	}
 	url, mailbox, token := v.RelayURL, v.Mailbox, v.Token
 	d.mu.Unlock()
@@ -37,11 +41,21 @@ func (d *Device) UploadAttachment(ctx context.Context, content []byte, mime stri
 // UploadBlobRaw seals content and uploads it to any mailbox under token
 // (tests: a peer's mailbox, wrong tokens).
 func (d *Device) UploadBlobRaw(ctx context.Context, url, mailbox, token string, content []byte, mime string) (*attwire.Blob, error) {
+	if d.isClosed() {
+		return nil, ErrClosed
+	}
 	blob, key, sum, err := envelope.SealBlob(content)
 	if err != nil {
 		return nil, err
 	}
-	id, _, err := d.relayClient(url).PutBlob(ctx, mailbox, token, blob)
+	rc, done, err := d.borrowRelay(url)
+	if err != nil {
+		return nil, err
+	}
+	defer done()
+	ctx, cancel := d.bound(ctx) // Close ends the upload
+	defer cancel()
+	id, _, err := rc.PutBlob(ctx, mailbox, token, blob)
 	if err != nil {
 		return nil, err
 	}
@@ -50,15 +64,26 @@ func (d *Device) UploadBlobRaw(ctx context.Context, url, mailbox, token string, 
 
 // UploadBytes uploads data as is (tests of a malicious sender).
 func (d *Device) UploadBytes(ctx context.Context, data []byte) (string, error) {
+	if d.isClosed() {
+		return "", ErrClosed
+	}
 	d.mu.Lock()
 	v := d.st.Vault
 	if v == nil || v.Token == "" {
+		perr := d.notPairedLocked() // read under the lock
 		d.mu.Unlock()
-		return "", ErrNotPaired
+		return "", perr
 	}
 	url, mailbox, token := v.RelayURL, v.Mailbox, v.Token
 	d.mu.Unlock()
-	id, _, err := d.relayClient(url).PutBlob(ctx, mailbox, token, data)
+	rc, done, err := d.borrowRelay(url)
+	if err != nil {
+		return "", err
+	}
+	defer done()
+	ctx, cancel := d.bound(ctx) // Close ends the upload
+	defer cancel()
+	id, _, err := rc.PutBlob(ctx, mailbox, token, data)
 	return id, err
 }
 
@@ -77,6 +102,9 @@ func SendAttachmentBody(conn, text string, hasText bool, b *attwire.Blob, width,
 // answer, fetches the blob from the device's own mailbox, deletes it there
 // whether or not it passes, and checks it (§5.5): the photo, in memory.
 func (d *Device) FetchAttachment(ctx context.Context, answer json.RawMessage) ([]byte, string, error) {
+	if d.isClosed() {
+		return nil, "", ErrClosed
+	}
 	o, err := strictjson.ParseObject(answer)
 	if err != nil {
 		return nil, "", err
@@ -89,11 +117,21 @@ func (d *Device) FetchAttachment(ctx context.Context, answer json.RawMessage) ([
 	if err != nil {
 		return nil, "", err
 	}
-	data, err := d.own.GetBlob(ctx, b.ID)
+	d.mu.Lock()
+	url := d.st.RelayURL
+	d.mu.Unlock()
+	rc, done, err := d.borrowRelay(url)
 	if err != nil {
 		return nil, "", err
 	}
-	_ = d.own.DeleteBlob(ctx, b.ID)
+	defer done()
+	ctx, cancel := d.bound(ctx) // Close ends the download
+	defer cancel()
+	data, err := rc.GetBlob(ctx, b.ID)
+	if err != nil {
+		return nil, "", err
+	}
+	_ = rc.DeleteBlob(ctx, b.ID)
 	content, err := envelope.OpenBlob(data, b.Key, b.SHA256, b.Size)
 	if err != nil {
 		return nil, "", ErrBlob

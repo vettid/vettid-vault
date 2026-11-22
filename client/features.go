@@ -369,6 +369,9 @@ func (d *Device) AuditExport(ctx context.Context, q AuditQuery, format string, u
 // following the cursors (also across partial pages), and keeps the first
 // r.Count. Fewer come back when the retention dropped entries meanwhile.
 func (d *Device) AuditExportEntries(ctx context.Context, q AuditQuery, r *AuditExportResult) ([]json.RawMessage, error) {
+	if d.isClosed() {
+		return nil, ErrClosed
+	}
 	if r == nil || r.Count == 0 {
 		return nil, nil
 	}

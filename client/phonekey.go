@@ -29,22 +29,40 @@ func (d *Device) unlockSecretLocked(e uint64) []byte {
 // UnlockSecret returns the current epoch's unlock secret, and NextUnlockSecret
 // the next epoch's (pin.change, vault.secret.renew).
 func (d *Device) UnlockSecret() []byte {
+	if d.isClosed() {
+		return nil
+	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	if d.closed { // checked again under the lock: Close may have run since
+		return nil
+	}
 	return d.unlockSecretLocked(d.st.Epoch)
 }
 
 // NextUnlockSecret is the secret of the epoch after the current one.
 func (d *Device) NextUnlockSecret() []byte {
+	if d.isClosed() {
+		return nil
+	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	if d.closed { // checked again under the lock: Close may have run since
+		return nil
+	}
 	return d.unlockSecretLocked(d.st.Epoch + 1)
 }
 
 // AdvanceEpoch moves to the next epoch once the vault answered a change
 // of secret (pin.change, vault.secret.renew).
 func (d *Device) AdvanceEpoch() {
+	if d.isClosed() {
+		return
+	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	if d.closed { // checked again under the lock: Close may have run since
+		return
+	}
 	d.st.Epoch++
 }

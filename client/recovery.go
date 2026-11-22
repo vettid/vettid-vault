@@ -44,8 +44,14 @@ func (d *Device) RecoveryCredentialBackup() (backup, known bool) {
 // BuildRecoveryRegister builds vault.recovery.register (§11.11.3) for the
 // enclave e, attesting a fresh device key with the request's challenge.
 func (d *Device) BuildRecoveryRegister(userGUID string, qr *altchan.RecoveryCode, e *Enclave, att Attester) (*Request, error) {
+	if d.isClosed() {
+		return nil, ErrClosed
+	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	if d.closed { // checked again under the lock: Close may have run since
+		return nil, ErrClosed
+	}
 	if d.st.Vault != nil {
 		return nil, ErrProtocol // already paired with a vault
 	}
@@ -68,9 +74,9 @@ func (d *Device) BuildRecoveryRegister(userGUID string, qr *altchan.RecoveryCode
 	if err != nil {
 		return nil, err
 	}
-	ra := d.RelayAddr()
+	ra := d.relayAddrLocked()
 	body, err := (&altchan.RecoveryRegisterRequest{APIKey: apiKey, UserGUID: userGUID, VaultID: qr.VaultID, RequestID: rid,
-		RecoveryID: qr.RecoveryID, Code: qr.Code, IK: d.IdentityKey(), KEM: d.kem.Public(),
+		RecoveryID: qr.RecoveryID, Code: qr.Code, IK: d.identityKeyLocked(), KEM: d.kem.Public(),
 		Relay: altchan.RelayAddr{URL: ra.URL, Mailbox: ra.Mailbox, PK: ra.PK}, Name: d.st.Name, Attest: da}).Marshal()
 	if err != nil {
 		return nil, err
@@ -86,8 +92,14 @@ func (d *Device) BuildRecoveryRegister(userGUID string, qr *altchan.RecoveryCode
 
 // OpenRecoveryResult reads vault.recovery.result from the response slot.
 func (d *Device) OpenRecoveryResult(raw []byte) (*altchan.RecoveryResult, error) {
+	if d.isClosed() {
+		return nil, ErrClosed
+	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	if d.closed { // checked again under the lock: Close may have run since
+		return nil, ErrClosed
+	}
 	if d.st.Recovery == nil || d.st.Recovery.RequestID == "" {
 		return nil, ErrNoPending
 	}
@@ -122,6 +134,9 @@ func (d *Device) adoptBundle(bundle []byte) error {
 // (purpose app, ctx = recovery id) after its PIN unlock and waits for
 // device.paired.
 func (d *Device) CompleteRecoveryHandshake(ctx context.Context) error {
+	if d.isClosed() {
+		return ErrClosed
+	}
 	return d.CompleteRecoveryHandshakeAs(ctx, "")
 }
 
@@ -131,10 +146,14 @@ func (d *Device) CompleteRecoveryHandshake(ctx context.Context) error {
 // the invitation is that registration's (VAULT-MESSAGING 0.63.2 §11.14.6
 // "Pairing").
 func (d *Device) CompleteRecoveryHandshakeAs(ctx context.Context, recoveryID string) error {
+	if d.isClosed() {
+		return ErrClosed
+	}
 	d.mu.Lock()
 	if d.st.Vault == nil || d.st.Vault.Token == "" || d.st.Recovery == nil {
+		perr := d.notPairedLocked() // read under the lock
 		d.mu.Unlock()
-		return ErrNotPaired
+		return perr
 	}
 	if recoveryID == "" {
 		recoveryID = d.st.Recovery.RecoveryID
@@ -159,8 +178,14 @@ func (d *Device) CompleteRecoveryHandshakeAs(ctx context.Context, recoveryID str
 // assertion, and the signature of the device key. m is the verified
 // manifest.
 func (d *Device) BuildRecoveryOpen(userGUID, pin, password string, e *Enclave, m *manifest.Manifest, att Attester) (*Request, error) {
+	if d.isClosed() {
+		return nil, ErrClosed
+	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	if d.closed { // checked again under the lock: Close may have run since
+		return nil, ErrClosed
+	}
 	if d.st.Recovery == nil {
 		return nil, ErrNoPending
 	}
@@ -208,7 +233,7 @@ func (d *Device) BuildRecoveryOpen(userGUID, pin, password string, e *Enclave, m
 		return nil, err
 	}
 	req := &altchan.RecoveryOpenRequest{UserGUID: userGUID, VaultID: d.st.VaultID, RequestID: rid, RecoveryID: d.st.Recovery.RecoveryID,
-		DeviceIK: d.IdentityKey(), PIN: pin, Password: pw, UnlockSecret: us, Token: tok, Assertion: as,
+		DeviceIK: d.identityKeyLocked(), PIN: pin, Password: pw, UnlockSecret: us, Token: tok, Assertion: as,
 		ManifestSHA256: manifest.SHA256Hex(m.Bytes), ManifestSerial: m.Serial, Sig: ed25519.Sign(d.ik, []byte(sig))}
 	body, err := req.Marshal()
 	if err != nil {
@@ -226,8 +251,14 @@ func (d *Device) BuildRecoveryOpen(userGUID, pin, password string, e *Enclave, m
 // the vault from the bundle and keeps the token, so that the phone can run
 // its first handshake (CompleteRecoveryHandshake).
 func (d *Device) OpenRecoveryOpenResult(raw []byte) (*altchan.RecoveryOpenResult, error) {
+	if d.isClosed() {
+		return nil, ErrClosed
+	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	if d.closed { // checked again under the lock: Close may have run since
+		return nil, ErrClosed
+	}
 	if d.st.Recovery == nil || d.st.Recovery.RequestID == "" {
 		return nil, ErrNoPending
 	}

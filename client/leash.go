@@ -9,6 +9,7 @@ import (
 	"github.com/vettid/vettid-vault/vms/handshake"
 	"github.com/vettid/vettid-vault/vms/leashwire"
 	"github.com/vettid/vettid-vault/vms/strictjson"
+	"github.com/vettid/vettid-vault/vms/suite"
 )
 
 // LEASH (VAULT-MESSAGING §10.11): an app issues, revokes and lists an
@@ -132,16 +133,21 @@ func (d *Device) newerGrantSet(body []byte) bool {
 // grant_seq this agent received (nil if none).
 func (d *Device) LeashGrants() []json.RawMessage {
 	d.mu.Lock()
-	body := d.leashGrants
-	d.mu.Unlock()
-	if body == nil {
+	if d.closed || d.leashGrants == nil {
+		d.mu.Unlock()
 		return nil
 	}
+	// A copy taken under the lock: Close wipes the Device's own, and the
+	// grants returned must not share its bytes.
+	body := append(json.RawMessage(nil), d.leashGrants...)
+	d.mu.Unlock()
+	defer suite.Wipe(body)
 	o, err := strictjson.ParseObject(body)
 	if err != nil {
 		return nil
 	}
-	gs, _ := o.Array("grants")
+	defer wipeParsed(o)
+	gs, _ := o.Array("grants") // its own copies
 	return gs
 }
 
@@ -268,6 +274,10 @@ func (d *Device) LeashPresent(ctx context.Context, grantID string) (*leashwire.P
 		}
 		c = &cachedStatus{status: st, sig: sig, chain: chain, notAfter: ps.NotAfter, ttl: ps.NotAfter.Sub(ps.IssuedAt)}
 		d.mu.Lock()
+		if d.closed {
+			d.mu.Unlock()
+			return nil, ErrClosed
+		}
 		if d.leashStatus == nil {
 			d.leashStatus = map[string]*cachedStatus{}
 		}

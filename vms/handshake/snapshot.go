@@ -173,6 +173,16 @@ type InitiatorState struct {
 	Features []string `json:"features,omitempty"`
 }
 
+// Wipe wipes the state's secrets: the ephemeral seed, K_s, n_I and the
+// hs.init body (which may carry the app key and the unlock secret), for a
+// state taken only to be used at once (RestoreInitiator copies them).
+func (s *InitiatorState) Wipe() {
+	for _, b := range [][]byte{s.EphSeed, s.Ks, s.NI, s.Body} {
+		suite.Wipe(b)
+	}
+	s.EphSeed, s.Ks, s.NI, s.Body = nil, nil, nil, nil
+}
+
 // Export returns the initiator's persistent state, or ErrDone after it
 // completed or aborted.
 func (i *Initiator) Export() (InitiatorState, error) {

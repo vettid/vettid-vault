@@ -613,10 +613,30 @@ func (b *Builder) Bool(n string, v bool) *Builder {
 	return b
 }
 
-// Base64 adds a standard-base64 member.
+// Base64 adds a standard-base64 member, encoded straight into the
+// builder's buffer: no intermediate string holds the encoding (a Go string
+// cannot be wiped), so a secret member's only copy is the builder's, which
+// its caller wipes. With room reserved (Grow), nothing is copied at all.
 func (b *Builder) Base64(n string, v []byte) *Builder {
-	return b.String(n, base64.StdEncoding.EncodeToString(v))
+	b.name(n)
+	b.buf.WriteByte('"')
+	b.buf.Grow(base64.StdEncoding.EncodedLen(len(v)))
+	b.buf.Write(base64.StdEncoding.AppendEncode(b.buf.AvailableBuffer(), v))
+	b.buf.WriteByte('"')
+	return b
 }
+
+// MemberSize is an upper bound of the bytes a member named n adds to a
+// builder, given its value's encoded length valueLen: its name and value as
+// strings at their longest (every byte escaped as \u00XX), the colon and
+// a comma.
+func MemberSize(n string, valueLen int) int { return 6*len(n) + 2 + valueLen + 2 }
+
+// StringSize is an upper bound of a string value's encoded length.
+func StringSize(s string) int { return 6*len(s) + 2 }
+
+// Base64Size is a base64 value's encoded length, its quotes included.
+func Base64Size(v []byte) int { return base64.StdEncoding.EncodedLen(len(v)) + 2 }
 
 // Raw adds a member whose value is already-encoded JSON. The caller is
 // responsible for its validity.

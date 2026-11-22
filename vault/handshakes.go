@@ -1533,7 +1533,7 @@ func (m *Manager) handleResp(ctx context.Context, id string, raw []byte, sender 
 	}
 	res, err := ini.HandleResp(raw, from, now)
 	if err != nil {
-		if _, xerr := ini.Export(); errors.Is(xerr, handshake.ErrDone) {
+		if ini.Done() { // Export would marshal the hs.init again
 			// Aborted (§6.3): the handshake is gone.
 			m.audit(now, "hs_resp_aborted", og.PeerID)
 			delete(m.st.Outgoing, id)

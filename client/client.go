@@ -848,6 +848,11 @@ func (d *Device) startInit(purpose handshake.Purpose, ctxID, depositToken string
 	return d.startInitWith(purpose, ctxID, depositToken, profile, nil, "", d.cfg.Now(), nil)
 }
 
+// testInitiatorHook, set only by tests, sees each handshake this device
+// begins and the unlock secret it was given (wiped by then), before it is
+// deposited.
+var testInitiatorHook func(ini *handshake.Initiator, secret []byte)
+
 func (d *Device) startInitWith(purpose handshake.Purpose, ctxID, depositToken string, profile json.RawMessage, da *altchan.DeviceAttest, id string, now time.Time,
 	apiKey []byte) error {
 	if d.closed { // d.mu is held
@@ -888,12 +893,17 @@ func (d *Device) startInitWith(purpose handshake.Purpose, ctxID, depositToken st
 		Policy: d.policy(), Now: now, ID: id, DeviceAttest: da, APIKey: apiKey, UnlockSecret: secret,
 		Features: Features(),
 	})
+	suite.Wipe(secret) // the Initiator keeps a copy of its own
 	if err != nil {
 		return err
+	}
+	if testInitiatorHook != nil {
+		testInitiatorHook(ini, secret)
 	}
 	dctx, cancel := d.bound(context.Background()) // Close ends it
 	defer cancel()
 	if _, err := d.relayClient(v.RelayURL).Deposit(dctx, v.Mailbox, depositToken, ini.Envelope()); err != nil {
+		ini.Abort() // never kept: its keys and secrets go now
 		return err
 	}
 	d.ini = ini
@@ -2397,7 +2407,7 @@ func (d *Device) handleResp(ctx context.Context, raw []byte, sender ed25519.Publ
 	now := d.cfg.Now()
 	res, err := d.ini.HandleResp(raw, sender, now)
 	if err != nil {
-		if _, xerr := d.ini.Export(); errors.Is(xerr, handshake.ErrDone) {
+		if d.ini.Done() { // aborted (§6.3); Export would marshal the hs.init again
 			d.ini, d.hsFailed = nil, true
 		}
 		return

@@ -69,6 +69,10 @@ func (m *Manager) tableAHandshake(p *Peer, sender ed25519.PublicKey, now time.Ti
 	return true
 }
 
+// testPeekHook, set only by tests, sees the state peekResp exported and
+// the copy it restored from it, before the copy tries the answer.
+var testPeekHook func(st handshake.InitiatorState, c *handshake.Initiator)
+
 // peekResp opens an hs.resp on a copy of the handshake ini, which stays as
 // it is, and returns the result with its epoch destroyed, or nil if it
 // does not open or verify. The handshake pins the relay key on record
@@ -83,9 +87,14 @@ func (m *Manager) peekResp(p *Peer, ini *handshake.Initiator, raw []byte, sender
 	if err != nil {
 		return nil
 	}
+	defer st.Wipe() // a copy taken only to try the answer
 	c, err := handshake.RestoreInitiator(st, m.keys.ik)
 	if err != nil {
 		return nil
+	}
+	defer c.Abort() // the copy's eph and K_s, whatever the answer
+	if testPeekHook != nil {
+		testPeekHook(st, c)
 	}
 	from := sender
 	if pinned := c.ResponderRelayKey(); p.keepsRelayKey(pinned) && p.keepsRelayKey(sender) {

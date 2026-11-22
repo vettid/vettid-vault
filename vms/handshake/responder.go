@@ -260,6 +260,9 @@ func (p *PendingInit) Respond(cfg ResponderConfig) (*Responder, []byte, error) {
 		sched.Destroy()
 		return nil, nil, err
 	}
+	// Wiped once sealed, on every path: it holds the request and reconnect
+	// tokens; the Responder keeps only what it needs for hs.fin.
+	defer wipeBody(TypeResp, rb)
 	padded, err := envelope.EncodeInner(&envelope.Inner{ID: id, Type: TypeResp, TS: now, Body: rb, Features: cfg.Features}, envelope.ModeSealed)
 	if err != nil {
 		sched.Destroy()

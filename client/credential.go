@@ -57,6 +57,10 @@ func (d *Device) keep(ctx context.Context, o strictjson.Object) error {
 			return ErrProtocol
 		}
 		d.mu.Lock()
+		if d.closed {
+			d.mu.Unlock()
+			return ErrClosed
+		}
 		for _, u := range us {
 			exp, err := envelope.ParseTS(u.Expires)
 			if err != nil || len(u.EK) != suite.EKSize {
@@ -85,6 +89,10 @@ func (d *Device) keep(ctx context.Context, o strictjson.Object) error {
 		return ErrProtocol
 	}
 	d.mu.Lock()
+	if d.closed {
+		d.mu.Unlock()
+		return ErrClosed
+	}
 	d.st.Credential = &CredentialCopy{Blob: blob, Version: v}
 	d.mu.Unlock()
 	err = d.do(ctx, "credential.ack", map[string]any{"version": v})
@@ -135,6 +143,10 @@ func (d *Device) sealedOp(ctx context.Context, typ string, withBlob bool, payloa
 		return nil, nil, "", err
 	}
 	d.mu.Lock()
+	if d.closed {
+		d.mu.Unlock()
+		return nil, nil, "", ErrClosed
+	}
 	d.lastUTK = u
 	d.mu.Unlock()
 	return d.sealedWith(ctx, typ, u, nil, withBlob, payload, reply, nil)
@@ -143,6 +155,9 @@ func (d *Device) sealedOp(ctx context.Context, typ string, withBlob bool, payloa
 // CredentialRaw sends a credential operation with an explicit UTK and
 // blob (nil: none). It exists for tests of UTK reuse and stale blobs.
 func (d *Device) CredentialRaw(ctx context.Context, typ string, u UTK, blob []byte, payload map[string]any) (strictjson.Object, error) {
+	if d.isClosed() {
+		return nil, ErrClosed
+	}
 	o, _, _, err := d.sealedWith(ctx, typ, u, blob, blob != nil, payload, false, nil)
 	return o, err
 }
@@ -150,6 +165,9 @@ func (d *Device) CredentialRaw(ctx context.Context, typ string, u UTK, blob []by
 // CredentialRawExtra is CredentialRaw with extra outer members (a
 // transfer approval's transfer_id and signer).
 func (d *Device) CredentialRawExtra(ctx context.Context, typ string, u UTK, blob []byte, payload, extra map[string]any) (strictjson.Object, error) {
+	if d.isClosed() {
+		return nil, ErrClosed
+	}
 	o, _, _, err := d.sealedWith(ctx, typ, u, blob, blob != nil, payload, false, extra)
 	return o, err
 }
@@ -265,6 +283,10 @@ func (d *Device) credOpBefore(ctx context.Context, typ string, extra map[string]
 			return nil, nil, "", err
 		}
 		d.mu.Lock()
+		if d.closed {
+			d.mu.Unlock()
+			return nil, nil, "", ErrClosed
+		}
 		d.lastUTK = u
 		d.mu.Unlock()
 		if before != nil {
@@ -394,7 +416,9 @@ func (d *Device) CredentialRecover(ctx context.Context, password string) error {
 		return err
 	}
 	d.mu.Lock()
-	d.st.Recovery = nil
+	if !d.closed { // Close has dropped it already
+		d.st.Recovery = nil
+	}
 	d.mu.Unlock()
 	return nil
 }
@@ -496,8 +520,14 @@ func (d *Device) TransferReject(ctx context.Context, id string) error {
 // CredentialBlob returns this app's copy of the blob (the member's own
 // backup when the vault keeps none, §3.5.6).
 func (d *Device) CredentialBlob() []byte {
+	if d.isClosed() {
+		return nil
+	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	if d.closed { // checked again under the lock: Close may have run since
+		return nil
+	}
 	if d.st.Credential == nil {
 		return nil
 	}

@@ -320,6 +320,9 @@ func (a *MemberAPI) enclaveFor(ctx context.Context, release string, m *manifest.
 // manifest and the routed enclave, seal vault.enroll, post it, poll the
 // slot and open the result. It returns the vault id the API assigned.
 func (d *Device) EnrollVia(ctx context.Context, api *MemberAPI, userGUID, pin string, t Trust, att Attester) (string, *EnrollOutcome, error) {
+	if d.isClosed() {
+		return "", nil, ErrClosed
+	}
 	raw, err := api.Manifest(ctx)
 	if err != nil {
 		return "", nil, err
@@ -396,6 +399,9 @@ type UnlockOutcome struct {
 // UnlockVia unlocks the vault through the member API (§11.4). release is
 // "" (routed by the API) or a PCR0 (abandoning an unconfirmed move).
 func (d *Device) UnlockVia(ctx context.Context, api *MemberAPI, userGUID, pin string, t Trust, att Attester, o UnlockOptions, release string) (*UnlockOutcome, error) {
+	if d.isClosed() {
+		return nil, ErrClosed
+	}
 	raw, err := api.Manifest(ctx)
 	if err != nil {
 		return nil, err
@@ -466,6 +472,9 @@ func (a *MemberAPI) RecoveryOpen(ctx context.Context, vaultID, instanceID string
 // (release R, §11.14.6) and opens the result; on ok the phone then runs
 // its first handshake (CompleteRecoveryHandshake).
 func (d *Device) RecoveryOpenVia(ctx context.Context, api *MemberAPI, userGUID, pin, password string, t Trust, att Attester) (*altchan.RecoveryOpenResult, *Slot, error) {
+	if d.isClosed() {
+		return nil, nil, ErrClosed
+	}
 	raw, err := api.Manifest(ctx)
 	if err != nil {
 		return nil, nil, err
@@ -503,6 +512,9 @@ func (d *Device) RecoveryOpenVia(ctx context.Context, api *MemberAPI, userGUID, 
 // recovery_registered when the enclave said so in the clear (0.10.6),
 // which the app ignores (it reads the sealed result).
 func (d *Device) RecoveryRegisterVia(ctx context.Context, api *MemberAPI, userGUID string, qr *altchan.RecoveryCode, t Trust, att Attester) (*altchan.RecoveryResult, *Slot, error) {
+	if d.isClosed() {
+		return nil, nil, ErrClosed
+	}
 	raw, err := api.Manifest(ctx)
 	if err != nil {
 		return nil, nil, err
@@ -544,6 +556,9 @@ func (d *Device) RecoveryRegisterVia(ctx context.Context, api *MemberAPI, userGU
 // (release L), unconditional otherwise. The slot's code (release L) says
 // what the lock did: locked, not_running or stale.
 func (d *Device) LockVia(ctx context.Context, api *MemberAPI) (*Slot, error) {
+	if d.isClosed() {
+		return nil, ErrClosed
+	}
 	rid, err := envelope.NewULID(time.Now())
 	if err != nil {
 		return nil, err

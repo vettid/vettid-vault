@@ -2,6 +2,7 @@ package vault
 
 import (
 	"context"
+	"errors"
 	"sort"
 	"sync"
 	"time"
@@ -390,8 +391,8 @@ func (c *multiCollector) Next(ctx context.Context) ([]Message, error) {
 			continue
 		}
 		if err != nil {
-			if p.main {
-				return nil, err
+			if p.main || errors.Is(err, ErrRelayClosed) {
+				return nil, err // closed: the vault was zeroized, Run stops
 			}
 			// A failure: its collected-to does not move, and it holds back
 			// what was deposited later in the other mailboxes until it is

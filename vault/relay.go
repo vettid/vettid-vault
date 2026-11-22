@@ -12,6 +12,7 @@ import (
 
 	"github.com/vettid/vettid-relay/relayauth"
 	"github.com/vettid/vettid-relay/relayclient"
+	"github.com/vettid/vettid-vault/vms/suite"
 )
 
 // Message is one collected relay message.
@@ -122,9 +123,11 @@ func RelayCode(err error) string {
 // (injectable: the enclave dials through the parent in phase V3).
 type ClientRelay struct {
 	base string
-	key  ed25519.PrivateKey
+	key  ed25519.PrivateKey // its own copy, wiped by Close
 	http *http.Client
 	now  func() time.Time
+	g    *relayGuard  // this relay's calls and its key copy
+	fam  *relayFamily // the relays WithKey derives share it: Close closes them all
 
 	mu      sync.Mutex
 	clients map[string]*relayclient.Client
@@ -140,15 +143,244 @@ type ClientRelay struct {
 
 // NewClientRelay returns a Relay for the vault whose relay key is key and
 // whose mailbox lives at baseURL. httpClient may be nil.
+//
+// It keeps its own copy of key, so that the vault's wipe of its keys never
+// races a request in flight; Close ends the relay's requests and wipes the
+// copy.
 func NewClientRelay(baseURL string, key ed25519.PrivateKey, httpClient *http.Client, now func() time.Time) *ClientRelay {
+	return newClientRelay(baseURL, key, httpClient, now, &relayFamily{})
+}
+
+func newClientRelay(baseURL string, key ed25519.PrivateKey, httpClient *http.Client, now func() time.Time, fam *relayFamily) *ClientRelay {
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: 60 * time.Second}
 	}
 	if now == nil {
 		now = time.Now
 	}
-	return &ClientRelay{base: strings.TrimRight(baseURL, "/"), key: key, http: httpClient, now: now, clients: map[string]*relayclient.Client{},
-		deposits: map[string]*relayclient.Client{}}
+	own := append(ed25519.PrivateKey(nil), key...)
+	g := newRelayGuard(own)
+	fam.add(g)
+	return &ClientRelay{base: strings.TrimRight(baseURL, "/"), key: own, http: httpClient, now: now, g: g, fam: fam,
+		clients: map[string]*relayclient.Client{}, deposits: map[string]*relayclient.Client{}}
+}
+
+// Close ends the requests in flight of the relay and of every relay of its
+// family (WithKey's), waits for them up to relayCloseWait, and then wipes
+// all their key copies: also if the wait ran out, so that a request that
+// does not end leaves no key behind (fail secure). An answer that arrives
+// after Close is not used: the call returns ErrRelayClosed. Every later
+// call returns ErrRelayClosed. Close is for the end of the vault's keys
+// (zeroize); to drop one relay, use Release.
+func (r *ClientRelay) Close() { r.cut()(time.Now().Add(relayCloseWait)) }
+
+// cut is Close in two steps: it refuses new calls and cancels those in
+// flight of the whole family now, and returns the wait and wipe, which the
+// caller runs later against a deadline of its own (zeroize: one deadline
+// for every family, after it has destroyed its other secrets).
+func (r *ClientRelay) cut() func(deadline time.Time) {
+	gs := r.fam.begin()
+	return func(deadline time.Time) {
+		for _, g := range gs {
+			g.close(deadline)
+		}
+	}
+}
+
+// Release closes this relay alone, as Close does, and wipes its key copy:
+// for a key the vault drops while its other relays go on (a pending key
+// given up, a recovery's relays rebuilt). The family no longer holds it.
+func (r *ClientRelay) Release() {
+	r.fam.remove(r.g)
+	r.g.close(time.Now().Add(relayCloseWait))
+}
+
+// relayCloseWait bounds how long a close waits for the requests in flight
+// it has cancelled. Real transports end a cancelled request in
+// milliseconds; the bound is for one that does not (the key copy is wiped
+// at it anyway), and it is spent under the Manager's lock.
+var relayCloseWait = 2 * time.Second
+
+// ErrRelayClosed is returned by a relay call once the relay is closed
+// (the vault zeroized).
+var ErrRelayClosed = errors.New("vault: relay closed")
+
+// relayFamily is the guards of a ClientRelay and the relays WithKey
+// derived from it: close ends them all.
+type relayFamily struct {
+	mu     sync.Mutex
+	guards []*relayGuard
+	closed bool
+}
+
+func (f *relayFamily) add(g *relayGuard) {
+	f.mu.Lock()
+	closed := f.closed
+	if !closed {
+		f.guards = append(f.guards, g)
+	}
+	f.mu.Unlock()
+	if closed {
+		g.close(time.Now()) // a relay derived after Close: never usable
+	}
+}
+
+// begin closes the family: it cancels every guard's calls at once and
+// returns the guards, for the caller to wait for against one deadline (the
+// bound is one wait, not one per relay). A second begin returns none.
+func (f *relayFamily) begin() []*relayGuard {
+	f.mu.Lock()
+	f.closed = true
+	gs := f.guards
+	f.guards = nil
+	f.mu.Unlock()
+	for _, g := range gs {
+		g.begin()
+	}
+	return gs
+}
+
+// remove takes a released relay's guard out of the family.
+func (f *relayFamily) remove(g *relayGuard) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for i, x := range f.guards {
+		if x == g {
+			f.guards = append(f.guards[:i], f.guards[i+1:]...)
+			return
+		}
+	}
+}
+
+// relayGuard ties one ClientRelay to its key copy: each call is counted
+// and its context cut short by close; close waits for the calls, then
+// wipes the copy.
+type relayGuard struct {
+	ctx    context.Context
+	cancel context.CancelFunc
+
+	mu       sync.Mutex
+	idle     *sync.Cond // signalled as calls end, and when the wait runs out
+	inflight int
+	closed   bool
+	key      ed25519.PrivateKey
+}
+
+func newRelayGuard(key ed25519.PrivateKey) *relayGuard {
+	g := &relayGuard{key: key}
+	g.ctx, g.cancel = context.WithCancel(context.Background())
+	g.idle = sync.NewCond(&g.mu)
+	return g
+}
+
+// enter begins a call: ctx, cut short by close, and done, which ends it.
+func (g *relayGuard) enter(ctx context.Context) (context.Context, func(), error) {
+	g.mu.Lock()
+	if g.closed {
+		g.mu.Unlock()
+		return nil, nil, ErrRelayClosed
+	}
+	g.inflight++
+	g.mu.Unlock()
+	c, cancel := context.WithCancel(ctx)
+	stop := context.AfterFunc(g.ctx, cancel)
+	return c, func() {
+		stop()
+		cancel()
+		g.mu.Lock()
+		g.inflight--
+		g.idle.Broadcast()
+		g.mu.Unlock()
+	}, nil
+}
+
+func (g *relayGuard) isClosed() bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.closed
+}
+
+// begin refuses new calls and cancels those in flight.
+func (g *relayGuard) begin() {
+	g.mu.Lock()
+	g.closed = true
+	g.mu.Unlock()
+	g.cancel()
+}
+
+// close begins, waits for the calls in flight until deadline, and wipes
+// the key whether or not they ended. It reports whether they all ended. A
+// second close does nothing.
+func (g *relayGuard) close(deadline time.Time) bool {
+	g.begin()
+	g.mu.Lock()
+	if g.key == nil {
+		g.mu.Unlock()
+		return true // already wiped
+	}
+	g.mu.Unlock()
+	timedOut := false
+	t := time.AfterFunc(time.Until(deadline), func() {
+		g.mu.Lock()
+		timedOut = true
+		g.idle.Broadcast()
+		g.mu.Unlock()
+	})
+	defer t.Stop()
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	for g.inflight > 0 && !timedOut {
+		g.idle.Wait()
+	}
+	if g.key == nil {
+		return true // a concurrent close wiped it
+	}
+	if g.inflight == 0 {
+		suite.Wipe(g.key)
+	} else {
+		// The timeout path: a call that ignored its cancel may still be
+		// signing with the copy. Only the seed is wiped. Ed25519 signing
+		// reads the seed and the public half separately and does not check
+		// one against the other, so a real seed read with a zeroed public
+		// half would sign with the true scalar under a wrong public key,
+		// and two such signatures over one message give the scalar away.
+		// With the public half (public) left, a torn read gives a seed, and
+		// so a scalar and nonce, unrelated to the real ones: nothing leaks.
+		// The call's answer is dropped (ErrRelayClosed).
+		suite.Wipe(g.key[:ed25519.SeedSize])
+	}
+	g.key = nil
+	if testRelayClosedHook != nil {
+		testRelayClosedHook(g.inflight == 0)
+	}
+	return g.inflight == 0
+}
+
+// testRelayClosedHook, set only by tests, learns whether a relay's close
+// saw every call end before it wiped.
+var testRelayClosedHook func(allEnded bool)
+
+// guarded runs a call of r under its guard: ctx is cut short by Close, and
+// a result that arrives after Close is not used (ErrRelayClosed), since the
+// key it was made with may be wiped.
+func guarded[T any](r *ClientRelay, ctx context.Context, f func(context.Context) (T, error)) (T, error) {
+	var zero T
+	c, done, err := r.g.enter(ctx)
+	if err != nil {
+		return zero, err
+	}
+	defer done()
+	v, err := f(c)
+	if r.g.isClosed() {
+		return zero, ErrRelayClosed
+	}
+	return v, err
+}
+
+// guardedErr is guarded for a call with no result.
+func guardedErr(r *ClientRelay, ctx context.Context, f func(context.Context) error) error {
+	_, err := guarded(r, ctx, func(c context.Context) (struct{}, error) { return struct{}{}, f(c) })
+	return err
 }
 
 func (r *ClientRelay) client(url string) *relayclient.Client {
@@ -181,7 +413,7 @@ func (r *ClientRelay) depositClient(url string) *relayclient.Client {
 func (r *ClientRelay) BaseURL() string { return r.base }
 
 func (r *ClientRelay) Register(ctx context.Context) (Limits, error) {
-	reg, err := r.client(r.base).Register(ctx)
+	reg, err := guarded(r, ctx, func(c context.Context) (relayclient.Registration, error) { return r.client(r.base).Register(c) })
 	return reg.Limits, err
 }
 
@@ -193,23 +425,27 @@ func (r *ClientRelay) once() *relayclient.Client {
 }
 
 func (r *ClientRelay) Rotate(ctx context.Context, newKey ed25519.PrivateKey) (string, error) {
-	return r.once().Rotate(ctx, newKey)
+	return guarded(r, ctx, func(c context.Context) (string, error) { return r.once().Rotate(c, newKey) })
 }
 
 func (r *ClientRelay) RegisterCreated(ctx context.Context) (Limits, bool, error) {
-	reg, err := r.once().Register(ctx)
+	reg, err := guarded(r, ctx, func(c context.Context) (relayclient.Registration, error) { return r.once().Register(c) })
 	return reg.Limits, reg.Created, err
 }
 
+// WithKey is a relay for another of the vault's relay keys, of r's family:
+// Close on any of them closes them all, Release only the one.
 func (r *ClientRelay) WithKey(key ed25519.PrivateKey) Relay {
-	return NewClientRelay(r.base, key, r.http, r.now)
+	return newClientRelay(r.base, key, r.http, r.now, r.fam)
 }
 
 func (r *ClientRelay) Deposit(ctx context.Context, relayURL, mailbox, token string, payload []byte) (string, error) {
-	if ctx.Value(oneAttemptKey{}) != nil {
-		return r.depositClient(relayURL).Deposit(ctx, mailbox, token, payload)
-	}
-	return r.client(relayURL).Deposit(ctx, mailbox, token, payload)
+	return guarded(r, ctx, func(c context.Context) (string, error) {
+		if c.Value(oneAttemptKey{}) != nil {
+			return r.depositClient(relayURL).Deposit(c, mailbox, token, payload)
+		}
+		return r.client(relayURL).Deposit(c, mailbox, token, payload)
+	})
 }
 
 // oneAttemptKey marks a context whose deposit makes one attempt.
@@ -222,39 +458,59 @@ func withOneAttempt(ctx context.Context) context.Context {
 }
 
 func (r *ClientRelay) Revoke(ctx context.Context, kind, value string) error {
-	return r.client(r.base).Revoke(ctx, relayclient.Revocation{Kind: kind, Value: value})
+	return guardedErr(r, ctx, func(c context.Context) error {
+		return r.client(r.base).Revoke(c, relayclient.Revocation{Kind: kind, Value: value})
+	})
 }
 
 func (r *ClientRelay) PutClaim(ctx context.Context, data []byte, ttl time.Duration) (string, time.Time, error) {
-	return r.client(r.base).PutClaim(ctx, data, ttl)
+	type claim struct {
+		id  string
+		exp time.Time
+	}
+	v, err := guarded(r, ctx, func(c context.Context) (claim, error) {
+		id, exp, err := r.client(r.base).PutClaim(c, data, ttl)
+		return claim{id, exp}, err
+	})
+	return v.id, v.exp, err
 }
 
 func (r *ClientRelay) GetClaim(ctx context.Context, relayURL, claimID string) ([]byte, error) {
-	return r.client(relayURL).GetClaim(ctx, claimID)
+	return guarded(r, ctx, func(c context.Context) ([]byte, error) { return r.client(relayURL).GetClaim(c, claimID) })
 }
 
 func (r *ClientRelay) DeleteClaim(ctx context.Context, claimID string) error {
-	return r.client(r.base).DeleteClaim(ctx, claimID)
+	return guardedErr(r, ctx, func(c context.Context) error { return r.client(r.base).DeleteClaim(c, claimID) })
 }
 
 func (r *ClientRelay) DeleteMailbox(ctx context.Context) error {
-	return r.client(r.base).DeleteMailbox(ctx)
+	return guardedErr(r, ctx, func(c context.Context) error { return r.client(r.base).DeleteMailbox(c) })
 }
 
 func (r *ClientRelay) MintToken(sub ed25519.PublicKey, ttl time.Duration, jti string, quota *relayauth.Quota, ownerDevice bool) (string, error) {
-	return r.client(r.base).MintToken(relayauth.EncodeKey(sub), r.base, relayclient.TokenOptions{TTL: ttl, JTI: jti, Quota: quota, OwnerDevice: ownerDevice})
+	return guarded(r, context.Background(), func(context.Context) (string, error) {
+		return r.client(r.base).MintToken(relayauth.EncodeKey(sub), r.base, relayclient.TokenOptions{TTL: ttl, JTI: jti, Quota: quota, OwnerDevice: ownerDevice})
+	})
 }
 
 func (r *ClientRelay) PutBlob(ctx context.Context, relayURL, mailbox, token string, data []byte) (string, time.Time, error) {
-	return r.client(relayURL).PutBlob(ctx, mailbox, token, data)
+	type put struct {
+		id  string
+		exp time.Time
+	}
+	v, err := guarded(r, ctx, func(c context.Context) (put, error) {
+		id, exp, err := r.client(relayURL).PutBlob(c, mailbox, token, data)
+		return put{id, exp}, err
+	})
+	return v.id, v.exp, err
 }
 
 func (r *ClientRelay) GetBlob(ctx context.Context, id string) ([]byte, error) {
-	return r.client(r.base).GetBlob(ctx, id)
+	return guarded(r, ctx, func(c context.Context) ([]byte, error) { return r.client(r.base).GetBlob(c, id) })
 }
 
 func (r *ClientRelay) DeleteBlob(ctx context.Context, id string) error {
-	return r.client(r.base).DeleteBlob(ctx, id)
+	return guardedErr(r, ctx, func(c context.Context) error { return r.client(r.base).DeleteBlob(c, id) })
 }
 
 // maxBlobPages bounds a listing (500 a page): a mailbox's blobs are bounded
@@ -263,6 +519,10 @@ func (r *ClientRelay) DeleteBlob(ctx context.Context, id string) error {
 const maxBlobPages = 64
 
 func (r *ClientRelay) ListBlobs(ctx context.Context) (BlobList, error) {
+	return guarded(r, ctx, r.listBlobs)
+}
+
+func (r *ClientRelay) listBlobs(ctx context.Context) (BlobList, error) {
 	c := r.client(r.base)
 	var out BlobList
 	after := ""
@@ -282,7 +542,9 @@ func (r *ClientRelay) ListBlobs(ctx context.Context) (BlobList, error) {
 }
 
 func (r *ClientRelay) MintOpenToken(ttl time.Duration, jti string) (string, error) {
-	return r.client(r.base).MintOpenToken(r.base, ttl, jti)
+	return guarded(r, context.Background(), func(context.Context) (string, error) {
+		return r.client(r.base).MintOpenToken(r.base, ttl, jti)
+	})
 }
 
 // MaxBatch is the collect batch size (§8.3).
@@ -301,9 +563,10 @@ const (
 func (r *ClientRelay) Collector(ctx context.Context, websocket bool) (Collector, error) {
 	c := r.client(r.base)
 	if !websocket {
-		return &pollCollector{c: c, wait: LongPollWait, spread: LongPollSpread}, nil
+		return &pollCollector{r: r, c: c, wait: LongPollWait, spread: LongPollSpread}, nil
 	}
-	s, err := c.OpenStream(ctx)
+	// Only the stream's opening is signed; its messages and acks are not.
+	s, err := guarded(r, ctx, c.OpenStream)
 	if err != nil {
 		return nil, err
 	}
@@ -313,17 +576,20 @@ func (r *ClientRelay) Collector(ctx context.Context, websocket bool) (Collector,
 // NewPollCollector returns a long-poll collector with a custom wait (tests
 // use short waits).
 func (r *ClientRelay) NewPollCollector(wait time.Duration) Collector {
-	return &pollCollector{c: r.client(r.base), wait: wait}
+	return &pollCollector{r: r, c: r.client(r.base), wait: wait}
 }
 
 type pollCollector struct {
+	r      *ClientRelay // its calls run under r's guard: Close ends a long poll
 	c      *relayclient.Client
 	wait   time.Duration
 	spread time.Duration // 0: every poll waits the same
 }
 
 func (p *pollCollector) Next(ctx context.Context) ([]Message, error) {
-	return p.c.Collect(ctx, pollWait(p.wait, p.spread), MaxBatch)
+	return guarded(p.r, ctx, func(c context.Context) ([]Message, error) {
+		return p.c.Collect(c, pollWait(p.wait, p.spread), MaxBatch)
+	})
 }
 
 // pollWait is one poll's wait: whole seconds, evenly from wait - spread
@@ -334,8 +600,10 @@ func pollWait(wait, spread time.Duration) time.Duration {
 	}
 	return wait - time.Duration(rand.Int64N(int64(spread/time.Second)+1))*time.Second
 }
-func (p *pollCollector) Ack(ctx context.Context, id string) error { return p.c.Ack(ctx, id) }
-func (p *pollCollector) Close() error                             { return nil }
+func (p *pollCollector) Ack(ctx context.Context, id string) error {
+	return guardedErr(p.r, ctx, func(c context.Context) error { return p.c.Ack(c, id) })
+}
+func (p *pollCollector) Close() error { return nil }
 
 // wsCollector gathers pushed messages into batches: it blocks for the
 // first, then takes whatever else arrives within a short window.

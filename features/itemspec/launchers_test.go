@@ -129,12 +129,12 @@ func TestShortNamesRefused(t *testing.T) {
 	}
 	// A run's program.
 	body := `{"op":"item.run","item_id":"i","field_id":"password","program":"C:\\PROGRA~1\\Git\\bin\\GIT~1.EXE",` +
-		`"sha256":"` + hashA + `","argv":["git"],"cwd":"/","how":"env","name":"TOKEN"}`
+		`"sha256":"` + hashA + `","argv":["git"],"how":"env","name":"TOKEN"}`
 	if _, err := parseRunBody(t, body); err == nil {
 		t.Error("a run's short name parsed")
 	}
 	ok := `{"op":"item.run","item_id":"i","field_id":"password","program":"C:\\PROGRA~1\\Git\\bin\\git.exe",` +
-		`"sha256":"` + hashA + `","argv":["git"],"cwd":"/","how":"env","name":"TOKEN"}`
+		`"sha256":"` + hashA + `","argv":["git"],"how":"env","name":"TOKEN"}`
 	if _, err := parseRunBody(t, ok); err != nil {
 		t.Errorf("a short name before the last element: %v", err)
 	}

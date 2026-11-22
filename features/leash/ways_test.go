@@ -378,7 +378,7 @@ func TestCatalogWays(t *testing.T) {
 		t.Fatal(res.Code)
 	}
 	body := string(res.Body)
-	wantWifi := `"ways":["use","run","proxy"],"programs":[{"program":"git","path":"/usr/bin/git","env":["GH_HOST"]}],"hosts":["api.example.com"]}`
+	wantWifi := `"ways":["use","run","proxy"],"programs":[{"program":"git","path":"/usr/bin/git","env":["GH_HOST"]}],"folders":[],"hosts":["api.example.com"]}`
 	wantBank := `"labels":[{"field_id":"f1","label":"Password","kind":"password"},{"field_id":"f2","label":"Address","kind":"address"}],"ways":["use"]}`
 	if !strings.Contains(body, wantWifi) || !strings.Contains(body, wantBank) {
 		t.Fatalf("catalog: %s", body)

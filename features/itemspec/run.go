@@ -161,7 +161,22 @@ func validSHA256(s string) bool {
 // at most MaxProgram bytes of UTF-8, with no character ValidProgram
 // refuses (the bounds are not in the spec).
 func validCwd(p string) bool {
-	return IsAbsProgram(p) && len(p) <= MaxProgram && utf8.ValidString(p) && showable(p) && cleanPath(p, true)
+	return IsAbsProgram(p) && len(p) <= MaxProgram && utf8.ValidString(p) && showable(p) && cleanPath(p, true) && !dotsOnlyElement(p)
+}
+
+// dotsOnlyElement reports whether an element of the absolute path p is
+// made only of dots and spaces (". ", ".. ", "...", " "): Windows drops
+// trailing dots and spaces, so ".. " may name the parent, and the vault's
+// element-by-element match would see a folder the computer does not
+// (0.93.1). cleanPath already refuses "." and "..".
+func dotsOnlyElement(p string) bool {
+	_, els := pathElements(p)
+	for _, e := range els {
+		if strings.Trim(e, ". ") == "" {
+			return true
+		}
+	}
+	return false
 }
 
 // MatchProgram returns the entry of programs a run's program matches
@@ -414,7 +429,7 @@ func JudgeRun(w *ItemWays, r *Run) RunJudgement {
 		j.CwdFolder = &f
 	}
 	for _, in := range r.Inputs {
-		if _, ok := MatchFolder(w.Run.Folders, in.Path, false); !ok {
+		if _, ok := MatchFolderUnder(w.Run.Folders, in.Path); !ok {
 			return RunJudgement{Refusal: "cwd_not_allowed", Where: "input", Path: in.Path}
 		}
 	}

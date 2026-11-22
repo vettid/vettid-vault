@@ -82,6 +82,14 @@ func TestParseFoldersRefuses(t *testing.T) {
 		"above":              foldersBody(folder("/home/al/work", false), folder("/home/al", false)),
 		"under, folded":      foldersBody(folder("/home/AL", false), folder("/home/al/work", false)),
 		"under, long s":      foldersBody(folder("/home/ſ", false), folder("/home/s/work", false)),
+		"equal, NFC":         foldersBody(folder("/home/é", false), folder("/home/é", false)),
+		"under, NFC":         foldersBody(folder("/a/café", false), folder("/a/café/x", false)),
+		"equal, J caron":     foldersBody(folder("/a/J̌", false), folder("/a/ǰ", false)),
+		"dots-space element": foldersBody(folder("/home/al/.. /x", false)),
+		"dot-space element":  foldersBody(folder("/home/al/. /x", false)),
+		"three dots":         foldersBody(folder("/home/al/.../x", false)),
+		"space element":      foldersBody(folder("/home/al/ /x", false)),
+		"trailing dots-only": foldersBody(folder("/home/al/..  ", false)),
 		"equal, Kelvin sign": foldersBody(folder("/home/K", false), folder("/home/k", false)),
 		"folders, no run":    `{"ways":["use"],"run":{"programs":[],"folders":[` + folder("/home/al", false) + `]}}`,
 	}
@@ -316,20 +324,22 @@ func TestParseRunFiles(t *testing.T) {
 		return in
 	}
 	ok := map[string]func(m map[string]any){
-		"16 inputs":            func(m map[string]any) { m["inputs"] = inputs(MaxRunInputs, 1) },
-		"16 MiB":               func(m map[string]any) { m["inputs"] = inputs(1, MaxRunInputSize) },
-		"64 MiB in all":        func(m map[string]any) { m["inputs"] = inputs(4, MaxRunInputSize) },
-		"size 0":               func(m map[string]any) { m["inputs"] = inputs(1, 0) },
-		"paths 16,384":         func(m map[string]any) { m["inputs"] = pathsOf(MaxRunInputPaths) },
-		"no inputs":            func(m map[string]any) { delete(m, "inputs") },
-		"empty inputs":         func(m map[string]any) { m["inputs"] = []any{} },
-		"no output":            func(m map[string]any) { delete(m, "output") },
-		"1 name":               func(m map[string]any) { m["output"].(map[string]any)["names"] = outNames(1) },
-		"16 names":             func(m map[string]any) { m["output"].(map[string]any)["names"] = outNames(MaxRunOutputs) },
-		"output at a root":     func(m map[string]any) { m["output"].(map[string]any)["folder"] = "/" }, // refused by the binding, not the form
-		"a name with spaces":   func(m map[string]any) { m["output"].(map[string]any)["names"] = []any{"my report.pdf"} },
-		"a name with a dot":    func(m map[string]any) { m["output"].(map[string]any)["names"] = []any{".hidden"} },
-		"CONSOLE is not CON":   func(m map[string]any) { m["output"].(map[string]any)["names"] = []any{"CONSOLE.txt", "COM10", "LPT0"} },
+		"16 inputs":          func(m map[string]any) { m["inputs"] = inputs(MaxRunInputs, 1) },
+		"16 MiB":             func(m map[string]any) { m["inputs"] = inputs(1, MaxRunInputSize) },
+		"64 MiB in all":      func(m map[string]any) { m["inputs"] = inputs(4, MaxRunInputSize) },
+		"size 0":             func(m map[string]any) { m["inputs"] = inputs(1, 0) },
+		"paths 16,384":       func(m map[string]any) { m["inputs"] = pathsOf(MaxRunInputPaths) },
+		"no inputs":          func(m map[string]any) { delete(m, "inputs") },
+		"empty inputs":       func(m map[string]any) { m["inputs"] = []any{} },
+		"no output":          func(m map[string]any) { delete(m, "output") },
+		"1 name":             func(m map[string]any) { m["output"].(map[string]any)["names"] = outNames(1) },
+		"16 names":           func(m map[string]any) { m["output"].(map[string]any)["names"] = outNames(MaxRunOutputs) },
+		"output at a root":   func(m map[string]any) { m["output"].(map[string]any)["folder"] = "/" }, // refused by the binding, not the form
+		"a name with spaces": func(m map[string]any) { m["output"].(map[string]any)["names"] = []any{"my report.pdf"} },
+		"a name with a dot":  func(m map[string]any) { m["output"].(map[string]any)["names"] = []any{".hidden"} },
+		"CONSOLE is not CON": func(m map[string]any) {
+			m["output"].(map[string]any)["names"] = []any{"CONSOLE.txt", "COM10", "LPT10", "COMA", "CONIN"}
+		},
 		"a 255-byte name":      func(m map[string]any) { m["output"].(map[string]any)["names"] = []any{strings.Repeat("é", 127) + "a"} },
 		"names differ in case": func(m map[string]any) { m["output"].(map[string]any)["names"] = []any{"a", "b"} },
 	}
@@ -356,6 +366,14 @@ func TestParseRunFiles(t *testing.T) {
 		"inputs not an array":   func(m map[string]any) { m["inputs"] = map[string]any{} },
 		"an input reserved":     func(m map[string]any) { m["inputs"] = []any{map[string]any{"path": "/a/con.txt", "size": 1}} },
 		"an input trailing dot": func(m map[string]any) { m["inputs"] = []any{map[string]any{"path": "/a/b.", "size": 1}} },
+		"inputs, NFC": func(m map[string]any) {
+			m["inputs"] = []any{map[string]any{"path": "/a/é.pdf", "size": 1}, map[string]any{"path": "/b/é.pdf", "size": 1}}
+		},
+		"input dots-only element": func(m map[string]any) {
+			m["inputs"] = []any{map[string]any{"path": "/home/al/work/.. /.ssh/id", "size": 1}}
+		},
+		"output dots-only element": func(m map[string]any) { m["output"].(map[string]any)["folder"] = "/home/al/out/. /.. /.. /.ssh" },
+		"cwd dots-only element":    func(m map[string]any) { m["cwd"] = "/home/al/work/.. " },
 		"inputs, long s": func(m map[string]any) {
 			m["inputs"] = []any{map[string]any{"path": "/a/ſ.pdf", "size": 1}, map[string]any{"path": "/b/s.pdf", "size": 1}}
 		},
@@ -385,6 +403,17 @@ func TestParseRunFiles(t *testing.T) {
 		"nul.txt":                func(m map[string]any) { m["output"].(map[string]any)["names"] = []any{"nul.txt"} },
 		"Com1.tar.gz":            func(m map[string]any) { m["output"].(map[string]any)["names"] = []any{"Com1.tar.gz"} },
 		"lpt9":                   func(m map[string]any) { m["output"].(map[string]any)["names"] = []any{"lpt9"} },
+		"lpt0":                   func(m map[string]any) { m["output"].(map[string]any)["names"] = []any{"LPT0"} },
+		"com0.txt":               func(m map[string]any) { m["output"].(map[string]any)["names"] = []any{"com0.txt"} },
+		"COM superscript 1":      func(m map[string]any) { m["output"].(map[string]any)["names"] = []any{"COM¹"} },
+		"lpt superscript 3 ext":  func(m map[string]any) { m["output"].(map[string]any)["names"] = []any{"lpt³.log"} },
+		"CONIN$":                 func(m map[string]any) { m["output"].(map[string]any)["names"] = []any{"CONIN$"} },
+		"conout$.txt":            func(m map[string]any) { m["output"].(map[string]any)["names"] = []any{"conout$.txt"} },
+		"CONIN$.txt":             func(m map[string]any) { m["output"].(map[string]any)["names"] = []any{"CONIN$.txt"} },
+		"CON .txt":               func(m map[string]any) { m["output"].(map[string]any)["names"] = []any{"CON .txt"} },
+		"nul  .log":              func(m map[string]any) { m["output"].(map[string]any)["names"] = []any{"nul  .log"} },
+		"COM superscript 2":      func(m map[string]any) { m["output"].(map[string]any)["names"] = []any{"COM²"} },
+		"LPT superscript 3":      func(m map[string]any) { m["output"].(map[string]any)["names"] = []any{"LPT³"} },
 		"prn .txt":               func(m map[string]any) { m["output"].(map[string]any)["names"] = []any{"prn .txt"} },
 		"aux":                    func(m map[string]any) { m["output"].(map[string]any)["names"] = []any{"aux"} },
 		"a name not a string":    func(m map[string]any) { m["output"].(map[string]any)["names"] = []any{1} },
@@ -450,5 +479,57 @@ func TestFoldersWire(t *testing.T) {
 	c.Run.Folders[0].Write = false
 	if !p.Run.Folders[0].Write {
 		t.Fatal("Clone shares the folders")
+	}
+}
+
+// 0.93.1: an input lies strictly under an entry, never equal to it.
+func TestJudgeRunInputEqualToEntry(t *testing.T) {
+	r := pinnedRun()
+	r.Inputs = []RunInput{{"/home/al/docs", 1}}
+	if j := JudgeRun(bound(Folder{Path: "/home/al/docs"}), r); j.Refusal != "cwd_not_allowed" || j.Where != "input" {
+		t.Fatalf("an input equal to its entry: %+v", j)
+	}
+}
+
+// 0.93.1: an empty inputs list is the same as none: no flag, no referral
+// for it, and no folders on the approval.
+func TestEmptyInputsAreNone(t *testing.T) {
+	r, err := parseRunReq(t, runBody(func(m map[string]any) { m["inputs"] = []any{}; delete(m, "cwd") }))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if j := JudgeRun(bound(), r); j.Refusal != "" || j.Refer || j.Folders || len(j.Flags) != 0 {
+		t.Fatalf("empty inputs: %+v", j)
+	}
+}
+
+// The limits as the spec writes them, not through the constants.
+func TestFolderLimitsLiteral(t *testing.T) {
+	if MaxFolders != 16 || MaxRunInputs != 16 || MaxProgram != 4096 || MaxRunInputSize != 16777216 || MaxRunInputTotal != 67108864 ||
+		MaxRunInputPaths != 16384 || MaxRunOutputs != 16 || MaxFlatName != 255 {
+		t.Fatal("a limit differs from VAULT-MESSAGING 0.93.0 §10.11")
+	}
+}
+
+// 0.93.1: the spec's pairs through the real key (FolderKey, and the names'
+// key): equal pairs are one key, distinct ones are not.
+func TestFoldKeyPairs(t *testing.T) {
+	same := [][2]string{
+		{"/a/caf\u00e9", "/a/cafe\u0301"}, {"/a/J\u030c", "/a/\u01f0"}, {"/home/al/Work", "/home/al/work"},
+		{"/a/aί", "/a/áͅ"}, {"/a/\u017f", "/a/S"}, {"/a/\u212a", "/a/k"}, {"/a/x.", "/a/x"}, {"/a/x ", "/a/x"},
+		{"/a/b", "/a" + win("", "b")}, {win("C:", "x"), win("c:", "X")}, {win("C:", "x"), "C:/x"},
+	}
+	for _, p := range same {
+		if strings.Join(FolderKey(p[0]), "/") != strings.Join(FolderKey(p[1]), "/") {
+			t.Errorf("%q and %q: two keys %q %q", p[0], p[1], FolderKey(p[0]), FolderKey(p[1]))
+		}
+	}
+	for _, p := range [][2]string{{"/a/\u00df", "/a/ss"}, {"/a/work", "/a/work2"}, {"/a/e", "/a/\u00e9"}, {"/x", win("C:", "x")}} {
+		if strings.Join(FolderKey(p[0]), "/") == strings.Join(FolderKey(p[1]), "/") {
+			t.Errorf("%q and %q: one key", p[0], p[1])
+		}
+	}
+	if foldCase("\u01f0.txt") != foldCase("J\u030c.TXT") || foldCase("a.txt") == foldCase("b.txt") {
+		t.Error("the names' key")
 	}
 }

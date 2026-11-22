@@ -267,3 +267,19 @@ func TestItemSetFolders(t *testing.T) {
 		t.Fatalf("list: %s %s", list.Code, list.Body)
 	}
 }
+
+// A folders run sent straight to the handler, with no app's approval, is
+// forbidden and nothing is read: itemRun's fail-secure line holds for a
+// run that must always be referred, even pinned with each false.
+func TestRunFoldersUnapprovedForbidden(t *testing.T) {
+	r := newRig(t)
+	r.rule(t, Auto, 0, 60, r.wifi)
+	r.setFolders(r.wifi, 1, workRO, outRW)
+	for _, extra := range []string{`,"cwd":"/home/al/work"`, `,"inputs":[{"path":"/home/al/work/a","size":1}]`,
+		`,"output":{"folder":"/home/al/out","names":["x"]}`} {
+		res := featuretest.Call(r.f, r.h, t0, vault.KindAgent, "agent.request", runBody(r.wifi, "/usr/bin/git", shaA, extra))
+		if res.Code != "forbidden" || r.it.used[r.wifi] != 0 {
+			t.Fatalf("%s unapproved: %q, used %d", extra, res.Code, r.it.used[r.wifi])
+		}
+	}
+}

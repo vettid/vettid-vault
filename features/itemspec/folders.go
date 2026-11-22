@@ -2,7 +2,10 @@ package itemspec
 
 import (
 	"strings"
+	"unicode"
 	"unicode/utf8"
+
+	"golang.org/x/text/unicode/norm"
 
 	"github.com/vettid/vettid-vault/vms/strictjson"
 )
@@ -115,11 +118,23 @@ func FolderKey(p string) []string {
 	return key
 }
 
-// foldCase is "without case" for paths and names: upper case, then lower,
-// so letters a file system treats as one fold alike where lower case alone
-// would not (U+017F, long s, upper-cases to S; the Kelvin sign to K).
-// Looser only refuses more.
-func foldCase(s string) string { return strings.ToLower(strings.ToUpper(s)) }
+// foldCase is the key "without case" for a path element or a name
+// (0.93.1): NFD(fold(NFD(s))), canonical caseless matching (Unicode D145)
+// with simple folding, each rune mapped to the smallest rune of its
+// unicode.SimpleFold orbit. Decomposing first lets a letter with marks
+// fold like the letter alone: "ǰ" and J followed by a combining caron are
+// one key, as are both forms of "café" (one name to macOS), and the long s
+// and S, the Kelvin sign and K. Looser only refuses more.
+func foldCase(s string) string { return norm.NFD.String(strings.Map(foldRune, norm.NFD.String(s))) }
+
+// foldRune is the smallest rune of r's simple case folding orbit.
+func foldRune(r rune) rune {
+	least := r
+	for f := unicode.SimpleFold(r); f != r; f = unicode.SimpleFold(f) {
+		least = min(least, f)
+	}
+	return least
+}
 
 // folderWithin reports whether the path a is equal to the path b or lies
 // under it, element by element (each a root and elements).
@@ -148,9 +163,20 @@ func exactKey(p string) []string {
 // has write. The no-nesting rule leaves at most one; the first is
 // returned.
 func MatchFolder(folders []Folder, p string, write bool) (Folder, bool) {
+	return matchFolder(folders, p, write, false)
+}
+
+// MatchFolderUnder is MatchFolder for a file: p must lie strictly under the
+// entry, never equal it (an input, 0.93.1).
+func MatchFolderUnder(folders []Folder, p string) (Folder, bool) {
+	return matchFolder(folders, p, false, true)
+}
+
+func matchFolder(folders []Folder, p string, write, strict bool) (Folder, bool) {
 	k := exactKey(p)
 	for _, f := range folders {
-		if (!write || f.Write) && folderWithin(k, exactKey(f.Path)) {
+		fk := exactKey(f.Path)
+		if (!write || f.Write) && folderWithin(k, fk) && (!strict || len(k) > len(fk)) {
 			return f, true
 		}
 	}
@@ -176,8 +202,10 @@ func ValidFlatName(n string) bool {
 }
 
 // reservedName reports whether n is a Windows device name, with or without
-// an extension (CON, con.txt, Com1.tar.gz), any case. Windows also drops
-// spaces before the extension (CON .txt), so they are trimmed.
+// an extension (CON, con.txt, Com1.tar.gz), any case: CON, PRN, AUX, NUL,
+// CONIN$, CONOUT$, and COM or LPT followed by a digit 0-9 or a superscript
+// one, two or three (0.93.1). Windows also drops spaces before the
+// extension (CON .txt), so they are trimmed.
 func reservedName(n string) bool {
 	base := n
 	if i := strings.IndexByte(n, '.'); i >= 0 {
@@ -185,10 +213,17 @@ func reservedName(n string) bool {
 	}
 	base = strings.ToUpper(strings.TrimRight(base, " "))
 	switch base {
-	case "CON", "PRN", "AUX", "NUL":
+	case "CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$":
 		return true
 	}
-	return len(base) == 4 && (strings.HasPrefix(base, "COM") || strings.HasPrefix(base, "LPT")) && base[3] >= '1' && base[3] <= '9'
+	if !strings.HasPrefix(base, "COM") && !strings.HasPrefix(base, "LPT") {
+		return false
+	}
+	switch base[3:] {
+	case "0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "\u00b9", "\u00b2", "\u00b3":
+		return true
+	}
+	return false
 }
 
 // parseInputs parses an item.run's inputs (0–16 {path, size}): each path a

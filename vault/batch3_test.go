@@ -18,6 +18,7 @@ type policyType struct {
 	decision AgentDecision
 	asked    int
 	ran      int
+	bodies   [][]byte // a copy of each body Handle read
 	valid    bool
 	locked   bool
 	paired   map[string]json.RawMessage
@@ -32,8 +33,9 @@ func (p *policyType) Types() []TypeSpec {
 	return []TypeSpec{{Type: "test.agent", Request: true, From: []string{KindAgent}, AgentPolicy: true}}
 }
 
-func (p *policyType) Handle(context.Context, *Session, *envelope.Inner) (json.RawMessage, error) {
+func (p *policyType) Handle(_ context.Context, _ *Session, in *envelope.Inner) (json.RawMessage, error) {
 	p.ran++
+	p.bodies = append(p.bodies, append([]byte(nil), in.Body...)) // a copy: what the handler read
 	return json.RawMessage(`{"ran":true}`), nil
 }
 

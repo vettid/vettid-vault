@@ -2184,6 +2184,7 @@ func (d *Device) handle(ctx context.Context, m relayclient.Message) (unacked boo
 				if err == nil {
 					d.dropAwaiting(i)
 					d.establishRekey(ctx, fr.Epoch, now)
+					dropped(fr.Inner) // only its epoch is kept
 				}
 				if errors.Is(err, handshake.ErrType) {
 					// A message of the new epoch before hs.fin: the epoch

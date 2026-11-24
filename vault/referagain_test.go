@@ -56,6 +56,7 @@ func heldOnly(t *testing.T, d *devFixture) *HeldRequest {
 	}
 	for _, h := range d.m.st.Held {
 		c := *h
+		c.Inner = append([]byte(nil), h.Inner...) // its own copy: a decided request's stored plaintext is wiped
 		return &c
 	}
 	return nil

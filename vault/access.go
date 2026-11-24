@@ -9,6 +9,7 @@ import (
 
 	"github.com/vettid/vettid-vault/vms/envelope"
 	"github.com/vettid/vettid-vault/vms/strictjson"
+	"github.com/vettid/vettid-vault/vms/suite"
 )
 
 // Access sessions and approvals for desktops and agents (VAULT-MESSAGING
@@ -300,7 +301,7 @@ func (m *Manager) endAccess(ctx context.Context, p *Peer, notify bool, reason, e
 	for id, h := range m.st.Held {
 		if h.DeviceID == p.ID {
 			m.answerHeld(h, "denied", now)
-			delete(m.st.Held, id)
+			m.dropHeld(id)
 			held = append(held, id)
 		}
 	}
@@ -388,9 +389,22 @@ func (m *Manager) answerHeld(h *HeldRequest, code string, now time.Time) {
 	p := m.st.Devices[h.DeviceID]
 	in, err := envelope.ParseInner(h.Inner, envelope.ModeSealed)
 	if p == nil || err != nil {
+		wipeInner(in)
 		return
 	}
+	defer wipeInner(in) // a parsed copy: the answer is sealed from it at once
 	m.respondError(p, in, m.heldKey(h, in), code, "", now)
+}
+
+// dropHeld deletes held request id from the state and wipes its stored
+// inner (the request's plaintext, kept since it was held). Nothing reads a
+// dropped request again: a state write that fails keeps the memory ahead,
+// and a restart reads the stored state, not these bytes.
+func (m *Manager) dropHeld(id string) {
+	if h := m.st.Held[id]; h != nil {
+		suite.Wipe(h.Inner)
+	}
+	delete(m.st.Held, id)
 }
 
 // heldKey is the key a held request's answer is cached under: its own, or
@@ -424,6 +438,7 @@ func (m *Manager) hApprovalDecide(ctx context.Context, s *Session, in *envelope.
 		return nil, errNotFound
 	}
 	delete(m.st.Held, aid)
+	defer suite.Wipe(h.Inner) // dropped: wiped once it has been answered or run (dropHeld)
 	m.dirty = true
 	decided := func(referred bool) {
 		b := strictjson.NewBuilder().String("kind", "approval.decided").String("approval_id", aid).Bool("approved", approve)
@@ -457,6 +472,7 @@ func (m *Manager) hApprovalDecide(ctx context.Context, s *Session, in *envelope.
 func (m *Manager) runHeld(ctx context.Context, h *HeldRequest, now time.Time) string {
 	p := m.st.Devices[h.DeviceID]
 	in, err := envelope.ParseInner(h.Inner, envelope.ModeSealed)
+	defer wipeInner(in) // a parsed copy: what outlives the run is a copy, as for a dispatched message
 	if p == nil || p.State != PeerActive || err != nil {
 		return "not_found"
 	}
@@ -532,7 +548,7 @@ func (m *Manager) expireAccess(now time.Time) {
 	for id, h := range m.st.Held {
 		if !now.Before(h.Expires) {
 			m.answerHeld(h, "approval_timeout", now)
-			delete(m.st.Held, id)
+			m.dropHeld(id)
 			m.dirty = true
 		}
 	}

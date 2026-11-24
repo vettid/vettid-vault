@@ -449,7 +449,7 @@ func (m *Manager) enterHold(now time.Time) {
 	}
 	for _, id := range sortedKeys(m.st.Held) {
 		m.answerHeld(m.st.Held[id], "owner_check_required", now)
-		delete(m.st.Held, id)
+		m.dropHeld(id)
 	}
 	for id := range m.st.AccessRequests {
 		delete(m.st.AccessRequests, id)

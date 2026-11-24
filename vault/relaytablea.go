@@ -105,6 +105,9 @@ func (m *Manager) peekResp(p *Peer, ini *handshake.Initiator, raw []byte, sender
 		return nil
 	}
 	res.Epoch.Destroy()
+	if testRespResultHook != nil {
+		testRespResultHook(res)
+	}
 	return res
 }
 

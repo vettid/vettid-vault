@@ -622,105 +622,153 @@ func marshalInts(v []int) []byte {
 	return append(out, ']')
 }
 
-// ParseInit parses and validates an hs.init body.
+// Wipe wipes the hs.init's secrets: the app key and the unlock secret (a
+// transfer's). A caller that keeps either takes a copy first.
+func (in *Init) Wipe() {
+	if in == nil {
+		return
+	}
+	suite.Wipe(in.APIKey)
+	suite.Wipe(in.UnlockSecret)
+	in.APIKey, in.UnlockSecret = nil, nil
+}
+
+// testParsedHook, set only by tests, sees each hs.init body ParseInit
+// parsed, once it has wiped the secret members.
+var testParsedHook func(o strictjson.Object)
+
+// wipeMembers wipes the raw values of o's named members.
+func wipeMembers(o strictjson.Object, names ...string) {
+	for _, n := range names {
+		suite.Wipe(o[n])
+	}
+}
+
+// ParseInit parses and validates an hs.init body. On an error nothing it
+// decoded is kept: the secrets are wiped.
 func ParseInit(body []byte) (*Init, error) {
+	in := &Init{}
+	if err := parseInit(body, in); err != nil {
+		dropInit(nil, in) // the body is the caller's
+		return nil, err
+	}
+	return in, nil
+}
+
+func parseInit(body []byte, in *Init) error {
 	o, err := strictjson.ParseObject(body)
 	if err != nil {
-		return nil, ErrBody
+		return ErrBody
 	}
-	in := &Init{}
+	// Whichever way it returns: the raw copies of the secrets' text and of
+	// the tokens (Init's are Go strings, decoded from them). Not profile,
+	// which Init.Profile keeps as it is.
+	if testParsedHook != nil {
+		defer testParsedHook(o) // after the wipe below
+	}
+	defer wipeMembers(o, "api_key", "unlock_secret", "token", "reconnect_token")
 	p, err := o.String("purpose")
 	if err != nil {
-		return nil, ErrBody
+		return ErrBody
 	}
 	in.Purpose = Purpose(p)
 	if in.Ctx, err = o.String("ctx"); err != nil {
-		return nil, ErrBody
+		return ErrBody
 	}
 	fo, err := o.Object("from")
 	if err != nil {
-		return nil, ErrBody
+		return ErrBody
 	}
 	if in.From, err = ParsePrincipal(fo); err != nil {
-		return nil, ErrBody
+		return ErrBody
 	}
 	eph, err := o.Base64("eph", suite.EKSize)
 	if err != nil {
-		return nil, ErrBody
+		return ErrBody
 	}
 	if in.Eph, err = suite.ParsePublicKey(eph); err != nil {
-		return nil, ErrBody
+		return ErrBody
 	}
 	if t, ok, err := o.OptString("token"); err != nil || (ok && t == "") {
-		return nil, ErrBody
+		return ErrBody
 	} else {
 		in.Token = t
 	}
 	if t, ok, err := o.OptString("reconnect_token"); err != nil || (ok && t == "") {
-		return nil, ErrBody
+		return ErrBody
 	} else {
 		in.ReconnectToken = t
 	}
 	arr, err := o.Array("suites")
 	if err != nil || len(arr) == 0 || len(arr) > suite.MaxOffer {
-		return nil, ErrBody
+		return ErrBody
 	}
 	for _, raw := range arr {
 		v, err := strictjson.AsUint(raw, 0, 255)
 		if err != nil {
-			return nil, ErrBody
+			return ErrBody
 		}
 		in.Suites = append(in.Suites, int(v))
 	}
 	if in.Profile, _, err = optOpaque(o, "profile"); err != nil {
-		return nil, ErrBody
+		return ErrBody
 	}
 	if raw, ok := o["device_attest"]; ok {
 		if in.DeviceAttest, err = altchan.ParseDeviceAttest(raw); err != nil {
-			return nil, ErrBody
+			return ErrBody
 		}
 	}
-	if s, ok, err := o.OptString("api_key"); err != nil {
-		return nil, ErrBody
-	} else if ok {
-		if _, in.APIKey, err = altchan.ParseAppKey(s); err != nil {
-			return nil, ErrBody
-		}
+	// api_key and unlock_secret are decoded straight to bytes, never
+	// through a Go string (below), and their members wiped: Init.Wipe then
+	// leaves no copy (the caller wipes the body it parsed).
+	if raw, ok := o["api_key"]; ok && len(raw)-2 > 6*altchan.MaxAppKeyB64 {
+		return ErrBody // longer than any spelling of a bounded key, escaped or not
 	}
-	if s, ok, err := o.OptString("unlock_secret"); err != nil {
-		return nil, ErrBody
+	if der, ok, err := o.OptBase64Bytes("api_key", -1); err != nil {
+		return ErrBody
 	} else if ok {
-		if in.UnlockSecret, err = strictjson.DecodeStd(s, altchan.UnlockSecretSize); err != nil {
-			return nil, ErrBody
+		// As altchan.ParseAppKey bounds it: 1 to MaxAppKeyB64 characters
+		// of canonical base64, so at most MaxAppKeyB64/4*3 bytes.
+		if len(der) == 0 || len(der) > altchan.MaxAppKeyB64/4*3 {
+			suite.Wipe(der)
+			return ErrBody
 		}
+		if _, err := altchan.ParseAppKeyDER(der); err != nil {
+			suite.Wipe(der)
+			return ErrBody
+		}
+		in.APIKey = der
+	}
+	if in.UnlockSecret, _, err = o.OptBase64Bytes("unlock_secret", altchan.UnlockSecretSize); err != nil {
+		return ErrBody
 	}
 	var present bool
 	if in.Rotations, present, err = parseRotations(o); err != nil {
-		return nil, ErrBody
+		return ErrBody
 	}
 	if present && in.Purpose != PurposeReconnect && in.Purpose != PurposeRekey {
-		return nil, ErrBody
+		return ErrBody
 	}
 	// A link's form failure is held: it is relay_unlinked only if every
 	// other member and the purpose rules pass (malformed wins).
 	in.RelayLinks, present, err = parseRelayLinks(o)
 	linkErr := err
 	if err != nil && !errors.Is(err, ErrRelayLink) {
-		return nil, ErrBody
+		return ErrBody
 	}
 	if in.SASCommit, err = optSASField(o, "sas_commit"); err != nil {
-		return nil, ErrBody
+		return ErrBody
 	}
 	if err := in.validateForm(present); err != nil {
-		return nil, err
+		return err
 	}
 	if linkErr != nil {
-		return nil, linkErr
+		return linkErr
 	}
 	if err := in.checkRelayLinksEnd(); err != nil {
-		return nil, err
+		return err
 	}
-	return in, nil
+	return nil
 }
 
 func (r *Resp) validate(p Purpose) error {

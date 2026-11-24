@@ -10,6 +10,7 @@ package strictjson
 
 import (
 	"bytes"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -523,6 +524,100 @@ func (o Object) Base64(name string, n int) ([]byte, error) {
 // and any non-canonical encoding (non-zero trailing bits).
 func DecodeStd(s string, n int) ([]byte, error) {
 	return decodeCanonical(base64.StdEncoding, s, n)
+}
+
+// OptBase64Bytes is an optional member holding canonical standard base64
+// with padding that decodes to exactly n bytes (n < 0: any length), as
+// Base64 reads it, but decoded straight from the member's bytes: no Go
+// string ever holds the text (strings cannot be wiped). For a secret: the
+// caller wipes the result, and the member (its raw value) once read. The
+// scratch copies made here (an escaped string's text, the re-encoding that
+// checks the encoding is canonical) are wiped before it returns.
+func (o Object) OptBase64Bytes(name string, n int) (b []byte, present bool, err error) {
+	raw, ok := o[name]
+	if !ok {
+		return nil, false, nil
+	}
+	if len(raw) < 2 || raw[0] != '"' || raw[len(raw)-1] != '"' {
+		return nil, true, ErrType
+	}
+	text := []byte(raw[1 : len(raw)-1])
+	if bytes.IndexByte(text, '\\') >= 0 {
+		// Base64 never needs an escape, but JSON allows one (\/ for /).
+		buf, err := unescapeASCII(text)
+		defer wipeScratch(buf)
+		if err != nil {
+			return nil, true, err
+		}
+		text = buf
+	}
+	b, err = decodeCanonicalBytes(base64.StdEncoding, text, n)
+	return b, true, err
+}
+
+// unescapeASCII decodes a JSON string's text (already validated by
+// ParseObject) into a new buffer. Only ASCII is kept: anything else is not
+// base64, so it is ErrBase64 here as it would be after decoding.
+func unescapeASCII(text []byte) ([]byte, error) {
+	out := make([]byte, 0, len(text))
+	for i := 0; i < len(text); i++ {
+		c := text[i]
+		if c != '\\' {
+			out = append(out, c)
+			continue
+		}
+		if i+1 >= len(text) {
+			return out, ErrType
+		}
+		i++
+		switch text[i] {
+		case '"', '\\', '/':
+			out = append(out, text[i])
+		case 'b', 'f', 'n', 'r', 't':
+			return out, ErrBase64 // a control character: not base64
+		case 'u':
+			v, ok := hex4(text, i+1) // no string: it spells one of the characters
+			if !ok {
+				return out, ErrType
+			}
+			if v >= 0x80 {
+				return out, ErrBase64
+			}
+			out = append(out, byte(v))
+			i += 4
+		default:
+			return out, ErrType
+		}
+	}
+	return out, nil
+}
+
+// decodeCanonicalBytes is decodeCanonical on bytes.
+func decodeCanonicalBytes(enc *base64.Encoding, text []byte, n int) ([]byte, error) {
+	if bytes.IndexByte(text, '\r') >= 0 || bytes.IndexByte(text, '\n') >= 0 {
+		return nil, ErrBase64
+	}
+	b := make([]byte, enc.DecodedLen(len(text)))
+	m, err := enc.Strict().Decode(b, text)
+	if err != nil || n >= 0 && m != n {
+		wipeScratch(b)
+		return nil, ErrBase64
+	}
+	b = b[:m]
+	again := make([]byte, enc.EncodedLen(m))
+	enc.Encode(again, b)
+	canonical := subtle.ConstantTimeCompare(again, text) == 1 // the text of a secret
+	wipeScratch(again)
+	if !canonical {
+		wipeScratch(b)
+		return nil, ErrBase64
+	}
+	return b, nil
+}
+
+func wipeScratch(b []byte) {
+	clear(b)
+	runtime.KeepAlive(b)
 }
 
 // DecodeRawURL decodes canonical unpadded base64url.

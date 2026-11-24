@@ -34,6 +34,18 @@ type EpochState struct {
 	Received         uint64    `json:"received"`
 }
 
+// Wipe wipes the state's keys (send, receive and rk), for a snapshot
+// replaced by a newer one or dropped.
+func (s *EpochState) Wipe() {
+	if s == nil {
+		return
+	}
+	for _, b := range [][]byte{s.SendKey, s.RecvKey, s.RK} {
+		suite.Wipe(b)
+	}
+	s.SendKey, s.RecvKey, s.RK = nil, nil, nil
+}
+
 func cp(b []byte) []byte {
 	if b == nil {
 		return nil
@@ -95,6 +107,18 @@ type KeyringState struct {
 	Retired []RetiredState `json:"retired,omitempty"`
 	// Pending is an initiator's pending epoch (0.86.0, §6.3.1).
 	Pending *EpochState `json:"pending,omitempty"`
+}
+
+// Wipe wipes every epoch's keys in the state (see EpochState.Wipe).
+func (s *KeyringState) Wipe() {
+	if s == nil {
+		return
+	}
+	s.Current.Wipe()
+	s.Pending.Wipe()
+	for i := range s.Retired {
+		s.Retired[i].Epoch.Wipe()
+	}
 }
 
 // RetiredState is a retired epoch (receive key only) and its expiry.
@@ -241,6 +265,7 @@ func restoreInitiator(s InitiatorState, identity ed25519.PrivateKey) (*Initiator
 	body, err := ParseInit(s.Body)
 	if err != nil || !body.Eph.Equal(eph.Public()) || body.Purpose.HasSAS() && !CheckSASCommit(body.SASCommit, s.NI) {
 		eph.Destroy()
+		dropInit(nil, body)
 		return nil, ErrConfig
 	}
 	if identity != nil && !suite.EqualPublic(body.From.IK, identity.Public().(ed25519.PublicKey)) {
@@ -248,6 +273,7 @@ func restoreInitiator(s InitiatorState, identity ed25519.PrivateKey) (*Initiator
 		// rotation, §3.4): hs.fin signed with this one would not verify
 		// at the responder, which binds the key the hs.init named.
 		eph.Destroy()
+		dropInit(nil, body)
 		return nil, ErrIdentity
 	}
 	var known []*Rotation
@@ -255,6 +281,7 @@ func restoreInitiator(s InitiatorState, identity ed25519.PrivateKey) (*Initiator
 		r, err := ParseRotation(raw)
 		if err != nil {
 			eph.Destroy()
+			dropInit(nil, body)
 			return nil, ErrConfig
 		}
 		known = append(known, r)
@@ -310,6 +337,7 @@ func RestorePending(s PendingState) (*PendingInit, error) {
 	}
 	body, err := ParseInit(in.Body)
 	if err != nil {
+		dropInit(in, nil)
 		return nil, err
 	}
 	return newPending(s.Env, in, body, cp(s.Ks))
@@ -329,6 +357,18 @@ type ResponderState struct {
 	Purpose                     Purpose `json:"purpose,omitempty"`
 	SASCommit                   []byte  `json:"sas_commit,omitempty"` // from hs.init (0.10.3)
 	NR                          []byte  `json:"n_r,omitempty"`        // our SAS nonce (0.10.3)
+}
+
+// Wipe wipes the state's secrets (the key schedule, rk and n_R), for a
+// snapshot replaced by a newer one or dropped.
+func (s *ResponderState) Wipe() {
+	if s == nil {
+		return
+	}
+	for _, b := range [][]byte{s.Ks, s.Ke, s.PRK, s.KI2R, s.KR2I, s.RK, s.NR} {
+		suite.Wipe(b)
+	}
+	s.Ks, s.Ke, s.PRK, s.KI2R, s.KR2I, s.RK, s.NR = nil, nil, nil, nil, nil, nil, nil
 }
 
 // Export returns the responder's persistent state.
@@ -390,6 +430,12 @@ func AcceptRekey(raw []byte, in *envelope.Inner, e *Epoch, now time.Time) (*Pend
 	if err != nil {
 		return nil, err
 	}
+	kept := false
+	defer func() { // in is the caller's: it wipes it
+		if !kept {
+			dropInit(nil, body)
+		}
+	}()
 	if body.Purpose != PurposeRekey {
 		return nil, ErrPurpose
 	}
@@ -400,6 +446,7 @@ func AcceptRekey(raw []byte, in *envelope.Inner, e *Epoch, now time.Time) (*Pend
 	if err != nil {
 		return nil, err
 	}
+	kept = true
 	return newPending(raw, in, body, ks)
 }
 

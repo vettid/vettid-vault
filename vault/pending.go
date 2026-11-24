@@ -91,6 +91,7 @@ func (m *Manager) pendingAsks(kind string, now time.Time) []PendingAsk {
 				continue
 			}
 			all = append(all, PendingAsk{Kind: PendingApproval, ID: h.ID, Exp: h.Expires, Body: approvalPendingBody(h, p, in)})
+			wipeInner(in) // the body above is built anew (a copy)
 		}
 	}
 	out := all[:0]

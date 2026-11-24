@@ -56,6 +56,7 @@ func heldOnly(t *testing.T, d *devFixture) *HeldRequest {
 	}
 	for _, h := range d.m.st.Held {
 		c := *h
+		c.Inner = append([]byte(nil), h.Inner...) // its own copy: a decided request's stored plaintext is wiped
 		return &c
 	}
 	return nil
@@ -100,6 +101,12 @@ func TestReferAgain(t *testing.T) {
 	// Approved: the handler refers it again.
 	pol.again = &Approval{Flags: []string{"program_changed"}, PreviousSHA256: "bb", PreviousPath: "/usr/bin/b", Note: json.RawMessage(`{"v":2}`)}
 	oldID := bodyStr(t, ap, "approval_id")
+	// Stored in another spelling than a marshal gives: the request held again keeps it, as approved (not re-encoded).
+	respaced := append([]byte("{ "), first.Inner[1:]...)
+	d.m.mu.Lock()
+	d.m.st.Held[oldID].Inner = append([]byte(nil), respaced...)
+	d.m.mu.Unlock()
+	first.Inner = respaced
 	did := d.sendAs(app, "approval.decide", `{"approval_id":"`+oldID+`","approve":true}`)
 	in := d.inbox(app, ag)
 	if r := find(in["dev1"], reply(did)); r == nil || bodyStr(t, r, "result") != "referred" {

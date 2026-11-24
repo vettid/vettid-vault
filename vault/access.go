@@ -9,6 +9,7 @@ import (
 
 	"github.com/vettid/vettid-vault/vms/envelope"
 	"github.com/vettid/vettid-vault/vms/strictjson"
+	"github.com/vettid/vettid-vault/vms/suite"
 )
 
 // Access sessions and approvals for desktops and agents (VAULT-MESSAGING
@@ -300,7 +301,7 @@ func (m *Manager) endAccess(ctx context.Context, p *Peer, notify bool, reason, e
 	for id, h := range m.st.Held {
 		if h.DeviceID == p.ID {
 			m.answerHeld(h, "denied", now)
-			delete(m.st.Held, id)
+			m.dropHeld(id)
 			held = append(held, id)
 		}
 	}
@@ -331,6 +332,13 @@ func (m *Manager) endAccess(ctx context.Context, p *Peer, notify bool, reason, e
 // approval's id, or the error code the request was answered with instead
 // (limit, internal).
 func (m *Manager) hold(p *Peer, in *envelope.Inner, key string, volatile bool, a Approval, now time.Time) (id, code string) {
+	return m.holdAs(p, in, nil, key, volatile, a, now)
+}
+
+// holdAs is hold with the request's stored bytes given: [stored] when not
+// nil (a request held again, kept as approved), else [in] marshalled. The
+// held request owns what it is given.
+func (m *Manager) holdAs(p *Peer, in *envelope.Inner, stored []byte, key string, volatile bool, a Approval, now time.Time) (id, code string) {
 	rkey := key
 	if volatile {
 		rkey = volatileKey
@@ -345,9 +353,12 @@ func (m *Manager) hold(p *Peer, in *envelope.Inner, key string, volatile bool, a
 		m.respondErrorBody(p, in, rkey, "limit", "", limitBody("held_approvals", MaxHeldPerDevice, -1), now)
 		return "", "limit"
 	}
-	c := *in
-	c.Seq = 0 // kept without the session's seq, like cached responses
-	raw, err := c.Marshal(envelope.ModeSealed)
+	raw, err := stored, error(nil)
+	if raw == nil {
+		c := *in
+		c.Seq = 0 // kept without the session's seq, like cached responses
+		raw, err = c.Marshal(envelope.ModeSealed)
+	}
 	if err != nil {
 		m.respondError(p, in, rkey, "internal", "", now)
 		return "", "internal"
@@ -388,9 +399,22 @@ func (m *Manager) answerHeld(h *HeldRequest, code string, now time.Time) {
 	p := m.st.Devices[h.DeviceID]
 	in, err := envelope.ParseInner(h.Inner, envelope.ModeSealed)
 	if p == nil || err != nil {
+		wipeInner(in)
 		return
 	}
+	defer wipeInner(in) // a parsed copy: the answer is sealed from it at once
 	m.respondError(p, in, m.heldKey(h, in), code, "", now)
+}
+
+// dropHeld deletes held request id from the state and wipes its stored
+// inner (the request's plaintext, kept since it was held). Nothing reads a
+// dropped request again: a state write that fails keeps the memory ahead,
+// and a restart reads the stored state, not these bytes.
+func (m *Manager) dropHeld(id string) {
+	if h := m.st.Held[id]; h != nil {
+		suite.Wipe(h.Inner)
+	}
+	delete(m.st.Held, id)
 }
 
 // heldKey is the key a held request's answer is cached under: its own, or
@@ -424,6 +448,7 @@ func (m *Manager) hApprovalDecide(ctx context.Context, s *Session, in *envelope.
 		return nil, errNotFound
 	}
 	delete(m.st.Held, aid)
+	defer suite.Wipe(h.Inner) // dropped: wiped once it has been answered or run (dropHeld)
 	m.dirty = true
 	decided := func(referred bool) {
 		b := strictjson.NewBuilder().String("kind", "approval.decided").String("approval_id", aid).Bool("approved", approve)
@@ -457,6 +482,7 @@ func (m *Manager) hApprovalDecide(ctx context.Context, s *Session, in *envelope.
 func (m *Manager) runHeld(ctx context.Context, h *HeldRequest, now time.Time) string {
 	p := m.st.Devices[h.DeviceID]
 	in, err := envelope.ParseInner(h.Inner, envelope.ModeSealed)
+	defer wipeInner(in) // a parsed copy: what outlives the run is a copy, as for a dispatched message
 	if p == nil || p.State != PeerActive || err != nil {
 		return "not_found"
 	}
@@ -505,11 +531,13 @@ func (m *Manager) runHeld(ctx context.Context, h *HeldRequest, now time.Time) st
 		volatile := te.spec.Volatile && te.spec.Request && in.Re == ""
 		a := ra.Approval
 		a.replaces = h.ID
-		id, code := m.hold(p, in, h.Key, volatile, a, now)
+		// Kept as approved, not re-encoded: no other copy is made.
+		stored := append([]byte(nil), h.Inner...)
+		_, code := m.holdAs(p, in, stored, h.Key, volatile, a, now)
 		if code != "" {
+			suite.Wipe(stored) // not held (the limit): nothing keeps it
 			return code
 		}
-		m.st.Held[id].Inner = append([]byte(nil), h.Inner...) // as approved, not re-encoded
 		return "referred"
 	case errors.As(herr, &he):
 		m.respondErrorBody(p, in, key, he.Code, he.Message, he.Body, now)
@@ -532,7 +560,7 @@ func (m *Manager) expireAccess(now time.Time) {
 	for id, h := range m.st.Held {
 		if !now.Before(h.Expires) {
 			m.answerHeld(h, "approval_timeout", now)
-			delete(m.st.Held, id)
+			m.dropHeld(id)
 			m.dirty = true
 		}
 	}

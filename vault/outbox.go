@@ -643,6 +643,7 @@ func (m *Manager) drainOutbox(ctx context.Context) {
 			if e.InnerID == "" {
 				e.InnerID = heldID(e.Held)
 			}
+			suite.Wipe(e.Held)
 			e.Done, e.Held, m.dirty = true, nil, true // held past its exp: discarded (§3.4.1)
 			if e.QuotaRefresh {
 				m.quotaRefreshEnded(e) // unsent: no answer can come

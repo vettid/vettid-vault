@@ -942,6 +942,9 @@ func (m *Manager) sendResponseCached(p *Peer, req *envelope.Inner, key string, o
 		keep = &c
 	}
 	if j, err := keep.Marshal(envelope.ModeSealed); err == nil { // cached without seq
+		if old, ok := m.st.Responses[key]; ok {
+			suite.Wipe(old.Inner) // replaced: the older answer's plaintext goes
+		}
 		m.st.Responses[key] = CachedResponse{Inner: j, Expires: now.Add(ResponseRetention)}
 	}
 	m.sealAndQueue(p, out)
@@ -967,6 +970,7 @@ func (m *Manager) resendCached(p *Peer, raw []byte) {
 	if err != nil {
 		return
 	}
+	defer wipeInner(in) // a parsed copy of the cached answer: sealed at once below
 	in.Features = m.featuresFor(p)
 	if !m.fits(in) {
 		in = tooLarge(in) // cached by a release before §8.1's rule
@@ -1087,6 +1091,7 @@ func (m *Manager) prune() {
 	}
 	for k, r := range m.st.Responses {
 		if now.After(r.Expires) {
+			suite.Wipe(r.Inner) // the cached answer's plaintext
 			delete(m.st.Responses, k)
 		}
 	}
@@ -1099,6 +1104,8 @@ func (m *Manager) prune() {
 	for _, e := range m.st.Outbox {
 		if !e.Done {
 			kept = append(kept, e)
+		} else {
+			suite.Wipe(e.Held) // a done entry's held plaintext, if a path left it, goes with the entry
 		}
 	}
 	m.st.Outbox = kept

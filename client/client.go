@@ -522,11 +522,11 @@ func (d *Device) export() {
 	d.exportAwaiting()
 }
 
-// exportAwaiting replaces the stored responder snapshots with those of the
-// responders still awaiting hs.fin, the old ones wiped. d.mu is held.
 // testExportAwaitingHook, set only by tests, runs at each exportAwaiting.
 var testExportAwaitingHook func()
 
+// exportAwaiting replaces the stored responder snapshots with those of the
+// responders still awaiting hs.fin, the old ones wiped. d.mu is held.
 func (d *Device) exportAwaiting() {
 	if testExportAwaitingHook != nil {
 		testExportAwaitingHook()
@@ -2184,6 +2184,7 @@ func (d *Device) handle(ctx context.Context, m relayclient.Message) (unacked boo
 				if err == nil {
 					d.dropAwaiting(i)
 					d.establishRekey(ctx, fr.Epoch, now)
+					dropped(fr.Inner) // only its epoch is kept
 				}
 				if errors.Is(err, handshake.ErrType) {
 					// A message of the new epoch before hs.fin: the epoch

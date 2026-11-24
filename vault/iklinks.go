@@ -591,6 +591,7 @@ func (m *Manager) sealHeld(p *Peer) {
 			if e.InnerID == "" {
 				e.InnerID = heldID(e.Held)
 			}
+			suite.Wipe(e.Held)
 			e.Done, e.Held = true, nil
 			m.quotaRefreshEnded(e)                           // a quota refresh's: no answer can come
 			m.auditRef(now, "held_expired", p.ID, e.InnerID) // S12 (0.88.7: ref = its inner id)
@@ -607,10 +608,12 @@ func (m *Manager) sealHeld(p *Peer) {
 		if !e.Tried {
 			in.TS = now
 		} else if now.Sub(in.TS) > envelope.MaxDurableAge {
+			wipeInner(in)
 			m.notDelivered(e, "undelivered_window", now) // 0.88.7 §8.3: kept ts, past §8.4's window
 			continue
 		}
 		raw, err := m.sealFor(p, kr.Current(), in)
+		wipeInner(in) // a parsed copy: sealed (raw) or not, it is not read again
 		if errors.Is(err, errDemoted) {
 			return // still demoted: the rest wait too, in order
 		}
@@ -620,6 +623,7 @@ func (m *Manager) sealHeld(p *Peer) {
 			m.notDelivered(e, "held_unsealable", now) // drop.held_unsealable
 			continue
 		}
+		suite.Wipe(e.Held) // sealed in its place: the held plaintext goes
 		e.Payload, e.Held, e.HeldExp = raw, nil, time.Time{}
 		e.RelayURL, e.Mailbox = p.Relay.URL, p.Relay.Mailbox
 		m.markUnstored(e) // sealed in place: not sent before a write stores it (0.88.7)
@@ -637,6 +641,7 @@ func heldID(held []byte) string {
 		return ""
 	}
 	if in, err := envelope.ParseInner(held, envelope.ModeSealed); err == nil {
+		wipeInner(in) // only its id is read; strings are not wiped
 		return in.ID
 	}
 	return ""
@@ -720,6 +725,7 @@ func (m *Manager) notDelivered(e *OutboxEntry, reason string, now time.Time) {
 		ref = heldID(e.Held)
 	}
 	typ := m.entryType(e)
+	suite.Wipe(e.Held) // the held plaintext, if any, goes with the entry
 	e.Done, e.Held, e.Payload = true, nil, nil
 	m.quotaRefreshEnded(e)                 // a quota refresh's (#216): no answer can come
 	m.auditRef(now, reason, e.PeerID, ref) // ref: the message's inner id

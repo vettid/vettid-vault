@@ -101,6 +101,7 @@ var reasonCases = []struct{ name, body, want string }{
 	{"nesting before its own bad write", run(prog("git"), `,"folders":[`+folder("/home/al", false)+`,{"path":"/home/al/work","write":1}]`), "run.folders[1].path: inside or above another entry"},
 	// An empty last element is the clean-path rule's, not "names no file".
 	{"a trailing slash", run(prog("/usr/bin/")), "run.programs[0].program: not a clean path"},
+	{"the root alone", run(prog("/")), "run.programs[0].program: not a clean path"},
 	{"a doubled trailing slash", run(prog("/a//")), "run.programs[0].program: not a clean path"},
 	{"nesting before a later bad folder", run(prog("git"), `,"folders":[`+folder("/a", false)+","+folder("/a/b", false)+","+folder("rel", false)+`]`), "run.folders[1].path: inside or above another entry"},
 	{"a last element of dots", run(prog("/usr/bin/..")), "run.programs[0].program: names no file"},

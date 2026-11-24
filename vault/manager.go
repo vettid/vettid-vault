@@ -1361,7 +1361,14 @@ func (m *Manager) splitBrain() {
 	m.zeroize()
 }
 
-// zeroize wipes the DEK and every key, and marks the manager locked.
+// zeroize wipes the DEK and every key, and marks the manager locked. It
+// also drops every reference to the Ed25519 private keys it wiped (the
+// vault's relay and identity keys and the relays' copies): crypto/ed25519
+// keeps each key's expanded form (seed, scalar, prefix) cached for as long
+// as the key's bytes are reachable, and that copy cannot be wiped: dropped,
+// the entry becomes collectible, and the copy is freed by a later GC, never
+// wiped. A relay call still in flight when the close's wait ran out keeps
+// its key until it ends.
 func (m *Manager) zeroize() {
 	m.locked = true
 	// The relay cut off first: the collector, then every relay's calls
@@ -1375,6 +1382,9 @@ func (m *Manager) zeroize() {
 	}
 	finishRelays := m.cutRelays()
 	defer finishRelays() // last: wait for the cancelled calls, wipe their key copies
+	// m.relay and m.rk's relays are kept, closed: the workers that run
+	// outside the lock get ErrRelayClosed from them, and a ClientRelay lets
+	// go of its key once wiped (dropKey).
 	m.attStop()
 	if m.push != nil {
 		m.push.stop()

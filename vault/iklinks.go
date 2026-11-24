@@ -254,6 +254,9 @@ func (m *Manager) evidenceFirst(p *Peer, in *envelope.Inner, now time.Time) bool
 		// A rekey's links are checked here and recorded as seen only once
 		// it has passed rekeyPrecheck (handleRekeyInit, review 5).
 		if b, err := handshake.ParseInit(in.Body); err == nil {
+			// Before the purpose is checked: an app hs.init sent in session
+			// mode would carry its secrets this far.
+			defer dropParsedInit(b)
 			for _, r := range b.Rotations {
 				if m.rotationConflictRec(p, r, false, now) {
 					return p.Conflict != nil
@@ -989,6 +992,7 @@ func (m *Manager) rekeyPrecheck(p *Peer, in *envelope.Inner, ep *handshake.Epoch
 	if err != nil {
 		return err
 	}
+	defer dropParsedInit(body)
 	if body.Purpose != handshake.PurposeRekey || body.Ctx != handshake.EpochCtx(ep.ID()) {
 		return handshake.ErrCtx
 	}

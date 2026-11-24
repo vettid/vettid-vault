@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/vettid/vettid-vault/vms/envelope"
 	"github.com/vettid/vettid-vault/vms/handshake"
 )
 
@@ -103,5 +104,140 @@ func TestStartInitAbortsAFailedDeposit(t *testing.T) {
 	}
 	if d.ini != nil || !ini.Done() || ini.Body().UnlockSecret != nil || ini.Body().APIKey != nil {
 		t.Fatalf("kept %v, done %v", d.ini != nil, ini.Done())
+	}
+}
+
+// A handshake that ended (answered, or aborted) has its stored snapshot
+// (eph seed, K_s, the hs.init body with a transfer's unlock secret) wiped
+// and dropped at once, not left until the next export.
+func TestEndedHandshakeDropsItsSnapshot(t *testing.T) {
+	for _, answered := range []bool{true, false} {
+		r, v, d := startPair(t)
+		resp := r.take(v.dev.Mailbox)
+		if len(resp) != 1 {
+			t.Fatalf("setup: %d hs.resp", len(resp))
+		}
+		d.mu.Lock()
+		d.export()
+		og := d.st.Outgoing
+		if og == nil {
+			d.mu.Unlock()
+			t.Fatal("setup: no stored snapshot")
+		}
+		got := [][]byte{og.EphSeed, og.Ks, og.Body}
+		raw := resp[0].Payload
+		if !answered {
+			d.ini.Abort()
+			raw = []byte("junk")
+		}
+		d.handleResp(context.Background(), raw, v.relayPK())
+		kept := d.st.Outgoing
+		d.mu.Unlock()
+		if kept != nil {
+			t.Fatalf("answered=%v: the snapshot was kept", answered)
+		}
+		for i, b := range got {
+			if len(b) == 0 || !allZeroBytes(b) {
+				t.Fatalf("answered=%v: secret %d of the snapshot not wiped", answered, i)
+			}
+		}
+	}
+}
+
+func allZeroBytes(b []byte) bool {
+	for _, c := range b {
+		if c != 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// A pairing started again (a retry) replaces the earlier handshake: it is
+// aborted and its stored snapshot wiped and dropped.
+func TestRestartedHandshakeEndsTheEarlierOne(t *testing.T) {
+	_, _, d := startPair(t)
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.export()
+	first, og := d.ini, d.st.Outgoing
+	if first == nil || og == nil {
+		t.Fatal("setup: no handshake")
+	}
+	got := [][]byte{og.EphSeed, og.Ks, og.Body}
+	if err := d.startInit(handshake.PurposeApp, testVaultID, d.st.Vault.Token, nil); err != nil {
+		t.Fatal(err)
+	}
+	if !first.Done() || d.ini == first {
+		t.Fatal("the earlier handshake was not ended")
+	}
+	for i, b := range got {
+		if len(b) == 0 || !allZeroBytes(b) {
+			t.Fatalf("secret %d of the earlier snapshot not wiped", i)
+		}
+	}
+}
+
+// A vault rekey whose answer Respond refuses (another collect sender) is
+// discarded: its K_s and its plaintext are wiped.
+func TestRefusedRekeyDiscarded(t *testing.T) {
+	ctx := context.Background()
+	r, v, d := pair(t)
+	v.startRekey()
+	var refused []*handshake.PendingInit
+	testRekeyRefusedHook = func(pi *handshake.PendingInit) { refused = append(refused, pi) }
+	defer func() { testRekeyRefusedHook = nil }()
+	msgs := r.take(v.dev.Mailbox)
+	d.mu.Lock()
+	for _, m := range msgs {
+		env, err := envelope.Parse(m.Payload)
+		if err != nil {
+			continue
+		}
+		in, ep, err := d.keyring.Open(env, time.Now())
+		if err != nil || in.Type != handshake.TypeInit {
+			continue
+		}
+		other := ed25519.NewKeyFromSeed(make([]byte, 32)).Public().(ed25519.PublicKey)
+		d.handleRekey(ctx, m.Payload, in, ep, other, time.Now())
+	}
+	d.mu.Unlock()
+	if len(refused) != 1 {
+		t.Fatalf("%d rekeys refused", len(refused))
+	}
+	if body := refused[0].Inner().Body; len(body) == 0 || !allZeroBytes(body) {
+		t.Fatal("the refused rekey was not discarded")
+	}
+}
+
+// A responder that ended (here, its hs.fin did not come in time) has its
+// stored snapshot wiped and dropped at once, not left until the next
+// export.
+func TestEndedResponderDropsItsSnapshot(t *testing.T) {
+	ctx := context.Background()
+	_, v, d := pair(t)
+	v.startRekey()
+	if err := d.Poll(ctx); err != nil {
+		t.Fatal(err)
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if len(d.awaiting) != 1 {
+		t.Fatalf("setup: %d responders", len(d.awaiting))
+	}
+	d.export()
+	if len(d.st.Awaiting) != 1 {
+		t.Fatalf("setup: %d stored responders", len(d.st.Awaiting))
+	}
+	s := d.st.Awaiting[0]
+	got := [][]byte{s.Ks, s.Ke, s.PRK, s.RK}
+	d.pruneAwaiting(time.Now().Add(365 * 24 * time.Hour))
+	if len(d.awaiting) != 0 || len(d.st.Awaiting) != 0 {
+		t.Fatalf("%d responders, %d stored, after the prune", len(d.awaiting), len(d.st.Awaiting))
+	}
+	for i, b := range got {
+		if len(b) == 0 || !allZeroBytes(b) {
+			t.Fatalf("secret %d of the stored responder not wiped", i)
+		}
 	}
 }

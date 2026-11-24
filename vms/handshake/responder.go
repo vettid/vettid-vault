@@ -51,14 +51,16 @@ func OpenInit(raw []byte, lookup KeyLookup, now time.Time) (*PendingInit, error)
 	if err != nil {
 		return nil, err
 	}
+	var body *Init
+	kept := false
+	defer func() { dropUnkept(kept, in, body) }()
 	if in.Type != TypeInit {
 		return nil, ErrType
 	}
 	if err := in.CheckTime(now, true); err != nil {
 		return nil, err
 	}
-	body, err := ParseInit(in.Body)
-	if err != nil {
+	if body, err = ParseInit(in.Body); err != nil {
 		return nil, err
 	}
 	if body.Purpose == PurposeRekey {
@@ -71,8 +73,32 @@ func OpenInit(raw []byte, lookup KeyLookup, now time.Time) (*PendingInit, error)
 	if err != nil {
 		return nil, err
 	}
+	kept = true
 	return newPending(raw, in, body, ks)
 }
+
+// dropUnkept drops an hs.init's inner plaintext and parsed body that were
+// not kept in a PendingInit (an error after they were opened).
+func dropUnkept(kept bool, in *envelope.Inner, body *Init) {
+	if !kept {
+		dropInit(in, body)
+	}
+}
+
+// dropInit wipes an hs.init's inner plaintext and its parsed body's
+// secrets, either of which may be nil: every hs.init this package opens or
+// parses and does not hand on goes through it.
+func dropInit(in *envelope.Inner, body *Init) {
+	if testDropInitHook != nil {
+		testDropInitHook(in, body)
+	}
+	in.Wipe()
+	body.Wipe()
+}
+
+// testDropInitHook, set only by tests, sees each hs.init dropInit drops,
+// before it is wiped.
+var testDropInitHook func(in *envelope.Inner, body *Init)
 
 // OpenRekeyInit decrypts a session-mode hs.init with purpose rekey under the
 // session's current epoch; K_s is that epoch's rk (§6.2). Rekeys are
@@ -92,14 +118,16 @@ func OpenRekeyInit(raw []byte, current *Epoch, now time.Time) (*PendingInit, err
 	if err != nil {
 		return nil, err
 	}
+	var body *Init
+	kept := false
+	defer func() { dropUnkept(kept, in, body) }()
 	if in.Type != TypeInit {
 		return nil, ErrType
 	}
 	if err := in.CheckTime(now, true); err != nil {
 		return nil, err
 	}
-	body, err := ParseInit(in.Body)
-	if err != nil {
+	if body, err = ParseInit(in.Body); err != nil {
 		return nil, err
 	}
 	if body.Purpose != PurposeRekey {
@@ -112,6 +140,7 @@ func OpenRekeyInit(raw []byte, current *Epoch, now time.Time) (*PendingInit, err
 	if err != nil {
 		return nil, err
 	}
+	kept = true
 	return newPending(raw, in, body, ks)
 }
 
@@ -130,13 +159,19 @@ func (p *PendingInit) Inner() *envelope.Inner { return p.inner }
 // Th1 returns th1.
 func (p *PendingInit) Th1() [32]byte { return p.th1 }
 
-// Discard wipes the pending state (rejection, expiry).
+// Discard wipes the pending state: at a rejection or expiry, and once the
+// caller has answered (Respond) and taken what it keeps. Init and Inner
+// then read as wiped.
 func (p *PendingInit) Discard() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.used = true
 	suite.Wipe(p.ks)
 	p.ks = nil
+	// The hs.init's plaintext and its parsed secrets (a transfer's app key
+	// and unlock secret): a caller that keeps one has copied it.
+	p.inner.Wipe()
+	p.body.Wipe()
 }
 
 // ResponderConfig configures hs.resp. Since 0.10.3 Respond is not the

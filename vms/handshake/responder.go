@@ -417,6 +417,10 @@ type FinResult struct {
 	SAS string
 }
 
+// testFinFailHook, set only by tests, sees the opened inner HandleFin
+// refused, once wiped.
+var testFinFailHook func(in *envelope.Inner)
+
 // HandleFin processes hs.fin: it decrypts it with the pending epoch's i2r
 // key, verifies sig_I and then, for a purpose with a SAS, the commitment
 // to n_I; only then is the epoch established (§6.3). A message that does
@@ -425,10 +429,6 @@ type FinResult struct {
 // handshake. An hs.fin whose sig_I verifies but whose n_I does not open
 // sas_commit can only come from the initiator: the handshake is aborted
 // and ErrSASCommit returned.
-// testFinFailHook, set only by tests, sees the opened inner HandleFin
-// refused, once wiped.
-var testFinFailHook func(in *envelope.Inner)
-
 func (r *Responder) HandleFin(raw []byte, collectSender ed25519.PublicKey, now time.Time) (*FinResult, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()

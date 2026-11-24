@@ -16,6 +16,14 @@ import (
 
 func allZeroKey(k ed25519.PrivateKey) bool { return len(k) > 0 && bytes.Count(k, []byte{0}) == len(k) }
 
+// wipedAndDropped reports whether r's key copy k (read before the close)
+// was wiped, and r let go of it (dropKey).
+func wipedAndDropped(r *ClientRelay, k ed25519.PrivateKey) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return allZeroKey(k) && r.key == nil
+}
+
 // A long poll blocked on a relay that never answers is ended by Close at
 // the transport: Close returns well within its bound, the call has ended
 // before the key copy is wiped, and the poll reports ErrRelayClosed.
@@ -33,6 +41,7 @@ func TestRelayCloseEndsABlockedCollect(t *testing.T) {
 	testRelayClosedHook = func(e bool) { allEnded = append(allEnded, e) }
 	defer func() { testRelayClosedHook = nil }()
 	r := NewClientRelay(srv.URL, ed25519.NewKeyFromSeed(bytes.Repeat([]byte{1}, 32)), srv.Client(), nil)
+	key := r.key
 	c := r.NewPollCollector(30 * time.Second)
 	errc := make(chan error, 1)
 	go func() { _, err := c.Next(context.Background()); errc <- err }()
@@ -52,7 +61,7 @@ func TestRelayCloseEndsABlockedCollect(t *testing.T) {
 	if len(allEnded) != 1 || !allEnded[0] {
 		t.Fatalf("close wiped with a call still in flight: %v", allEnded)
 	}
-	if !allZeroKey(r.key) {
+	if !wipedAndDropped(r, key) {
 		t.Fatal("the relay's key copy was not wiped")
 	}
 }
@@ -135,8 +144,9 @@ func TestRelayAnswerAfterCloseDropped(t *testing.T) {
 func TestRelayCloseCoversDerivedRelays(t *testing.T) {
 	r := NewClientRelay("https://relay.example", ed25519.NewKeyFromSeed(bytes.Repeat([]byte{4}, 32)), nil, nil)
 	d := r.WithKey(ed25519.NewKeyFromSeed(bytes.Repeat([]byte{5}, 32))).(*ClientRelay)
+	dk := d.key
 	r.Close()
-	if !allZeroKey(d.key) {
+	if !wipedAndDropped(d, dk) {
 		t.Fatal("the derived relay's key copy was not wiped")
 	}
 	if _, err := d.MintOpenToken(time.Minute, ""); !errors.Is(err, ErrRelayClosed) {
@@ -222,6 +232,7 @@ func TestZeroizeCancelsFirstWipesCopiesLast(t *testing.T) {
 	testRelayClosedHook = func(bool) { afterKeys = append(afterKeys, f.m.keys == nil) }
 	f.m.mu.Unlock()
 	defer func() { testRelayClosedHook = nil }()
+	copyKey := cr.key
 	f.m.Crash()
 	if !spy.destroyed || !spy.cancelled {
 		t.Fatalf("the relay's calls were not cancelled before the secrets were destroyed (destroyed %v, cancelled %v)", spy.destroyed, spy.cancelled)
@@ -229,7 +240,7 @@ func TestZeroizeCancelsFirstWipesCopiesLast(t *testing.T) {
 	if len(afterKeys) != 1 || !afterKeys[0] {
 		t.Fatalf("the relay's key copy was not wiped last: %v", afterKeys)
 	}
-	if !allZeroKey(cr.key) {
+	if !wipedAndDropped(cr, copyKey) {
 		t.Fatal("the relay's key copy was kept")
 	}
 	f.m.mu.Lock()
@@ -376,8 +387,9 @@ func TestRelayCloseGuardsAckAndStreamOpen(t *testing.T) {
 func TestRelayReleaseIsOneRelay(t *testing.T) {
 	r := NewClientRelay("https://relay.example", ed25519.NewKeyFromSeed(bytes.Repeat([]byte{7}, 32)), nil, nil)
 	d := r.WithKey(ed25519.NewKeyFromSeed(bytes.Repeat([]byte{8}, 32))).(*ClientRelay)
+	dk := d.key
 	d.Release()
-	if !allZeroKey(d.key) || allZeroKey(r.key) {
+	if !wipedAndDropped(d, dk) || r.key == nil || allZeroKey(r.key) {
 		t.Fatal("Release did not wipe the released relay's copy alone")
 	}
 	if _, err := d.MintOpenToken(time.Minute, ""); !errors.Is(err, ErrRelayClosed) {
@@ -419,11 +431,12 @@ func TestRelayFamilyCloseOneBound(t *testing.T) {
 func TestDropPendingRelayReleases(t *testing.T) {
 	f := newFixture(t)
 	pr := NewClientRelay("https://relay.example", ed25519.NewKeyFromSeed(bytes.Repeat([]byte{11}, 32)), nil, nil)
+	pk := pr.key
 	f.m.mu.Lock()
 	f.m.rk.pending = pr
 	f.m.dropPendingRelay()
 	f.m.mu.Unlock()
-	if !allZeroKey(pr.key) {
+	if !wipedAndDropped(pr, pk) {
 		t.Fatal("the dropped pending relay's key copy was kept")
 	}
 }
@@ -451,6 +464,7 @@ func TestCrashDuringALongPoll(t *testing.T) {
 	defer func() { testRelayClosedHook = nil }()
 	f.m.mu.Lock()
 	cr := NewClientRelay(srv.URL, f.m.keys.relay, srv.Client(), nil)
+	ck := cr.key
 	f.m.relay = f.m.track(cr)
 	f.m.collector = cr.NewPollCollector(30 * time.Second)
 	c := f.m.collector
@@ -473,7 +487,7 @@ func TestCrashDuringALongPoll(t *testing.T) {
 	if len(allEnded) == 0 || !allEnded[0] {
 		t.Fatalf("the key copy was wiped with the call in flight: %v", allEnded)
 	}
-	if !allZeroKey(cr.key) {
+	if !wipedAndDropped(cr, ck) {
 		t.Fatal("the relay's key copy was kept")
 	}
 }

@@ -973,7 +973,7 @@ func (m *Manager) restoreLive() error {
 		}
 		r, err := handshake.RestoreResponder(aw.Resp)
 		if err != nil {
-			delete(m.st.Awaiting, id)
+			m.forgetAwaiting(id)
 			m.audit(m.now(), "handshake_not_restored", aw.PeerID)
 			continue
 		}
@@ -1020,7 +1020,7 @@ func (m *Manager) restoreLive() error {
 		}
 		e, err := handshake.ImportEpoch(r.Epoch)
 		if err != nil || r.Peer == nil {
-			delete(m.st.Requests, id)
+			m.forgetRequestRecord(id)
 			m.audit(m.now(), "handshake_not_restored", "")
 			continue
 		}
@@ -1029,16 +1029,22 @@ func (m *Manager) restoreLive() error {
 	return nil
 }
 
-// exportLive writes live sessions and handshakes back into state.
+// exportLive writes live sessions and handshakes back into state. Each
+// snapshot it replaces is wiped: a restore copies a snapshot's bytes, so
+// nothing live shares them.
 func (m *Manager) exportLive() {
 	for _, p := range m.allPeers() {
 		if kr, ok := m.sessions[p.ID]; ok {
+			old := p.Sessions
 			p.Sessions = kr.Export()
+			old.Wipe()
 		}
 	}
 	for id, e := range m.reqEpochs {
 		if r := m.st.Requests[id]; r != nil {
+			old := r.Epoch
 			r.Epoch = e.Export()
+			old.Wipe()
 		}
 	}
 	for _, id := range sortedKeys(m.awaiting) {
@@ -1047,7 +1053,10 @@ func (m *Manager) exportLive() {
 			continue // removed earlier in this loop
 		}
 		if s, err := r.Export(); err == nil {
-			m.st.Awaiting[id].Resp = s
+			aw := m.st.Awaiting[id]
+			old := aw.Resp
+			aw.Resp = s
+			old.Wipe()
 		}
 	}
 	for _, id := range sortedKeys(m.outgoing) {
@@ -1056,7 +1065,10 @@ func (m *Manager) exportLive() {
 			continue // removed earlier in this loop
 		}
 		if s, err := i.Export(); err == nil {
-			m.st.Outgoing[id].Init = s
+			og := m.st.Outgoing[id]
+			old := og.Init
+			og.Init = s
+			old.Wipe()
 		}
 	}
 	for _, f := range m.features {
@@ -1349,7 +1361,14 @@ func (m *Manager) splitBrain() {
 	m.zeroize()
 }
 
-// zeroize wipes the DEK and every key, and marks the manager locked.
+// zeroize wipes the DEK and every key, and marks the manager locked. It
+// also drops every reference to the Ed25519 private keys it wiped (the
+// vault's relay and identity keys and the relays' copies): crypto/ed25519
+// keeps each key's expanded form (seed, scalar, prefix) cached for as long
+// as the key's bytes are reachable, and that copy cannot be wiped: dropped,
+// the entry becomes collectible, and the copy is freed by a later GC, never
+// wiped. A relay call still in flight when the close's wait ran out keeps
+// its key until it ends.
 func (m *Manager) zeroize() {
 	m.locked = true
 	// The relay cut off first: the collector, then every relay's calls
@@ -1363,6 +1382,9 @@ func (m *Manager) zeroize() {
 	}
 	finishRelays := m.cutRelays()
 	defer finishRelays() // last: wait for the cancelled calls, wipe their key copies
+	// m.relay and m.rk's relays are kept, closed: the workers that run
+	// outside the lock get ErrRelayClosed from them, and a ClientRelay lets
+	// go of its key once wiped (dropKey).
 	m.attStop()
 	if m.push != nil {
 		m.push.stop()
@@ -1424,6 +1446,7 @@ func (m *Manager) zeroize() {
 		}
 	}
 	if m.st != nil {
+		m.wipeSnapshots()
 		if m.st.PendingUnlink != nil {
 			m.st.PendingUnlink.wipe() // the kept send key (§11.14.10); stored under the DEK
 		}
@@ -1448,6 +1471,24 @@ func (m *Manager) zeroize() {
 		}
 	}
 	m.st = nil
+}
+
+// wipeSnapshots wipes the state's session and handshake snapshots (every
+// peer's epochs, the outgoing, awaiting and request handshakes), for
+// zeroize. m.st is not nil.
+func (m *Manager) wipeSnapshots() {
+	for _, p := range m.allPeers() {
+		p.Sessions.Wipe()
+	}
+	for _, og := range m.st.Outgoing {
+		og.Init.Wipe()
+	}
+	for _, aw := range m.st.Awaiting {
+		aw.Resp.Wipe()
+	}
+	for _, r := range m.st.Requests {
+		r.Epoch.Wipe()
+	}
 }
 
 // track records a Relay the Manager made, for zeroize to close. m.mu is

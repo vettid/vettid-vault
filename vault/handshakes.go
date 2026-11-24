@@ -72,6 +72,13 @@ func (m *Manager) handleInit(ctx context.Context, raw []byte, sender ed25519.Pub
 		m.audit(now, "hs_init_rejected", peerID(p))
 		return ackAfterFlush
 	}
+	// Last, whatever happens to it: the hs.init's plaintext and its parsed
+	// secrets (a transfer's app key and unlock secret) are wiped. What is
+	// kept of them is copied (respondFirst).
+	defer pi.Discard()
+	if testPendingInitHook != nil {
+		testPendingInitHook(pi)
+	}
 	body := pi.Init()
 	if body.Purpose == handshake.PurposeReconnect && m.initAnswered(pi.Th1()) {
 		// §6.6 "Replay" (0.72.0): a reconnect hs.init already answered is
@@ -233,7 +240,7 @@ func (m *Manager) respondFirst(pi *handshake.PendingInit, inv *Invite, sender ed
 	p.Name = profileName(body.Profile)
 	p.Profile = body.Profile
 	p.Attestation = binding
-	p.APIKey = body.APIKey // a transfer's new app (0.15.0)
+	p.APIKey = append([]byte(nil), body.APIKey...) // a transfer's new app (0.15.0); the parsed one is wiped
 	if inv.CreatedBy == inviteByRecovery {
 		// Release R: the recovered phone's first handshake; it becomes
 		// the holder when it completes (§11.14.6).
@@ -799,6 +806,7 @@ func (m *Manager) handleRekeyInit(ctx context.Context, p *Peer, in *envelope.Inn
 		for _, r := range b.Rotations {
 			m.rotationConflict(p, r, now) // recorded as seen now that it passed (rule C)
 		}
+		dropParsedInit(b)
 	}
 	if kr.Current() != ep {
 		if bytes.Equal(epID[:], p.confirmedID()) && ep.HasRK() {
@@ -807,6 +815,7 @@ func (m *Manager) handleRekeyInit(ctx context.Context, p *Peer, in *envelope.Inn
 			var rots []*handshake.Rotation
 			if b, err := handshake.ParseInit(in.Body); err == nil {
 				rots = b.Rotations
+				dropParsedInit(b) // the rotations are kept
 			}
 			m.rekeyOtherEpoch(p, ep, rots, now)
 			m.audit(now, "rekey_not_current_epoch", p.ID)
@@ -817,6 +826,10 @@ func (m *Manager) handleRekeyInit(ctx context.Context, p *Peer, in *envelope.Inn
 	if err != nil {
 		m.audit(now, "rekey_rejected", p.ID)
 		return ackAfterFlush
+	}
+	defer pi.Discard() // last: the hs.init's plaintext (in, now pi's) and parsed body
+	if testPendingInitHook != nil {
+		testPendingInitHook(pi)
 	}
 	if m.initAnswered(pi.Th1()) {
 		// (0.88.2, the final review's F2) The same rekey hs.init again (I
@@ -1012,7 +1025,7 @@ func (m *Manager) handleFin(ctx context.Context, id string, raw []byte, sender e
 		m.audit(now, "hs_fin_rejected", aw.PeerID)
 		return ackAfterFlush
 	}
-	delete(m.st.Awaiting, id)
+	m.forgetAwaiting(id)
 	delete(m.awaiting, id)
 	if aw.New != nil && !aw.Direct {
 		m.newRequest(aw, fr, now)
@@ -1495,6 +1508,7 @@ func (m *Manager) handleResp(ctx context.Context, id string, raw []byte, sender 
 		// whose relay links connect its sender to the key it announces.
 		sp := m.peer(og.PeerID)
 		peek := m.peekResp(sp, ini, raw, sender, now)
+		defer peek.Wipe() // the copy's hs.resp plaintext
 		rk8 := peek != nil && og.Purpose == handshake.PurposeReconnect && m.rk8Applies(sp, peek.Resp.RelayLinks) && peek.Resp.Relay != nil
 		if rk8 && rk8EndRefused(sender, peek.Resp.RelayLinks) {
 			m.refusePeerKey(sp, "relay_unlinked", now) // parse time: no link checked or kept
@@ -1532,11 +1546,17 @@ func (m *Manager) handleResp(ctx context.Context, id string, raw []byte, sender 
 		from = ini.ResponderRelayKey() // acceptFrom judged the sender
 	}
 	res, err := ini.HandleResp(raw, from, now)
+	if err == nil {
+		defer res.Wipe() // last: the hs.resp's plaintext, its tokens taken
+		if testRespResultHook != nil {
+			testRespResultHook(res)
+		}
+	}
 	if err != nil {
 		if ini.Done() { // Export would marshal the hs.init again
 			// Aborted (§6.3): the handshake is gone.
 			m.audit(now, "hs_resp_aborted", og.PeerID)
-			delete(m.st.Outgoing, id)
+			m.forgetOutgoing(id)
 			delete(m.outgoing, id)
 			for _, t := range og.Issued {
 				m.revokeIssued(t, og.PeerID, now) // always (review 3)
@@ -1553,7 +1573,7 @@ func (m *Manager) handleResp(ctx context.Context, id string, raw []byte, sender 
 		}
 		return ackAfterFlush
 	}
-	delete(m.st.Outgoing, id)
+	m.forgetOutgoing(id)
 	delete(m.outgoing, id)
 	if og.New != nil {
 		m.outgoingEstablished(og, res, now)
@@ -1745,12 +1765,61 @@ func (m *Manager) handleResp(ctx context.Context, id string, raw []byte, sender 
 	return ackAfterFlush
 }
 
+// dropParsedInit wipes the secrets of an hs.init body the vault parsed only
+// to read its links (a session-mode one, whose purpose may not be checked
+// yet: an app hs.init sent so would carry its app key and unlock secret).
+func dropParsedInit(b *handshake.Init) {
+	if testParsedInitHook != nil {
+		testParsedInitHook(b)
+	}
+	b.Wipe()
+}
+
+// testParsedInitHook, set only by tests, sees each body dropParsedInit
+// drops, before it is wiped.
+var testParsedInitHook func(*handshake.Init)
+
+// testPendingInitHook and testRespResultHook, set only by tests, see each
+// hs.init a handler opened and each hs.resp result it read (also a peek's).
+var (
+	testPendingInitHook func(*handshake.PendingInit)
+	testRespResultHook  func(*handshake.Result)
+)
+
 func (m *Manager) dropOutgoing(id string) {
 	if i := m.outgoing[id]; i != nil {
 		i.Abort()
 	}
 	delete(m.outgoing, id)
+	m.forgetOutgoing(id)
+}
+
+// forgetOutgoing deletes an outgoing handshake's record, its snapshot (the
+// ephemeral seed, K_s, n_I and the hs.init body) wiped first. Every delete
+// of such a record goes through it, as of the two kinds below.
+func (m *Manager) forgetOutgoing(id string) {
+	if og := m.st.Outgoing[id]; og != nil {
+		og.Init.Wipe()
+	}
 	delete(m.st.Outgoing, id)
+}
+
+// forgetAwaiting deletes an awaiting handshake's record, its responder
+// snapshot wiped first.
+func (m *Manager) forgetAwaiting(id string) {
+	if aw := m.st.Awaiting[id]; aw != nil {
+		aw.Resp.Wipe()
+	}
+	delete(m.st.Awaiting, id)
+}
+
+// forgetRequestRecord deletes a request's record, its epoch snapshot wiped
+// first.
+func (m *Manager) forgetRequestRecord(id string) {
+	if r := m.st.Requests[id]; r != nil {
+		r.Epoch.Wipe()
+	}
+	delete(m.st.Requests, id)
 }
 
 func (m *Manager) recordOutgoing(ini *handshake.Initiator, peerID string, newPeer *Peer, purpose handshake.Purpose, issued []IssuedToken, now time.Time) (*OutgoingHS, error) {

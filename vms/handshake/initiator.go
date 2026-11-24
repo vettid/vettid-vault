@@ -295,6 +295,14 @@ type Result struct {
 	SAS string
 }
 
+// Wipe wipes the hs.resp's inner plaintext (its tokens) once the caller has
+// taken what it keeps from the result.
+func (r *Result) Wipe() {
+	if r != nil {
+		r.Inner.Wipe()
+	}
+}
+
 // HandleResp processes hs.resp. collectSender is the relay `sender` of the
 // deposit; it must be R's relay key on record (§6.3). sig_R is verified
 // before any epoch key is used.

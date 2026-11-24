@@ -388,6 +388,7 @@ func (m *Manager) removePeerWith(p *Peer, notice string, body json.RawMessage, n
 			m.dropOutgoing(id)
 		}
 	}
+	p.Sessions.Wipe() // the peer's epoch keys, as stored
 	delete(m.st.Devices, p.ID)
 	delete(m.st.Connections, p.ID)
 	m.dirty = true

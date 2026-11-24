@@ -267,7 +267,7 @@ func (m *Manager) peerApproved(r *Request, in *envelope.Inner, now time.Time) {
 func (m *Manager) activateRequest(r *Request, now time.Time) {
 	ep := m.reqEpochs[r.ID]
 	delete(m.reqEpochs, r.ID)
-	delete(m.st.Requests, r.ID)
+	m.forgetRequestRecord(r.ID)
 	m.dirty = true
 	if ep == nil {
 		return
@@ -290,7 +290,7 @@ func (m *Manager) dropRequest(r *Request, now time.Time) {
 		e.Destroy()
 	}
 	delete(m.reqEpochs, r.ID)
-	delete(m.st.Requests, r.ID)
+	m.forgetRequestRecord(r.ID)
 	m.denyPeerTokens(r.Peer, now)
 	m.dirty = true
 }
@@ -373,7 +373,7 @@ func (m *Manager) dropAwaiting(id, reason string, now time.Time) {
 		r.Abort()
 	}
 	delete(m.awaiting, id)
-	delete(m.st.Awaiting, id)
+	m.forgetAwaiting(id)
 	m.dirty = true
 	if aw == nil || aw.New == nil {
 		return

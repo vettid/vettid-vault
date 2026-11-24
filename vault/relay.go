@@ -160,18 +160,41 @@ func newClientRelay(baseURL string, key ed25519.PrivateKey, httpClient *http.Cli
 	}
 	own := append(ed25519.PrivateKey(nil), key...)
 	g := newRelayGuard(own)
-	fam.add(g)
-	return &ClientRelay{base: strings.TrimRight(baseURL, "/"), key: own, http: httpClient, now: now, g: g, fam: fam,
+	r := &ClientRelay{base: strings.TrimRight(baseURL, "/"), key: own, http: httpClient, now: now, g: g, fam: fam,
 		clients: map[string]*relayclient.Client{}, deposits: map[string]*relayclient.Client{}}
+	g.drop = r.dropKey // set before the family can close it
+	fam.add(g)
+	return r
+}
+
+// dropKey lets go of every reference to the relay's key copy, once its
+// guard has wiped the copy and no call is in flight: its own, and its
+// clients'. crypto/ed25519 caches each key's expanded form (seed, scalar
+// and prefix) for as long as the key's bytes are reachable, so only
+// dropping them all makes that copy collectible: a later GC frees it, and
+// it is never wiped.
+func (r *ClientRelay) dropKey() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.key = nil
+	for _, c := range r.clients {
+		c.Key = nil
+	}
+	for _, c := range r.deposits {
+		c.Key = nil
+	}
 }
 
 // Close ends the requests in flight of the relay and of every relay of its
 // family (WithKey's), waits for them up to relayCloseWait, and then wipes
-// all their key copies: also if the wait ran out, so that a request that
-// does not end leaves no key behind (fail secure). An answer that arrives
-// after Close is not used: the call returns ErrRelayClosed. Every later
-// call returns ErrRelayClosed. Close is for the end of the vault's keys
-// (zeroize); to drop one relay, use Release.
+// all their key copies: also if the wait ran out (fail secure), the seed
+// alone then. A request that does not end keeps the key's references until
+// it returns (relayclient's HTTP timeout bounds that), and with them
+// crypto/ed25519's cached expansion of the key (seed, scalar and prefix),
+// which nothing can wipe; once it returns they are dropped (dropKey). An
+// answer that arrives after Close is not used: the call returns
+// ErrRelayClosed. Every later call returns ErrRelayClosed. Close is for
+// the end of the vault's keys (zeroize); to drop one relay, use Release.
 func (r *ClientRelay) Close() { r.cut()(time.Now().Add(relayCloseWait)) }
 
 // cut is Close in two steps: it refuses new calls and cancels those in
@@ -264,6 +287,12 @@ type relayGuard struct {
 	inflight int
 	closed   bool
 	key      ed25519.PrivateKey
+	// drop, run once after the wipe with no call in flight (at the wipe, or
+	// as the last call left after a close that timed out ends: dropDue),
+	// lets go of the key's other references ([ClientRelay.dropKey]). Run
+	// without mu.
+	drop    func()
+	dropDue bool
 }
 
 func newRelayGuard(key ed25519.PrivateKey) *relayGuard {
@@ -290,8 +319,23 @@ func (g *relayGuard) enter(ctx context.Context) (context.Context, func(), error)
 		g.mu.Lock()
 		g.inflight--
 		g.idle.Broadcast()
+		drop := g.takeDrop()
 		g.mu.Unlock()
+		if drop != nil {
+			drop()
+		}
 	}, nil
+}
+
+// takeDrop returns drop once it is due (the key wiped, no call in flight),
+// and never again. mu is held.
+func (g *relayGuard) takeDrop() func() {
+	if !g.dropDue || g.inflight > 0 {
+		return nil
+	}
+	drop := g.drop
+	g.drop, g.dropDue = nil, false
+	return drop
 }
 
 func (g *relayGuard) isClosed() bool {
@@ -327,6 +371,12 @@ func (g *relayGuard) close(deadline time.Time) bool {
 		g.mu.Unlock()
 	})
 	defer t.Stop()
+	var drop func()
+	defer func() { // after the unlock below
+		if drop != nil {
+			drop()
+		}
+	}()
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	for g.inflight > 0 && !timedOut {
@@ -350,6 +400,8 @@ func (g *relayGuard) close(deadline time.Time) bool {
 		suite.Wipe(g.key[:ed25519.SeedSize])
 	}
 	g.key = nil
+	g.dropDue = true
+	drop = g.takeDrop() // or as the last call in flight ends
 	if testRelayClosedHook != nil {
 		testRelayClosedHook(g.inflight == 0)
 	}

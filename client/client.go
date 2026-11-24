@@ -497,6 +497,15 @@ func (d *Device) Save() ([]byte, error) {
 	return json.Marshal(d.st)
 }
 
+// dropOutgoingSnapshot wipes and drops the stored snapshot of a handshake
+// that ended (its eph seed, K_s, n_I, and the hs.init body with a
+// transfer's unlock secret), rather than leave it until the next export.
+// d.mu is held.
+func (d *Device) dropOutgoingSnapshot() {
+	wipeBytes(reflect.ValueOf(d.st.Outgoing))
+	d.st.Outgoing = nil
+}
+
 func (d *Device) export() {
 	// The snapshots replaced hold key material: wiped, not left behind.
 	if d.st.Vault != nil {
@@ -504,13 +513,19 @@ func (d *Device) export() {
 		d.st.Vault.Sessions = d.keyring.Export()
 	}
 	wipeBytes(reflect.ValueOf(d.st.Outgoing))
-	wipeBytes(reflect.ValueOf(d.st.Awaiting))
 	d.st.Outgoing = nil
 	if d.ini != nil {
 		if s, err := d.ini.Export(); err == nil {
 			d.st.Outgoing = &s
 		}
 	}
+	d.exportAwaiting()
+}
+
+// exportAwaiting replaces the stored responder snapshots with those of the
+// responders still awaiting hs.fin, the old ones wiped. d.mu is held.
+func (d *Device) exportAwaiting() {
+	wipeBytes(reflect.ValueOf(d.st.Awaiting))
 	d.st.Awaiting, d.st.AwaitingSince = nil, nil
 	for i, r := range d.awaiting {
 		if s, err := r.Export(); err == nil {
@@ -905,6 +920,12 @@ func (d *Device) startInitWith(purpose handshake.Purpose, ctxID, depositToken st
 	if _, err := d.relayClient(v.RelayURL).Deposit(dctx, v.Mailbox, depositToken, ini.Envelope()); err != nil {
 		ini.Abort() // never kept: its keys and secrets go now
 		return err
+	}
+	if d.ini != nil {
+		// A retry replaces the earlier handshake: its keys, its hs.init
+		// (with a transfer's unlock secret) and its stored snapshot go.
+		d.ini.Abort()
+		d.dropOutgoingSnapshot()
 	}
 	d.ini = ini
 	d.st.PairingPending = true
@@ -2409,6 +2430,7 @@ func (d *Device) handleResp(ctx context.Context, raw []byte, sender ed25519.Publ
 	if err != nil {
 		if d.ini.Done() { // aborted (§6.3); Export would marshal the hs.init again
 			d.ini, d.hsFailed = nil, true
+			d.dropOutgoingSnapshot()
 		}
 		return
 	}
@@ -2416,6 +2438,7 @@ func (d *Device) handleResp(ctx context.Context, raw []byte, sender ed25519.Publ
 	// device reads what it needs from res.Resp, then wipes it.
 	defer dropped(res.Inner)
 	d.ini, d.sas = nil, res.SAS
+	d.dropOutgoingSnapshot()
 	if res.Resp.Token != "" {
 		if exp, err := d.heldFromVault(res.Resp.Token); err == nil {
 			d.st.Vault.Token, d.st.Vault.TokenExp = res.Resp.Token, exp
@@ -2437,6 +2460,10 @@ func (d *Device) handleResp(ctx context.Context, raw []byte, sender ed25519.Publ
 	}
 }
 
+// testRekeyRefusedHook, set only by tests, sees each rekey whose answer
+// Respond refused, before it is discarded.
+var testRekeyRefusedHook func(*handshake.PendingInit)
+
 // handleRekey answers a vault-initiated rekey (§6.5).
 func (d *Device) handleRekey(ctx context.Context, raw []byte, in *envelope.Inner, ep *handshake.Epoch, sender ed25519.PublicKey, now time.Time) {
 	if d.keyring.Current() != ep && !d.isConfirmed(ep) {
@@ -2454,6 +2481,10 @@ func (d *Device) handleRekey(ctx context.Context, raw []byte, in *envelope.Inner
 		RecordRelayKey: v.RelayPK, KnownInitiatorIK: v.IK, KnownInitiatorChain: d.knownFor(pi.Init().Rotations), Now: now, Features: Features(),
 	})
 	if err != nil {
+		if testRekeyRefusedHook != nil {
+			testRekeyRefusedHook(pi)
+		}
+		pi.Discard() // K_s, a copy of the epoch's rk, which Respond keeps on a refusal
 		return
 	}
 	// S8: the vault's links the rekey carried were checked by Respond (a
@@ -2523,10 +2554,12 @@ func (d *Device) recordInner(in *envelope.Inner, now time.Time) {
 	d.st.SeenInner[in.ID] = now
 }
 
-// dropAwaiting removes the i-th responder awaiting hs.fin.
+// dropAwaiting removes the i-th responder awaiting hs.fin, and with it
+// its stored snapshot (wiped), rather than leave it until the next export.
 func (d *Device) dropAwaiting(i int) {
 	d.awaiting = append(d.awaiting[:i:i], d.awaiting[i+1:]...)
 	d.awaitingSince = append(d.awaitingSince[:i:i], d.awaitingSince[i+1:]...)
+	d.exportAwaiting()
 }
 
 // pruneAwaiting aborts the responders whose hs.fin has not come within

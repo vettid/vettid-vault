@@ -335,7 +335,7 @@ func (m *Manager) abandonAwaiting(id string, now time.Time) {
 	}
 	m.dropOutboxEntry(aw.RespOutbox)
 	delete(m.awaiting, id)
-	delete(m.st.Awaiting, id)
+	m.forgetAwaiting(id)
 	m.dirty = true
 }
 

@@ -745,9 +745,48 @@ func TestDropOp(t *testing.T) {
 	}
 }
 
+// answerNotAnObject answers the next request d sends with an OK response
+// whose body is a JSON array, put straight into d's buffered events: an
+// envelope cannot carry one (sealing and opening both require an object),
+// so this reaches sealedWith's own check of the body. It stops when the
+// test ends.
+func answerNotAnObject(t *testing.T, d *Device) {
+	d.mu.Lock()
+	before := map[string]bool{}
+	for id := range d.asked {
+		before[id] = true
+	}
+	d.mu.Unlock()
+	done := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	t.Cleanup(func() { close(done); wg.Wait() })
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-done:
+				return
+			case <-time.After(time.Millisecond):
+			}
+			d.mu.Lock()
+			for id := range d.asked {
+				if !before[id] {
+					d.events = append(d.events, &envelope.Inner{ID: id + "r", Type: "x.sealed", TS: time.Now(), Re: id,
+						Status: envelope.StatusOK, Body: []byte(`[]`)})
+					d.mu.Unlock()
+					return
+				}
+			}
+			d.mu.Unlock()
+		}
+	}()
+}
+
 // sealedWith destroys the reply key on every path that does not hand it
 // to the caller: a refused response, a body keep refuses, a wait that
-// ends; on success the caller gets it, intact.
+// ends, a send that fails, an OK body that is not an object, a bad UTK
+// key, a credential it cannot read; on success the caller gets it, intact.
 func TestSealedWithDestroysTheReplyKey(t *testing.T) {
 	ctx := context.Background()
 	ek, err := suite.GeneratePrivateKey()
@@ -755,21 +794,41 @@ func TestSealedWithDestroysTheReplyKey(t *testing.T) {
 		t.Fatal(err)
 	}
 	u := UTK{ID: "u1", EK: ek.Public().Bytes(), Expires: time.Now().Add(time.Hour)}
+	badEK := u
+	badEK.EK = []byte("not a key")
+	ok := &answer{body: func(strictjson.Object) []byte { return []byte(`{}`) }}
 	for _, c := range []struct {
-		name    string
-		answer  *answer
-		timeout time.Duration
-		ok      bool
+		name     string
+		answer   *answer
+		timeout  time.Duration
+		ok       bool
+		u        *UTK                          // instead of u
+		withBlob bool                          // the credential from the Device
+		setup    func(t *testing.T, d *Device) // before the call
+		wantErr  error                         // the error, when it is known
 	}{
-		{"refused", &answer{code: "forbidden"}, 0, false},
-		{"keep refuses the body", &answer{body: func(strictjson.Object) []byte { return []byte(`{"utks":"not a list"}`) }}, 0, false},
-		{"the wait ends", nil, 50 * time.Millisecond, false},
-		{"success", &answer{body: func(strictjson.Object) []byte { return []byte(`{}`) }}, 0, true},
+		{name: "refused", answer: &answer{code: "forbidden"}},
+		{name: "keep refuses the body", answer: &answer{body: func(strictjson.Object) []byte { return []byte(`{"utks":"not a list"}`) }}},
+		{name: "the wait ends", timeout: 50 * time.Millisecond},
+		{name: "the send fails", answer: ok, setup: func(_ *testing.T, d *Device) { _ = d.Close() }, wantErr: ErrClosed},
+		// The timeout only bounds a regression: the injected answer comes at once.
+		{name: "the OK body is not an object", timeout: 10 * time.Second, setup: answerNotAnObject, wantErr: ErrProtocol},
+		{name: "the UTK's key is bad", answer: ok, u: &badEK, wantErr: ErrProtocol},
+		{name: "no credential", answer: ok, withBlob: true, wantErr: ErrNoCredential,
+			setup: func(_ *testing.T, d *Device) { d.mu.Lock(); d.st.Credential = nil; d.mu.Unlock() }},
+		{name: "success", answer: ok, ok: true},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			_, v, d := pair(t)
 			if c.answer != nil {
 				answeringWith(t, v, map[string]answer{"x.sealed": *c.answer})
+			}
+			if c.setup != nil {
+				c.setup(t, d)
+			}
+			cu := u
+			if c.u != nil {
+				cu = *c.u
 			}
 			var destroyed []*suite.PrivateKey
 			testReplyKeyHook = func(k *suite.PrivateKey) { destroyed = append(destroyed, k) }
@@ -780,7 +839,7 @@ func TestSealedWithDestroysTheReplyKey(t *testing.T) {
 				cctx, cancel = context.WithTimeout(ctx, c.timeout)
 				defer cancel()
 			}
-			o, rk, _, err := d.sealedWith(cctx, "x.sealed", u, nil, false, map[string]any{"pin": "1234"}, true, nil)
+			o, rk, _, err := d.sealedWith(cctx, "x.sealed", cu, nil, c.withBlob, map[string]any{"pin": "1234"}, true, nil)
 			if c.ok {
 				if err != nil || rk == nil || len(destroyed) != 0 {
 					t.Fatalf("err %v, key %v, %d destroyed", err, rk != nil, len(destroyed))
@@ -794,6 +853,9 @@ func TestSealedWithDestroysTheReplyKey(t *testing.T) {
 			}
 			if err == nil || rk != nil {
 				t.Fatalf("err %v, key returned %v", err, rk != nil)
+			}
+			if c.wantErr != nil && !errors.Is(err, c.wantErr) {
+				t.Fatalf("err %v, want %v", err, c.wantErr)
 			}
 			if len(destroyed) != 1 {
 				t.Fatalf("%d reply keys destroyed, want 1", len(destroyed))

@@ -490,3 +490,44 @@ func transferInitCfg(t *testing.T, i, r *party) InitiatorConfig {
 	cfg.UnlockSecret = bytes.Repeat([]byte{0x5a}, altchan.UnlockSecretSize)
 	return cfg
 }
+
+// A message of the new epoch that arrives before hs.fin is opened, refused
+// (ErrType) and dropped by HandleFin: its plaintext is wiped. The real
+// hs.fin still finishes the handshake afterwards.
+func TestHandleFinWipesARefusedMessage(t *testing.T) {
+	i, r := newParty(t, 0x10), newParty(t, 0x20)
+	ini, err := NewInitiator(initCfg(i, r, PurposeApp))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := OpenInit(ini.Envelope(), r.lookup, t0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, respEnv, err := p.Respond(respCfg(i, r, PurposeApp))
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := ini.HandleResp(respEnv, r.relayPK(), t0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, _ := envelope.NewULID(t0)
+	early, err := res.Epoch.Seal(&envelope.Inner{ID: id, Type: "test.early", TS: t0, Body: []byte(`{"secret":"before the fin"}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var refused []*envelope.Inner
+	testFinFailHook = func(in *envelope.Inner) { refused = append(refused, in) }
+	t.Cleanup(func() { testFinFailHook = nil })
+	if _, err := resp.HandleFin(early, i.relayPK(), t0); !errors.Is(err, ErrType) {
+		t.Fatalf("HandleFin of a message before hs.fin: %v, want ErrType", err)
+	}
+	if len(refused) != 1 || refused[0].ID != id || len(refused[0].Body) == 0 || !allZero(refused[0].Body) {
+		t.Fatalf("the refused message's plaintext was not wiped: %+v", refused)
+	}
+	fr, err := resp.HandleFin(res.Fin, i.relayPK(), t0)
+	if err != nil || fr.SAS != res.SAS {
+		t.Fatalf("the hs.fin after it: %v", err)
+	}
+}

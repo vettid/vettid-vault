@@ -411,6 +411,7 @@ func (m *Manager) handleRequestMessage(id string, env *envelope.Envelope, now ti
 		m.audit(now, "decrypt_failed", "")
 		return ackAfterFlush
 	}
+	defer wipeInner(in)
 	if in.Type == handshake.TypeFin {
 		return ackAfterFlush // a redelivered hs.fin: already processed
 	}
@@ -466,8 +467,11 @@ func (m *Manager) handleOnRequestToken(ctx context.Context, env *envelope.Envelo
 	}
 	if p != nil {
 		if kr := m.sessions[p.ID]; kr != nil {
-			if in, _, err := kr.Open(env, now); err == nil && in.Re == "" {
+			if in, _, err := kr.Open(env, now); err == nil {
+				defer wipeInner(in)
 				switch {
+				case in.Re != "":
+					// A response: misuse, as below.
 				case in.Type == tokenRefreshType:
 					m.respondError(p, in, p.ID+"|"+in.ID, "forbidden", "", now)
 					return ackAfterFlush

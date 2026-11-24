@@ -332,6 +332,13 @@ func (m *Manager) endAccess(ctx context.Context, p *Peer, notify bool, reason, e
 // approval's id, or the error code the request was answered with instead
 // (limit, internal).
 func (m *Manager) hold(p *Peer, in *envelope.Inner, key string, volatile bool, a Approval, now time.Time) (id, code string) {
+	return m.holdAs(p, in, nil, key, volatile, a, now)
+}
+
+// holdAs is hold with the request's stored bytes given: [stored] when not
+// nil (a request held again, kept as approved), else [in] marshalled. The
+// held request owns what it is given.
+func (m *Manager) holdAs(p *Peer, in *envelope.Inner, stored []byte, key string, volatile bool, a Approval, now time.Time) (id, code string) {
 	rkey := key
 	if volatile {
 		rkey = volatileKey
@@ -346,9 +353,12 @@ func (m *Manager) hold(p *Peer, in *envelope.Inner, key string, volatile bool, a
 		m.respondErrorBody(p, in, rkey, "limit", "", limitBody("held_approvals", MaxHeldPerDevice, -1), now)
 		return "", "limit"
 	}
-	c := *in
-	c.Seq = 0 // kept without the session's seq, like cached responses
-	raw, err := c.Marshal(envelope.ModeSealed)
+	raw, err := stored, error(nil)
+	if raw == nil {
+		c := *in
+		c.Seq = 0 // kept without the session's seq, like cached responses
+		raw, err = c.Marshal(envelope.ModeSealed)
+	}
 	if err != nil {
 		m.respondError(p, in, rkey, "internal", "", now)
 		return "", "internal"
@@ -521,11 +531,13 @@ func (m *Manager) runHeld(ctx context.Context, h *HeldRequest, now time.Time) st
 		volatile := te.spec.Volatile && te.spec.Request && in.Re == ""
 		a := ra.Approval
 		a.replaces = h.ID
-		id, code := m.hold(p, in, h.Key, volatile, a, now)
+		// Kept as approved, not re-encoded: no other copy is made.
+		stored := append([]byte(nil), h.Inner...)
+		_, code := m.holdAs(p, in, stored, h.Key, volatile, a, now)
 		if code != "" {
+			suite.Wipe(stored) // not held (the limit): nothing keeps it
 			return code
 		}
-		m.st.Held[id].Inner = append([]byte(nil), h.Inner...) // as approved, not re-encoded
 		return "referred"
 	case errors.As(herr, &he):
 		m.respondErrorBody(p, in, key, he.Code, he.Message, he.Body, now)

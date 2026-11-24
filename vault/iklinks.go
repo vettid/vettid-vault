@@ -602,7 +602,6 @@ func (m *Manager) sealHeld(p *Peer) {
 		if err != nil {
 			// Unreadable: dropped and audited (§3.4.1 "After a demotion":
 			// no held message goes silently).
-			wipeInner(in)
 			m.notDelivered(e, "held_unsealable", now)
 			continue
 		}

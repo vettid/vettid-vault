@@ -522,11 +522,11 @@ func (d *Device) export() {
 	d.exportAwaiting()
 }
 
-// exportAwaiting replaces the stored responder snapshots with those of the
-// responders still awaiting hs.fin, the old ones wiped. d.mu is held.
 // testExportAwaitingHook, set only by tests, runs at each exportAwaiting.
 var testExportAwaitingHook func()
 
+// exportAwaiting replaces the stored responder snapshots with those of the
+// responders still awaiting hs.fin, the old ones wiped. d.mu is held.
 func (d *Device) exportAwaiting() {
 	if testExportAwaitingHook != nil {
 		testExportAwaitingHook()

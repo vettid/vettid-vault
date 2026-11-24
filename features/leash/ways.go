@@ -2,6 +2,7 @@ package leash
 
 import (
 	"encoding/json"
+	"errors"
 	"time"
 
 	"github.com/vettid/vettid-vault/features/itemspec"
@@ -107,6 +108,12 @@ func (f *Feature) itemSet(s *vault.Session, body []byte) (json.RawMessage, error
 	}
 	next, err := itemspec.ParseWays(o, cur)
 	if err != nil {
+		// (0.93.2) error.message names the member and the rule broken
+		// (§10.11 "Why a setting is refused").
+		var r *itemspec.Refusal
+		if errors.As(err, &r) {
+			return nil, vault.NewError("bad_request", r.Message())
+		}
 		return nil, errBad
 	}
 	if itemspec.Widens(cur, next) && !f.windowOpen(s) {

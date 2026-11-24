@@ -221,22 +221,32 @@ func nonNilStrs(l []string) []string {
 // body strictly (§10.11), against cur, the item's current settings (nil:
 // absent). A pin (sha256 and path) may only be kept from cur's entry with
 // the same program, or left out; the vault records new pins itself
-// (0.85.3). Errors are ErrWays.
+// (0.85.3). Errors are a *Refusal (errors.Is ErrWays): the first rule
+// broken, taking the members in the specification's order (ways, then
+// run's programs, each and folders, then proxy's hosts, header and
+// prefix; entries by index), and for a rule between entries the later
+// entry (0.93.2 "Why a setting is refused").
 func ParseWays(o strictjson.Object, cur *ItemWays) (*ItemWays, error) {
 	raw, err := o.Array("ways")
 	if err != nil {
-		return nil, ErrWays
+		return nil, refuseType(o, "ways", ruleNotList)
 	}
 	seen := map[string]bool{}
 	for _, r := range raw {
 		s, err := strictjson.AsString(r)
-		if err != nil || !contains(wayOrder, s) || seen[s] {
-			return nil, ErrWays
+		if err != nil {
+			return nil, refuse("ways", ruleNotString)
+		}
+		if !contains(wayOrder, s) {
+			return nil, refuse("ways", "not a known way")
+		}
+		if seen[s] {
+			return nil, refuse("ways", ruleRepeated)
 		}
 		seen[s] = true
 	}
 	if !seen[WayUse] {
-		return nil, ErrWays // ways always holds use
+		return nil, refuse("ways", "without use") // ways always holds use
 	}
 	w := &ItemWays{}
 	for _, way := range wayOrder {
@@ -245,8 +255,11 @@ func ParseWays(o strictjson.Object, cur *ItemWays) (*ItemWays, error) {
 		}
 	}
 	runRaw, hasRun, err := o.OptObjectRaw("run")
-	if err != nil || hasRun != seen[WayRun] {
-		return nil, ErrWays // present exactly when ways holds run
+	if err != nil {
+		return nil, refuse("run", ruleNotObject)
+	}
+	if hasRun != seen[WayRun] {
+		return nil, refuse("run", presence(hasRun, "the run way")) // present exactly when ways holds run
 	}
 	if hasRun {
 		if w.Run, err = parseRun(runRaw, cur); err != nil {
@@ -254,8 +267,11 @@ func ParseWays(o strictjson.Object, cur *ItemWays) (*ItemWays, error) {
 		}
 	}
 	proxyRaw, hasProxy, err := o.OptObjectRaw("proxy")
-	if err != nil || hasProxy != seen[WayProxy] {
-		return nil, ErrWays
+	if err != nil {
+		return nil, refuse("proxy", ruleNotObject)
+	}
+	if hasProxy != seen[WayProxy] {
+		return nil, refuse("proxy", presence(hasProxy, "the proxy way"))
 	}
 	if hasProxy {
 		if w.Proxy, err = parseProxy(proxyRaw); err != nil {
@@ -269,81 +285,128 @@ func ParseWays(o strictjson.Object, cur *ItemWays) (*ItemWays, error) {
 // (bad_request).
 var ErrWays = errors.New("itemspec: bad item_ways")
 
+// Refusal is why a leash.item.set body is refused (§10.11 "Why a setting
+// is refused", 0.93.2): the member's path in the body and the rule it
+// breaks. It is ErrWays. Message is error.message: printable ASCII, at
+// most 200 bytes, never a value the member typed (a variable name the
+// vault refuses by its own list excepted, once it has the name's form).
+type Refusal struct{ Member, Rule string }
+
+func (r *Refusal) Error() string { return "itemspec: " + r.Message() }
+func (r *Refusal) Unwrap() error { return ErrWays }
+
+// Message is "<member>: <rule>".
+func (r *Refusal) Message() string { return r.Member + ": " + r.Rule }
+
+func refuse(member, rule string) error { return &Refusal{Member: member, Rule: rule} }
+
+// refuseType is the refusal of o's member name that is missing or of the
+// wrong type (rule).
+func refuseType(o strictjson.Object, name, rule string) error {
+	if _, present := o[name]; !present {
+		return refuse(name, ruleMissing)
+	}
+	return refuse(name, rule)
+}
+
+// presence is the rule for a member present without its way, or missing
+// with it.
+func presence(present bool, way string) string {
+	if present {
+		return "present without " + way
+	}
+	return ruleMissing + " for " + way
+}
+
+// at is a member path with an index: run.programs[2].
+func at(member string, i int) string { return member + "[" + strconv.Itoa(i) + "]" }
+
 func parseRun(raw []byte, cur *ItemWays) (*RunWays, error) {
 	o, err := strictjson.AsObject(raw)
 	if err != nil {
-		return nil, ErrWays
+		return nil, refuse("run", ruleNotObject)
 	}
 	arr, err := o.Array("programs")
-	if err != nil || len(arr) > MaxPrograms {
-		return nil, ErrWays
+	if err != nil {
+		if _, present := o["programs"]; !present {
+			return nil, refuse("run.programs", ruleMissing)
+		}
+		return nil, refuse("run.programs", ruleNotList)
+	}
+	if len(arr) > MaxPrograms {
+		return nil, refuse("run.programs", ruleTooMany)
 	}
 	r := &RunWays{Programs: []Program{}, Each: true}
-	if _, present := o["each"]; present {
-		if r.Each, err = o.Bool("each"); err != nil {
-			return nil, ErrWays
-		}
-	}
 	var old []Program
 	if cur != nil && cur.Run != nil {
 		old = cur.Run.Programs
 	}
-	for _, pr := range arr {
-		p, err := parseProgram(pr, old)
+	for i, pr := range arr {
+		p, err := parseProgram(at("run.programs", i), pr, old)
 		if err != nil {
 			return nil, err
 		}
+		// (0.85.3) No two entries match the same path: compared without
+		// case and without a final .exe, no two entries are equal, and no
+		// bare name equals an absolute entry's last path element. Judged
+		// as each entry is read, so the first entry that breaks a rule,
+		// its own or this one, is named (the later of the two).
+		for _, q := range r.Programs {
+			if programsClash(p.Program, q.Program) {
+				return nil, refuse(at("run.programs", i)+".program", ruleMatches)
+			}
+		}
 		r.Programs = append(r.Programs, p)
 	}
+	if _, present := o["each"]; present {
+		if r.Each, err = o.Bool("each"); err != nil {
+			return nil, refuse("run.each", ruleNotBool)
+		}
+	}
 	if !r.Each && len(r.Programs) == 0 {
-		return nil, ErrWays // each: false only for a bound item
+		return nil, refuse("run.each", "false without a program") // each: false only for a bound item
 	}
 	if fr, present := o["folders"]; present {
 		if r.Folders, err = parseFolders(fr); err != nil {
 			return nil, err
 		}
 	}
-	// (0.85.3) No two entries match the same path: compared without case
-	// and without a final .exe, no two entries are equal, and no bare name
-	// equals an absolute entry's last path element.
-	keys := map[string]bool{}
-	for _, p := range r.Programs {
-		k := ProgramKey(p.Program)
-		if keys[k] {
-			return nil, ErrWays
-		}
-		keys[k] = true
-	}
-	for _, p := range r.Programs {
-		if IsAbsProgram(p.Program) && hasBare(r.Programs, ProgramKey(LastElement(p.Program))) {
-			return nil, ErrWays
-		}
-	}
 	return r, nil
 }
 
-func hasBare(ps []Program, key string) bool {
-	for _, p := range ps {
-		if !IsAbsProgram(p.Program) && ProgramKey(p.Program) == key {
-			return true
-		}
+// programsClash reports whether two entries match the same path: equal on
+// ProgramKey, or a bare name equal to an absolute entry's last element.
+func programsClash(a, b string) bool {
+	if ProgramKey(a) == ProgramKey(b) {
+		return true
 	}
-	return false
+	return IsAbsProgram(a) && !IsAbsProgram(b) && ProgramKey(LastElement(a)) == ProgramKey(b) ||
+		IsAbsProgram(b) && !IsAbsProgram(a) && ProgramKey(LastElement(b)) == ProgramKey(a)
 }
 
-func parseProgram(raw []byte, old []Program) (Program, error) {
+func parseProgram(member string, raw []byte, old []Program) (Program, error) {
 	o, err := strictjson.AsObject(raw)
 	if err != nil {
-		return Program{}, ErrWays
+		return Program{}, refuse(member, ruleNotObject)
 	}
 	p := Program{Env: []string{}}
-	if p.Program, err = o.String("program"); err != nil || !ValidProgram(p.Program) {
-		return Program{}, ErrWays
+	if p.Program, err = o.String("program"); err != nil {
+		return Program{}, refuseType(o, "program", ruleNotString).(*Refusal).in(member)
+	}
+	if rule := programProblem(p.Program); rule != "" {
+		return Program{}, refuse(member+".program", rule)
 	}
 	sha, hasSHA, err1 := o.OptString("sha256")
 	path, hasPath, err2 := o.OptString("path")
-	if err1 != nil || err2 != nil || hasSHA != hasPath {
-		return Program{}, ErrWays
+	switch {
+	case err1 != nil:
+		return Program{}, refuse(member+".sha256", ruleNotString)
+	case err2 != nil:
+		return Program{}, refuse(member+".path", ruleNotString)
+	case hasSHA && !hasPath:
+		return Program{}, refuse(member+".path", ruleMissing+" with sha256")
+	case hasPath && !hasSHA:
+		return Program{}, refuse(member+".sha256", ruleMissing+" with path")
 	}
 	if hasSHA {
 		// Kept only: the same program, the same recorded values (0.85.3).
@@ -354,18 +417,29 @@ func parseProgram(raw []byte, old []Program) (Program, error) {
 			}
 		}
 		if !kept {
-			return Program{}, ErrWays
+			return Program{}, refuse(member+".sha256", "not the recorded fingerprint")
 		}
 		p.SHA256, p.Path = sha, path
 	}
-	if envRaw, present, err := o.OptArray("env"); err != nil || len(envRaw) > MaxEnvNames {
-		return Program{}, ErrWays
-	} else if present {
+	envRaw, present, err := o.OptArray("env")
+	if err != nil {
+		return Program{}, refuse(member+".env", ruleNotList)
+	}
+	if len(envRaw) > MaxEnvNames {
+		return Program{}, refuse(member+".env", ruleTooMany)
+	}
+	if present {
 		seen := map[string]bool{}
-		for _, r := range envRaw {
+		for i, r := range envRaw {
 			n, err := strictjson.AsString(r)
-			if err != nil || !ValidEnvName(n) || seen[n] {
-				return Program{}, ErrWays
+			if err != nil {
+				return Program{}, refuse(at(member+".env", i), ruleNotString)
+			}
+			if rule := envNameProblem(n); rule != "" {
+				return Program{}, refuse(at(member+".env", i), rule)
+			}
+			if seen[n] {
+				return Program{}, refuse(at(member+".env", i), ruleRepeated)
 			}
 			seen[n] = true
 			p.Env = append(p.Env, n)
@@ -374,31 +448,57 @@ func parseProgram(raw []byte, old []Program) (Program, error) {
 	return p, nil
 }
 
+// in prefixes the member path with parent's.
+func (r *Refusal) in(parent string) error {
+	r.Member = parent + "." + r.Member
+	return r
+}
+
 func parseProxy(raw []byte) (*ProxyWays, error) {
 	o, err := strictjson.AsObject(raw)
 	if err != nil {
-		return nil, ErrWays
+		return nil, refuse("proxy", ruleNotObject)
 	}
 	arr, err := o.Array("hosts")
-	if err != nil || len(arr) == 0 || len(arr) > MaxHosts {
-		return nil, ErrWays
+	if err != nil {
+		return nil, refuseType(o, "hosts", ruleNotList).(*Refusal).in("proxy")
+	}
+	if len(arr) == 0 {
+		return nil, refuse("proxy.hosts", ruleEmpty)
+	}
+	if len(arr) > MaxHosts {
+		return nil, refuse("proxy.hosts", ruleTooMany)
 	}
 	p := &ProxyWays{}
 	seen := map[string]bool{}
-	for _, r := range arr {
+	for i, r := range arr {
 		h, err := strictjson.AsString(r)
-		if err != nil || !ValidProxyHost(h) || seen[HostKey(h)] {
-			return nil, ErrWays
+		if err != nil {
+			return nil, refuse(at("proxy.hosts", i), ruleNotString)
+		}
+		if rule := proxyHostProblem(h); rule != "" {
+			return nil, refuse(at("proxy.hosts", i), rule)
+		}
+		if seen[HostKey(h)] {
+			return nil, refuse(at("proxy.hosts", i), ruleMatches)
 		}
 		seen[HostKey(h)] = true
 		p.Hosts = append(p.Hosts, h)
 	}
-	if p.Header, err = o.String("header"); err != nil || !ValidProxyHeader(p.Header) {
-		return nil, ErrWays
+	if p.Header, err = o.String("header"); err != nil {
+		return nil, refuseType(o, "header", ruleNotString).(*Refusal).in("proxy")
 	}
-	if pre, present, err := o.OptString("prefix"); err != nil || present && !validPrefix(pre) {
-		return nil, ErrWays
-	} else if present {
+	if rule := proxyHeaderProblem(p.Header); rule != "" {
+		return nil, refuse("proxy.header", rule)
+	}
+	pre, present, err := o.OptString("prefix")
+	if err != nil {
+		return nil, refuse("proxy.prefix", ruleNotString)
+	}
+	if present {
+		if rule := prefixProblem(pre); rule != "" {
+			return nil, refuse("proxy.prefix", rule)
+		}
 		p.Prefix = pre
 	}
 	return p, nil
@@ -540,9 +640,70 @@ func IsAbsProgram(p string) bool {
 // and paragraph separators (Zl, Zp), which could make the program shown
 // on the phone read as another (the bounds are not in the spec). An
 // absolute path is also a clean one (cleanPath).
-func ValidProgram(p string) bool {
-	if p == "" || len(p) > MaxProgram || !utf8.ValidString(p) || !showable(p) {
-		return false
+func ValidProgram(p string) bool { return programProblem(p) == "" }
+
+// Rules a refused setting names (§10.11 "Why a setting is refused", 0.93.2):
+// fixed English phrases, printable ASCII, never a value the member typed.
+const (
+	ruleMissing     = "missing"
+	ruleNotString   = "not a string"
+	ruleNotBool     = "not a boolean"
+	ruleNotList     = "not a list"
+	ruleNotObject   = "not an object"
+	ruleEmpty       = "empty"
+	ruleTooLong     = "too long"
+	ruleTooMany     = "too many"
+	ruleRepeated    = "repeated"
+	ruleNotUTF8     = "not valid UTF-8"
+	ruleControl     = "holds a control or format character"
+	ruleTilde       = "holds a ~ in the last element"
+	ruleNotClean    = "not a clean path"
+	ruleNoFile      = "names no file"
+	ruleSeparator   = "holds a separator or a colon"
+	ruleNotAbsolute = "not absolute"
+	ruleRoot        = "the root"
+	ruleDotsOnly    = "holds an element of only dots and spaces"
+	ruleMatches     = "matches another entry"
+	ruleNested      = "inside or above another entry"
+	ruleBadName     = "not a valid name"
+	ruleNotHost     = "not a host name"
+	ruleBadPort     = "not a valid port"
+	ruleNotForProxy = "not allowed for the proxy"
+	ruleNotHeader   = "not a valid header name"
+	ruleNotASCII    = "holds a character outside printable ASCII"
+)
+
+// programProblem is the rule a binding's program breaks (ValidProgram), or
+// "" when it is valid.
+func programProblem(p string) string {
+	switch {
+	case p == "":
+		return ruleEmpty
+	case len(p) > MaxProgram:
+		return ruleTooLong
+	case !utf8.ValidString(p):
+		return ruleNotUTF8
+	case !showable(p):
+		return ruleControl
+	}
+	// The rules in the order "Program strings" gives them: the shape and
+	// the clean path, then the ~.
+	if IsAbsProgram(p) {
+		// A last element of dots and spaces first, as "Program strings"
+		// lists it ("/usr/bin/.." names no file).
+		if strings.TrimRight(LastElement(p), " .") == "" {
+			return ruleNoFile
+		}
+		if !cleanPath(p, false) {
+			return ruleNotClean
+		}
+	} else {
+		if strings.ContainsAny(p, "/:"+string(rune(backslash))) {
+			return ruleSeparator
+		}
+		if strings.Trim(p, " .") == "" {
+			return ruleNoFile
+		}
 	}
 	// No "~" in the last element (owner decision a, #14596): on Windows an
 	// 8.3 short name (BASH~1.EXE) is another name for a file, which the
@@ -550,12 +711,9 @@ func ValidProgram(p string) bool {
 	// shell list and the bindings would not know. Refused on every system,
 	// as the ":" rule.
 	if strings.Contains(LastElement(p), "~") {
-		return false
+		return ruleTilde
 	}
-	if IsAbsProgram(p) {
-		return cleanPath(p, false) && strings.TrimRight(LastElement(p), " .") != ""
-	}
-	return !strings.ContainsAny(p, "/:"+string(rune(backslash))) && strings.Trim(p, " .") != ""
+	return ""
 }
 
 // cleanPath reports whether an absolute path p (IsAbsProgram) names its
@@ -659,13 +817,29 @@ func init() {
 	} {
 		envExact[n] = true
 	}
+	// The names a run's environment already holds, set by the connector
+	// (its minimal environment, VETTID_IN and VETTID_OUT): "reserved" in a
+	// refusal's reason; the other listed names are "not allowed".
+	for _, n := range []string{"HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "LC_CTYPE", "TZ",
+		"USERPROFILE", "USERNAME", "HOMEDRIVE", "HOMEPATH", "APPDATA", "LOCALAPPDATA",
+		"SYSTEMROOT", "WINDIR", "SYSTEMDRIVE", "PATHEXT", "PATH", "TMPDIR", "TEMP", "TMP",
+		"VETTID_IN", "VETTID_OUT"} {
+		envReserved[n] = true
+	}
 }
+
+// envReserved are the refused names the connector sets itself.
+var envReserved = map[string]bool{}
 
 // ValidEnvName is item.run's name rule (§10.11; 0.85.3, 0.86.4): it
 // matches ^[A-Z_][A-Z0-9_]{0,63}$ and is none of the refused names. It is
 // a backstop under each entry's env allowlist and holds even for a listed
 // name.
-func ValidEnvName(n string) bool {
+func ValidEnvName(n string) bool { return envNameProblem(n) == "" }
+
+// envNameForm reports whether n has the name rule's form,
+// ^[A-Z_][A-Z0-9_]{0,63}$.
+func envNameForm(n string) bool {
 	if n == "" || len(n) > 64 {
 		return false
 	}
@@ -675,50 +849,73 @@ func ValidEnvName(n string) bool {
 			return false
 		}
 	}
+	return true
+}
+
+// envNameProblem is the rule a variable name breaks (ValidEnvName), or "".
+// A name the vault refuses by its list is named in the rule (it has the
+// name rule's form, checked first: §10.11 "Why a setting is refused"); a
+// name of another form is not.
+func envNameProblem(n string) string {
+	if !envNameForm(n) {
+		return ruleBadName
+	}
+	if envReserved[n] {
+		return n + " is reserved"
+	}
 	if envExact[n] {
-		return false
+		return n + " is not allowed"
 	}
 	for _, p := range envPrefixes {
 		if strings.HasPrefix(n, p) {
-			return false
+			return n + " loads code"
 		}
 	}
-	return true
+	return ""
 }
 
 // ValidProxyHost reports whether h is a proxy binding's host: a lowercase
 // DNS name of at least two labels with an optional :port (1–65535, default
 // 443), no wildcard, no IP literal, and not localhost or under it.
-func ValidProxyHost(h string) bool {
+func ValidProxyHost(h string) bool { return proxyHostProblem(h) == "" }
+
+// proxyHostProblem is the rule a proxy host breaks (ValidProxyHost), or "".
+func proxyHostProblem(h string) string {
 	name := h
 	if i := strings.LastIndexByte(h, ':'); i >= 0 {
 		name = h[:i]
 		port := h[i+1:]
 		if port == "" || len(port) > 5 || port[0] == '0' {
-			return false
+			return ruleBadPort
 		}
 		n, err := strconv.Atoi(port)
 		if err != nil || n < 1 || n > 65535 || strconv.Itoa(n) != port {
-			return false
+			return ruleBadPort
 		}
 	}
-	if name == "" || len(name) > MaxDNSName || net.ParseIP(name) != nil {
-		return false
+	if name == "" {
+		return ruleEmpty
+	}
+	if len(name) > MaxDNSName {
+		return ruleTooLong
+	}
+	if net.ParseIP(name) != nil {
+		return ruleNotForProxy // an IP literal
 	}
 	labels := strings.Split(name, ".")
 	if len(labels) < 2 || labels[len(labels)-1] == "localhost" {
 		// A single-label name or localhost (RFC 6761) names this computer or
 		// its local network, never an API's host.
-		return false
+		return ruleNotForProxy
 	}
 	for _, l := range labels {
 		if l == "" || len(l) > 63 || l[0] == '-' || l[len(l)-1] == '-' {
-			return false
+			return ruleNotHost
 		}
 		for i := 0; i < len(l); i++ {
 			c := l[i]
 			if !(c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '-') {
-				return false
+				return ruleNotHost
 			}
 		}
 	}
@@ -731,7 +928,10 @@ func ValidProxyHost(h string) bool {
 			allDigits = false
 		}
 	}
-	return !allDigits && !strings.HasPrefix(last, "0x")
+	if allDigits || strings.HasPrefix(last, "0x") {
+		return ruleNotForProxy
+	}
+	return ""
 }
 
 // HostKey is a proxy host with its default port made explicit, to compare
@@ -754,28 +954,38 @@ var refusedHeaders = map[string]bool{
 // ValidProxyHeader reports whether h is a proxy binding's header: an HTTP
 // token of 1–MaxHeader characters, not a hop-by-hop field, Host,
 // Content-Length, Transfer-Encoding or Cookie.
-func ValidProxyHeader(h string) bool {
-	if h == "" || len(h) > MaxHeader {
-		return false
+func ValidProxyHeader(h string) bool { return proxyHeaderProblem(h) == "" }
+
+// proxyHeaderProblem is the rule a proxy header breaks, or "".
+func proxyHeaderProblem(h string) string {
+	if h == "" {
+		return ruleEmpty
+	}
+	if len(h) > MaxHeader {
+		return ruleTooLong
 	}
 	for i := 0; i < len(h); i++ {
 		c := h[i]
 		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || strings.IndexByte("!#$%&'*+-.^_`|~", c) >= 0) {
-			return false
+			return ruleNotHeader
 		}
 	}
-	return !refusedHeaders[strings.ToLower(h)]
+	if refusedHeaders[strings.ToLower(h)] {
+		return ruleNotForProxy
+	}
+	return ""
 }
 
-// validPrefix: 0–MaxPrefix printable ASCII characters.
-func validPrefix(p string) bool {
+// prefixProblem is the rule a proxy prefix breaks (0–MaxPrefix printable
+// ASCII characters), or "".
+func prefixProblem(p string) string {
 	if len(p) > MaxPrefix {
-		return false
+		return ruleTooLong
 	}
 	for i := 0; i < len(p); i++ {
 		if p[i] < 0x20 || p[i] > 0x7e {
-			return false
+			return ruleNotASCII
 		}
 	}
-	return true
+	return ""
 }

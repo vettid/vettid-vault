@@ -16,8 +16,9 @@ import (
 // blobStub is an app request that travels as a blob: its handler defers the
 // call, which answers with the plaintext's length.
 type blobStub struct {
-	mu   sync.Mutex
-	runs int
+	mu     sync.Mutex
+	runs   int
+	bodies [][]byte // the request body each call's session still holds
 }
 
 func (g *blobStub) Name() string                   { return "blobstub" }
@@ -39,6 +40,7 @@ func (g *blobStub) Handle(_ context.Context, s *Session, in *envelope.Inner) (js
 	if err := s.DeferBlob(b.ID, b.Key, b.SHA256, b.Size, func(s *Session, plain []byte) (json.RawMessage, error) {
 		g.mu.Lock()
 		g.runs++
+		g.bodies = append(g.bodies, s.inner.Body)
 		g.mu.Unlock()
 		if string(plain) == "fail" {
 			return nil, NewError("limit", "")

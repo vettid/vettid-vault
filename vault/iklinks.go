@@ -532,31 +532,38 @@ func (m *Manager) reholdAt(p *Peer, ep *handshake.Epoch, keyChange bool, now tim
 			}
 			continue // sealed under another epoch: as it is
 		}
-		if te := m.registry[in.Type]; te != nil && te.spec.Ephemeral {
-			e.Done, m.dirty = true, true // ephemeral: not sent (one queued before 0.88.7 recorded Ephemeral)
-			continue
-		}
-		if keyChange && e.Confirm {
-			// An hs.confirm for the epoch being replaced is superseded: the
-			// new epoch's own follows (queueConfirm) or is not needed.
-			e.Done, m.dirty = true, true
-			continue
-		}
-		in.Seq, in.Features = 0, nil
-		j, err := marshalHeld(in)
-		if err != nil {
-			if memberDeposit(e) {
-				m.notDelivered(e, "undelivered_unreadable", now) // 0.88.7: it cannot be held to be sealed again
-			}
-			continue
-		}
-		e.Payload, e.Held, e.HeldExp = nil, j, in.Exp
-		if e.InnerID == "" {
-			e.InnerID = in.ID
-		}
-		m.markUnstored(e) // changed in place: not sent before a write stores it
-		m.dirty = true
+		m.reholdOpened(e, in, keyChange, now)
 	}
+}
+
+// reholdOpened holds an outbox entry reheld under reholdAt once it is
+// opened, and wipes the opened plaintext: what is kept is e.Held, a copy.
+func (m *Manager) reholdOpened(e *OutboxEntry, in *envelope.Inner, keyChange bool, now time.Time) {
+	defer wipeInner(in)
+	if te := m.registry[in.Type]; te != nil && te.spec.Ephemeral {
+		e.Done, m.dirty = true, true // ephemeral: not sent (one queued before 0.88.7 recorded Ephemeral)
+		return
+	}
+	if keyChange && e.Confirm {
+		// An hs.confirm for the epoch being replaced is superseded: the
+		// new epoch's own follows (queueConfirm) or is not needed.
+		e.Done, m.dirty = true, true
+		return
+	}
+	in.Seq, in.Features = 0, nil
+	j, err := marshalHeld(in)
+	if err != nil {
+		if memberDeposit(e) {
+			m.notDelivered(e, "undelivered_unreadable", now) // 0.88.7: it cannot be held to be sealed again
+		}
+		return
+	}
+	e.Payload, e.Held, e.HeldExp = nil, j, in.Exp
+	if e.InnerID == "" {
+		e.InnerID = in.ID
+	}
+	m.markUnstored(e) // changed in place: not sent before a write stores it
+	m.dirty = true
 }
 
 // sealHeld seals p's held messages under its current epoch, once that is
@@ -685,6 +692,7 @@ func (m *Manager) entryType(e *OutboxEntry) string {
 	}
 	if e.Held != nil {
 		if in, err := envelope.ParseInner(e.Held, envelope.ModeSealed); err == nil {
+			wipeInner(in) // a parsed copy; e.Held stays
 			return in.Type
 		}
 		return ""
@@ -692,6 +700,7 @@ func (m *Manager) entryType(e *OutboxEntry) string {
 	if kr := m.sessions[e.PeerID]; kr != nil && kr.Current() != nil && len(e.Payload) > 0 {
 		if env, err := envelope.Parse(e.Payload); err == nil {
 			if in, err := kr.Current().OpenSent(env); err == nil {
+				wipeInner(in) // only its type is read; strings are not wiped
 				return in.Type
 			}
 		}

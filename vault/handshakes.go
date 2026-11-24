@@ -1025,6 +1025,7 @@ func (m *Manager) handleFin(ctx context.Context, id string, raw []byte, sender e
 		m.audit(now, "hs_fin_rejected", aw.PeerID)
 		return ackAfterFlush
 	}
+	defer wipeInner(fr.Inner) // only its ts and features are read below
 	m.forgetAwaiting(id)
 	delete(m.awaiting, id)
 	if aw.New != nil && !aw.Direct {

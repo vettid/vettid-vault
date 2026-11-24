@@ -70,6 +70,7 @@ func (h managerHost) DeferBlob(s *Session, id string, key, sum []byte, size int,
 		return NewError("payload_too_large", "")
 	}
 	p, req := s.peer, *s.inner
+	req.Body = nil // the call outlives the request's handling, which wipes the body
 	rkey := p.ID + "|" + req.ID
 	// At most one blob call in flight per device; the same request again
 	// (a retransmission) reuses the one running.

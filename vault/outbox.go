@@ -304,6 +304,7 @@ func (m *Manager) ageCheck(e *OutboxEntry, now time.Time) bool {
 	if err != nil {
 		return false // under another epoch: the key change re-seals or ends it
 	}
+	defer wipeInner(in) // re-sealed below as a new payload, or left as it is
 	age := now.Sub(in.TS)
 	switch {
 	case e.Tried && age > envelope.MaxDurableAge:

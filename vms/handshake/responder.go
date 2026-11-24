@@ -417,6 +417,10 @@ type FinResult struct {
 	SAS string
 }
 
+// testFinFailHook, set only by tests, sees the opened inner HandleFin
+// refused, once wiped.
+var testFinFailHook func(in *envelope.Inner)
+
 // HandleFin processes hs.fin: it decrypts it with the pending epoch's i2r
 // key, verifies sig_I and then, for a purpose with a SAS, the commitment
 // to n_I; only then is the epoch established (§6.3). A message that does
@@ -443,11 +447,16 @@ func (r *Responder) HandleFin(raw []byte, collectSender ed25519.PublicKey, now t
 	}
 	// A not-yet-established epoch, used only to decrypt and check hs.fin.
 	pending := newEpoch(r.sched, RoleResponder, r.suiteID, r.policy, now)
+	var in *envelope.Inner
 	fail := func(err error) (*FinResult, error) {
 		pending.Destroy()
+		in.Wipe() // an opened message refused here (one of the new epoch before hs.fin, §6.5) is dropped
+		if testFinFailHook != nil && in != nil {
+			testFinFailHook(in)
+		}
 		return nil, err
 	}
-	in, err := pending.Open(env)
+	in, err = pending.Open(env)
 	if err != nil {
 		return fail(err)
 	}

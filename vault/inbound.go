@@ -395,6 +395,7 @@ func (m *Manager) handleMessage(ctx context.Context, msg Message, now time.Time)
 		if kr != nil {
 			in, ep, err := kr.Open(env, now)
 			if err == nil {
+				defer wipeInner(in) // handled: nothing keeps its body (dispatch copies what it keeps)
 				return m.dispatch(ctx, p, in, ep, msg.Payload, sender, now)
 			}
 			if !errors.Is(err, envelope.ErrKid) {
@@ -413,6 +414,26 @@ func (m *Manager) handleMessage(ctx context.Context, msg Message, now time.Time)
 	}
 	m.audit(now, "unknown_kid", peerID(p))
 	return ackAfterFlush
+}
+
+// testWipeInnerHook, set only by tests, sees each opened inner wipeInner
+// is about to wipe.
+var testWipeInnerHook func(in *envelope.Inner)
+
+// wipeInner wipes the plaintext body of an inner this vault opened (a
+// peer's message, or one of its own read back from the outbox) once nothing
+// reads it any more. Only Body is wiped: the string members (id, type, the
+// error's message) are Go strings and stay. Whatever outlives the message
+// is a copy: a held request and a cached response are marshalled, parsed
+// members are copies, and a blob call keeps the request without its body.
+func wipeInner(in *envelope.Inner) {
+	if in == nil {
+		return
+	}
+	if h := testWipeInnerHook; h != nil {
+		h(in)
+	}
+	in.Wipe()
 }
 
 func peerID(p *Peer) string {

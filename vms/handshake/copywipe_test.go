@@ -119,6 +119,38 @@ func TestParseInitWipesItsSecretMembers(t *testing.T) {
 	}
 }
 
+// A reconnect's hs.init carries reconnect_token: ParseInit wipes its
+// parsed member too, and the Init keeps the decoded token.
+func TestParseInitWipesTheReconnectToken(t *testing.T) {
+	i, r := newParty(t, 0x10), newParty(t, 0x20)
+	ini, err := NewInitiator(initCfg(i, r, PurposeReconnect))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var seen []strictjson.Object
+	testParsedHook = func(o strictjson.Object) { seen = append(seen, o) }
+	defer func() { testParsedHook = nil }()
+	p, err := OpenInit(ini.Envelope(), r.lookup, t0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(seen) != 1 {
+		t.Fatalf("%d bodies parsed", len(seen))
+	}
+	o := seen[0]
+	for _, name := range []string{"token", "reconnect_token"} {
+		if len(o[name]) == 0 || !allZero(o[name]) {
+			t.Fatalf("%s was left in the parsed object (or is missing): %q", name, o[name])
+		}
+	}
+	if allZero(o["purpose"]) {
+		t.Fatal("another member was wiped")
+	}
+	if in := p.Init(); in.Token != tokA || in.ReconnectToken != tokB {
+		t.Fatal("the tokens were not decoded")
+	}
+}
+
 // bodyOf is ini's hs.init body as the responder opened it, with members
 // replaced.
 func bodyOf(t *testing.T, ini *Initiator, r *party, set map[string]string) []byte {

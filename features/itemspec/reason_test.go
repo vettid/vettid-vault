@@ -95,6 +95,13 @@ var reasonCases = []struct{ name, body, want string }{
 	// A rule between entries is judged as each entry is read: the first
 	// entry that breaks any rule is named.
 	{"a clash before a later bad entry", run(prog("git") + "," + prog("git") + "," + prog("")), "run.programs[1].program: matches another entry"},
+	// The entry's key member first: a clash before the same entry's other members.
+	{"a clash before its own bad env", run(prog("git") + `,{"program":"git","env":["bad-name"]}`), "run.programs[1].program: matches another entry"},
+	{"a clash before its own lone sha256", run(prog("git") + `,{"program":"git","sha256":1}`), "run.programs[1].program: matches another entry"},
+	{"nesting before its own bad write", run(prog("git"), `,"folders":[`+folder("/home/al", false)+`,{"path":"/home/al/work","write":1}]`), "run.folders[1].path: inside or above another entry"},
+	// An empty last element is the clean-path rule's, not "names no file".
+	{"a trailing slash", run(prog("/usr/bin/")), "run.programs[0].program: not a clean path"},
+	{"a doubled trailing slash", run(prog("/a//")), "run.programs[0].program: not a clean path"},
 	{"nesting before a later bad folder", run(prog("git"), `,"folders":[`+folder("/a", false)+","+folder("/a/b", false)+","+folder("rel", false)+`]`), "run.folders[1].path: inside or above another entry"},
 	{"a last element of dots", run(prog("/usr/bin/..")), "run.programs[0].program: names no file"},
 	{"too many env names", run(prog("git", `,"env":[`+strings.TrimSuffix(strings.Repeat(`"A",`, MaxEnvNames+1), ",")+`]`)), "run.programs[0].env: too many"},

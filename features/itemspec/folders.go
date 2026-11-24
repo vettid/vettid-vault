@@ -70,13 +70,9 @@ func parseFolders(raw []byte) ([]Folder, error) {
 		if rule := folderPathProblem(f.Path); rule != "" {
 			return nil, refuse(member+".path", rule)
 		}
-		if _, present := o["write"]; present {
-			if f.Write, err = o.Bool("write"); err != nil {
-				return nil, refuse(member+".write", ruleNotBool)
-			}
-		}
 		// No entry equal to, under or above another, judged as each entry
-		// is read: the first entry that breaks a rule is named.
+		// is read (the first entry that breaks a rule is named), and on
+		// its path before its other members.
 		ki := FolderKey(f.Path)
 		for _, g := range fs {
 			kk := FolderKey(g.Path)
@@ -85,6 +81,11 @@ func parseFolders(raw []byte) ([]Folder, error) {
 			}
 			if folderWithin(ki, kk) || folderWithin(kk, ki) {
 				return nil, refuse(member+".path", ruleNested)
+			}
+		}
+		if _, present := o["write"]; present {
+			if f.Write, err = o.Bool("write"); err != nil {
+				return nil, refuse(member+".write", ruleNotBool)
 			}
 		}
 		fs = append(fs, f)

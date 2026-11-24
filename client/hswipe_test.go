@@ -241,3 +241,71 @@ func TestEndedResponderDropsItsSnapshot(t *testing.T) {
 		}
 	}
 }
+
+// A responder ended by its hs.fin has its stored snapshot wiped and
+// dropped at once too.
+func TestFinishedResponderDropsItsSnapshot(t *testing.T) {
+	ctx := context.Background()
+	_, v, d := pair(t)
+	v.startRekey()
+	if err := d.Poll(ctx); err != nil {
+		t.Fatal(err)
+	}
+	d.mu.Lock()
+	if len(d.awaiting) != 1 {
+		d.mu.Unlock()
+		t.Fatalf("setup: %d responders", len(d.awaiting))
+	}
+	d.export()
+	if len(d.st.Awaiting) != 1 {
+		d.mu.Unlock()
+		t.Fatalf("setup: %d stored responders", len(d.st.Awaiting))
+	}
+	s := d.st.Awaiting[0]
+	got := [][]byte{s.Ks, s.Ke, s.PRK, s.RK}
+	d.mu.Unlock()
+	v.process() // the vault answers with hs.fin
+	if err := d.Poll(ctx); err != nil {
+		t.Fatal(err)
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if len(d.awaiting) != 0 || len(d.st.Awaiting) != 0 {
+		t.Fatalf("%d responders, %d stored, after hs.fin", len(d.awaiting), len(d.st.Awaiting))
+	}
+	for i, b := range got {
+		if len(b) == 0 || !allZeroBytes(b) {
+			t.Fatalf("secret %d of the stored responder not wiped", i)
+		}
+	}
+}
+
+// A prune that ends several responders re-exports the stored ones once,
+// not once per responder.
+func TestPruneExportsOnce(t *testing.T) {
+	ctx := context.Background()
+	_, v, d := pair(t)
+	v.startRekey()
+	if err := d.Poll(ctx); err != nil {
+		t.Fatal(err)
+	}
+	v.startRekey()
+	if err := d.Poll(ctx); err != nil {
+		t.Fatal(err)
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if len(d.awaiting) != 2 {
+		t.Fatalf("setup: %d responders, want 2", len(d.awaiting))
+	}
+	exports := 0
+	testExportAwaitingHook = func() { exports++ }
+	defer func() { testExportAwaitingHook = nil }()
+	d.pruneAwaiting(time.Now().Add(365 * 24 * time.Hour))
+	if len(d.awaiting) != 0 || len(d.st.Awaiting) != 0 {
+		t.Fatalf("%d responders, %d stored, after the prune", len(d.awaiting), len(d.st.Awaiting))
+	}
+	if exports != 1 {
+		t.Fatalf("exported %d times, want once", exports)
+	}
+}

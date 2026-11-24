@@ -524,7 +524,13 @@ func (d *Device) export() {
 
 // exportAwaiting replaces the stored responder snapshots with those of the
 // responders still awaiting hs.fin, the old ones wiped. d.mu is held.
+// testExportAwaitingHook, set only by tests, runs at each exportAwaiting.
+var testExportAwaitingHook func()
+
 func (d *Device) exportAwaiting() {
+	if testExportAwaitingHook != nil {
+		testExportAwaitingHook()
+	}
 	wipeBytes(reflect.ValueOf(d.st.Awaiting))
 	d.st.Awaiting, d.st.AwaitingSince = nil, nil
 	for i, r := range d.awaiting {
@@ -2557,20 +2563,30 @@ func (d *Device) recordInner(in *envelope.Inner, now time.Time) {
 // dropAwaiting removes the i-th responder awaiting hs.fin, and with it
 // its stored snapshot (wiped), rather than leave it until the next export.
 func (d *Device) dropAwaiting(i int) {
+	d.removeAwaiting(i)
+	d.exportAwaiting()
+}
+
+// removeAwaiting takes responder i out of memory; the caller re-exports.
+func (d *Device) removeAwaiting(i int) {
 	d.awaiting = append(d.awaiting[:i:i], d.awaiting[i+1:]...)
 	d.awaitingSince = append(d.awaitingSince[:i:i], d.awaitingSince[i+1:]...)
-	d.exportAwaiting()
 }
 
 // pruneAwaiting aborts the responders whose hs.fin has not come within
 // the durable lifetime: hs.fin would fail the time check (§8.4), and
 // their epoch's messages must not stay unacked for it (§6.5).
 func (d *Device) pruneAwaiting(now time.Time) {
+	dropped := false
 	for i := len(d.awaiting) - 1; i >= 0; i-- {
 		if now.Sub(d.awaitingSince[i]) > envelope.MaxDurableAge {
 			d.awaiting[i].Abort()
-			d.dropAwaiting(i)
+			d.removeAwaiting(i)
+			dropped = true
 		}
+	}
+	if dropped {
+		d.exportAwaiting() // once, after the loop
 	}
 }
 

@@ -342,19 +342,9 @@ func parseRun(raw []byte, cur *ItemWays) (*RunWays, error) {
 		old = cur.Run.Programs
 	}
 	for i, pr := range arr {
-		p, err := parseProgram(at("run.programs", i), pr, old)
+		p, err := parseProgram(at("run.programs", i), pr, old, r.Programs)
 		if err != nil {
 			return nil, err
-		}
-		// (0.85.3) No two entries match the same path: compared without
-		// case and without a final .exe, no two entries are equal, and no
-		// bare name equals an absolute entry's last path element. Judged
-		// as each entry is read, so the first entry that breaks a rule,
-		// its own or this one, is named (the later of the two).
-		for _, q := range r.Programs {
-			if programsClash(p.Program, q.Program) {
-				return nil, refuse(at("run.programs", i)+".program", ruleMatches)
-			}
 		}
 		r.Programs = append(r.Programs, p)
 	}
@@ -384,7 +374,9 @@ func programsClash(a, b string) bool {
 		IsAbsProgram(b) && !IsAbsProgram(a) && ProgramKey(LastElement(b)) == ProgramKey(a)
 }
 
-func parseProgram(member string, raw []byte, old []Program) (Program, error) {
+// parseProgram parses one entry of run.programs; before are the entries
+// read before it.
+func parseProgram(member string, raw []byte, old, before []Program) (Program, error) {
 	o, err := strictjson.AsObject(raw)
 	if err != nil {
 		return Program{}, refuse(member, ruleNotObject)
@@ -395,6 +387,17 @@ func parseProgram(member string, raw []byte, old []Program) (Program, error) {
 	}
 	if rule := programProblem(p.Program); rule != "" {
 		return Program{}, refuse(member+".program", rule)
+	}
+	// (0.85.3) No two entries match the same path: compared without case
+	// and without a final .exe, no two entries are equal, and no bare name
+	// equals an absolute entry's last path element. Judged as each entry
+	// is read, so the first entry that breaks a rule, its own or this one,
+	// is named (the later of the two), and on its program before its other
+	// members.
+	for _, q := range before {
+		if programsClash(p.Program, q.Program) {
+			return Program{}, refuse(member+".program", ruleMatches)
+		}
 	}
 	sha, hasSHA, err1 := o.OptString("sha256")
 	path, hasPath, err2 := o.OptString("path")
@@ -691,7 +694,8 @@ func programProblem(p string) string {
 	if IsAbsProgram(p) {
 		// A last element of dots and spaces first, as "Program strings"
 		// lists it ("/usr/bin/.." names no file).
-		if strings.TrimRight(LastElement(p), " .") == "" {
+		// An empty last element (/usr/bin/) is the clean-path rule's.
+		if last := LastElement(p); last != "" && strings.TrimRight(last, " .") == "" {
 			return ruleNoFile
 		}
 		if !cleanPath(p, false) {

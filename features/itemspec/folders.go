@@ -50,40 +50,74 @@ type RunOutput struct {
 // another, compared folded (FolderKey).
 func parseFolders(raw []byte) ([]Folder, error) {
 	arr, err := strictjson.AsArray(raw)
-	if err != nil || len(arr) > MaxFolders {
-		return nil, ErrWays
+	if err != nil {
+		return nil, refuse("run.folders", ruleNotList)
+	}
+	if len(arr) > MaxFolders {
+		return nil, refuse("run.folders", ruleTooMany)
 	}
 	fs := make([]Folder, 0, len(arr))
-	for _, r := range arr {
+	for i, r := range arr {
+		member := at("run.folders", i)
 		o, err := strictjson.AsObject(r)
 		if err != nil {
-			return nil, ErrWays
+			return nil, refuse(member, ruleNotObject)
 		}
 		var f Folder
-		if f.Path, err = o.String("path"); err != nil || !ValidFolderPath(f.Path) {
-			return nil, ErrWays
+		if f.Path, err = o.String("path"); err != nil {
+			return nil, refuseType(o, "path", ruleNotString).(*Refusal).in(member)
+		}
+		if rule := folderPathProblem(f.Path); rule != "" {
+			return nil, refuse(member+".path", rule)
 		}
 		if _, present := o["write"]; present {
 			if f.Write, err = o.Bool("write"); err != nil {
-				return nil, ErrWays
+				return nil, refuse(member+".write", ruleNotBool)
+			}
+		}
+		// No entry equal to, under or above another, judged as each entry
+		// is read: the first entry that breaks a rule is named.
+		ki := FolderKey(f.Path)
+		for _, g := range fs {
+			kk := FolderKey(g.Path)
+			if folderWithin(ki, kk) && folderWithin(kk, ki) {
+				return nil, refuse(member+".path", ruleMatches)
+			}
+			if folderWithin(ki, kk) || folderWithin(kk, ki) {
+				return nil, refuse(member+".path", ruleNested)
 			}
 		}
 		fs = append(fs, f)
-	}
-	for i := range fs {
-		for k := range fs {
-			if i != k && folderWithin(FolderKey(fs[i].Path), FolderKey(fs[k].Path)) {
-				return nil, ErrWays // equal to, under or above another
-			}
-		}
 	}
 	return fs, nil
 }
 
 // ValidFolderPath is a folders entry's path: a run's cwd (validCwd), but
 // not the root itself, which would put every file in reach.
-func ValidFolderPath(p string) bool {
-	return validCwd(p) && cleanPath(p, false)
+func ValidFolderPath(p string) bool { return folderPathProblem(p) == "" }
+
+// folderPathProblem is the rule a folders entry's path breaks
+// (ValidFolderPath), or "".
+func folderPathProblem(p string) string {
+	switch {
+	case p == "":
+		return ruleEmpty
+	case len(p) > MaxProgram: // "Program strings" order: the bytes, then the shape
+		return ruleTooLong
+	case !utf8.ValidString(p):
+		return ruleNotUTF8
+	case !showable(p):
+		return ruleControl
+	case !IsAbsProgram(p):
+		return ruleNotAbsolute
+	case !cleanPath(p, true):
+		return ruleNotClean
+	case !cleanPath(p, false):
+		return ruleRoot
+	case dotsOnlyElement(p):
+		return ruleDotsOnly
+	}
+	return ""
 }
 
 // pathElements splits an absolute path (IsAbsProgram) into its root ("/",
@@ -119,13 +153,18 @@ func FolderKey(p string) []string {
 }
 
 // foldCase is the key "without case" for a path element or a name
-// (0.93.1): NFD(fold(NFD(s))), canonical caseless matching (Unicode D145)
-// with simple folding, each rune mapped to the smallest rune of its
+// (0.93.1, 0.93.2): NFD(fold(upper(NFD(s)))), canonical caseless matching
+// (Unicode D145) with simple folding, each rune upper-cased by its simple
+// mapping (unicode.ToUpper) and then mapped to the smallest rune of its
 // unicode.SimpleFold orbit. Decomposing first lets a letter with marks
 // fold like the letter alone: "ǰ" and J followed by a combining caron are
 // one key, as are both forms of "café" (one name to macOS), and the long s
-// and S, the Kelvin sign and K. Looser only refuses more.
-func foldCase(s string) string { return norm.NFD.String(strings.Map(foldRune, norm.NFD.String(s))) }
+// and S, the Kelvin sign and K. The upper step (0.93.2) makes the dotless
+// i key as I, as it is alone in its orbit; for every other rune of Go's
+// tables it changes nothing. Looser only refuses more.
+func foldCase(s string) string {
+	return norm.NFD.String(strings.Map(func(r rune) rune { return foldRune(unicode.ToUpper(r)) }, norm.NFD.String(s)))
+}
 
 // foldRune is the smallest rune of r's simple case folding orbit.
 func foldRune(r rune) rune {

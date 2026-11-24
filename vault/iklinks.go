@@ -692,6 +692,7 @@ func (m *Manager) entryType(e *OutboxEntry) string {
 	}
 	if e.Held != nil {
 		if in, err := envelope.ParseInner(e.Held, envelope.ModeSealed); err == nil {
+			wipeInner(in) // a parsed copy; e.Held stays
 			return in.Type
 		}
 		return ""

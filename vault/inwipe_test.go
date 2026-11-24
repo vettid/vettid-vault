@@ -60,8 +60,18 @@ func TestInboundSessionPlaintextWiped(t *testing.T) {
 	inv := d.invite(t, KindConnection, time.Hour)
 	n := newNewcomer(t, 0x50)
 	n.hsInit(t, d.m, handshake.PurposeConnection, inv.ID, "c1")
-	n.finish(t, d)
 	w := recordWipedInners(t)
+	n.finish(t, d) // its hs.fin: handleFin
+	fins := 0
+	for _, in := range w.seen {
+		if in.Type == handshake.TypeFin {
+			fins++
+			w.wiped(in.ID)
+		}
+	}
+	if fins != 1 {
+		t.Fatalf("%d hs.fin inners wiped, want 1", fins)
+	}
 
 	early := n.send(t, d, "message.deliver", []byte(`{"under":"the request epoch"}`)) // before our approval: dropped
 	if !d.audited("unapproved_peer") {
@@ -111,6 +121,20 @@ func TestInboundSessionPlaintextWiped(t *testing.T) {
 		t.Fatal("relay.token.refresh on a request token not forbidden")
 	}
 	w.wiped(refresh)
+
+	// An answer on the request token (re set) is not handled, and wiped.
+	ansID, _ := envelope.NewULID(time.Now())
+	reID, _ := envelope.NewULID(time.Now().Add(-time.Second))
+	raw, err := n.ep.Seal(&envelope.Inner{ID: ansID, Type: "relay.token.refresh", TS: time.Now(), Re: reID,
+		Status: envelope.StatusOK, Body: []byte(`{"an":"answer"}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	n.deliver(t, d, raw)
+	if !d.audited("request_token_misuse") {
+		t.Fatal("an answer on the request token was not audited as misuse")
+	}
+	w.wiped(ansID)
 }
 
 // A message after our approval, before the peer's, is left unacked under
@@ -202,6 +226,20 @@ func TestOutboxReadBackWiped(t *testing.T) {
 			t.Fatalf("arrived %d times, want 1", n)
 		}
 	})
+	t.Run("tried, past RestampAfter", func(t *testing.T) {
+		f := newR29Fx(t)
+		f.longTokens()
+		e, in := f.waitingNote(0, "tried-late")
+		f.advance(10 * 24 * time.Hour)
+		w := recordWipedInners(t)
+		f.do(0, func(m *Manager, p *Peer) {
+			e.Tried = true
+			if m.ageCheck(e, f.clk) {
+				t.Fatal("a tried entry within the window was changed")
+			}
+		})
+		w.wiped(in.ID)
+	})
 	t.Run("reheld", func(t *testing.T) {
 		f := newR29Fx(t)
 		f.longTokens()
@@ -212,6 +250,15 @@ func TestOutboxReadBackWiped(t *testing.T) {
 		if e.Held == nil || !bytes.Contains(e.Held, []byte(`"n":"reheld"`)) {
 			t.Fatalf("the held copy is not intact: %q", e.Held)
 		}
+		// Its type, read from the held copy: that parse is wiped too.
+		w.seen = nil
+		f.do(0, func(m *Manager, p *Peer) {
+			e.Type = ""
+			if typ := m.entryType(e); typ != "test.note" {
+				t.Fatalf("entryType %q", typ)
+			}
+		})
+		w.wiped(in.ID)
 	})
 	t.Run("type read", func(t *testing.T) {
 		f := newR29Fx(t)

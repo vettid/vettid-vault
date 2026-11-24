@@ -420,9 +420,10 @@ func (m *Manager) handleMessage(ctx context.Context, msg Message, now time.Time)
 // is about to wipe.
 var testWipeInnerHook func(in *envelope.Inner)
 
-// wipeInner wipes the plaintext of an inner this vault opened (a peer's
-// message, or one of its own read back from the outbox) once nothing reads
-// it any more. Whatever outlives the message is a copy: a held request and
+// wipeInner wipes the plaintext body of an inner this vault opened (a
+// peer's message, or one of its own read back from the outbox) once nothing
+// reads it any more. Only Body is wiped: the string members (id, type, the
+// error's message) are Go strings and stay. Whatever outlives the message is a copy: a held request and
 // a cached response are marshalled, parsed members are copies, and a blob
 // call keeps the request without its body.
 func wipeInner(in *envelope.Inner) {

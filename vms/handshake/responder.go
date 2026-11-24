@@ -425,6 +425,10 @@ type FinResult struct {
 // handshake. An hs.fin whose sig_I verifies but whose n_I does not open
 // sas_commit can only come from the initiator: the handshake is aborted
 // and ErrSASCommit returned.
+// testFinFailHook, set only by tests, sees the opened inner HandleFin
+// refused, once wiped.
+var testFinFailHook func(in *envelope.Inner)
+
 func (r *Responder) HandleFin(raw []byte, collectSender ed25519.PublicKey, now time.Time) (*FinResult, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -443,11 +447,16 @@ func (r *Responder) HandleFin(raw []byte, collectSender ed25519.PublicKey, now t
 	}
 	// A not-yet-established epoch, used only to decrypt and check hs.fin.
 	pending := newEpoch(r.sched, RoleResponder, r.suiteID, r.policy, now)
+	var in *envelope.Inner
 	fail := func(err error) (*FinResult, error) {
 		pending.Destroy()
+		in.Wipe() // an opened message refused here (one of the new epoch before hs.fin, §6.5) is dropped
+		if testFinFailHook != nil && in != nil {
+			testFinFailHook(in)
+		}
 		return nil, err
 	}
-	in, err := pending.Open(env)
+	in, err = pending.Open(env)
 	if err != nil {
 		return fail(err)
 	}

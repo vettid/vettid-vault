@@ -414,3 +414,20 @@ func TestItemSetPins(t *testing.T) {
 		t.Fatalf("pin set again: %q", res.Code)
 	}
 }
+
+// 0.93.2: a refused leash.item.set is bad_request with error.message naming
+// the member and the rule (§10.11 "Why a setting is refused"), never the
+// value typed.
+func TestItemSetRefusalReason(t *testing.T) {
+	r := newRig(t)
+	r.rule(t, Auto, 0, 60, r.wifi)
+	for body, want := range map[string]string{
+		`{"agent_id":"dev-agent","item_id":"` + r.wifi + `","ways":["use","run"],"run":{"programs":[{"program":"git"},{"program":"/usr/bin/git"}]}}`: "run.programs[1].program: matches another entry",
+		`{"agent_id":"dev-agent","item_id":"` + r.wifi + `","ways":["use","proxy"],"proxy":{"hosts":["10.0.0.1"],"header":"Authorization"}}`:         "proxy.hosts[0]: not allowed for the proxy",
+	} {
+		res := r.itemSet(body)
+		if res.Code != "bad_request" || res.Message != want {
+			t.Errorf("%s: %q %q, want bad_request %q", body, res.Code, res.Message, want)
+		}
+	}
+}

@@ -381,35 +381,43 @@ func TestParseRunFiles(t *testing.T) {
 		"two inputs, one name": func(m map[string]any) {
 			m["inputs"] = []any{map[string]any{"path": "/a/x.pdf", "size": 1}, map[string]any{"path": "/b/X.PDF", "size": 1}}
 		},
-		"0 names":                func(m map[string]any) { m["output"].(map[string]any)["names"] = []any{} },
-		"17 names":               func(m map[string]any) { m["output"].(map[string]any)["names"] = outNames(MaxRunOutputs + 1) },
-		"no names":               func(m map[string]any) { delete(m["output"].(map[string]any), "names") },
-		"no folder":              func(m map[string]any) { delete(m["output"].(map[string]any), "folder") },
-		"a relative folder":      func(m map[string]any) { m["output"].(map[string]any)["folder"] = "out" },
-		"output not an object":   func(m map[string]any) { m["output"] = []any{} },
-		"names equal but case":   func(m map[string]any) { m["output"].(map[string]any)["names"] = []any{"a.pdf", "A.PDF"} },
-		"a name with /":          func(m map[string]any) { m["output"].(map[string]any)["names"] = []any{"a/b"} },
-		"a name with \\":         func(m map[string]any) { m["output"].(map[string]any)["names"] = []any{win("a", "b")} },
-		"a name with :":          func(m map[string]any) { m["output"].(map[string]any)["names"] = []any{"a:b"} },
-		"a name ..":              func(m map[string]any) { m["output"].(map[string]any)["names"] = []any{".."} },
-		"a name .":               func(m map[string]any) { m["output"].(map[string]any)["names"] = []any{"."} },
-		"a name trailing dot":    func(m map[string]any) { m["output"].(map[string]any)["names"] = []any{"a."} },
-		"a name trailing space":  func(m map[string]any) { m["output"].(map[string]any)["names"] = []any{"a "} },
-		"a name empty":           func(m map[string]any) { m["output"].(map[string]any)["names"] = []any{""} },
-		"a name 256 bytes":       func(m map[string]any) { m["output"].(map[string]any)["names"] = []any{strings.Repeat("a", 256)} },
-		"a name control":         func(m map[string]any) { m["output"].(map[string]any)["names"] = []any{"a\x01"} },
-		"a name format char":     func(m map[string]any) { m["output"].(map[string]any)["names"] = []any{"a\u202eb"} },
-		"CON":                    func(m map[string]any) { m["output"].(map[string]any)["names"] = []any{"CON"} },
-		"nul.txt":                func(m map[string]any) { m["output"].(map[string]any)["names"] = []any{"nul.txt"} },
-		"Com1.tar.gz":            func(m map[string]any) { m["output"].(map[string]any)["names"] = []any{"Com1.tar.gz"} },
-		"lpt9":                   func(m map[string]any) { m["output"].(map[string]any)["names"] = []any{"lpt9"} },
-		"lpt0":                   func(m map[string]any) { m["output"].(map[string]any)["names"] = []any{"LPT0"} },
-		"com0.txt":               func(m map[string]any) { m["output"].(map[string]any)["names"] = []any{"com0.txt"} },
-		"COM superscript 1":      func(m map[string]any) { m["output"].(map[string]any)["names"] = []any{"COM¹"} },
-		"lpt superscript 3 ext":  func(m map[string]any) { m["output"].(map[string]any)["names"] = []any{"lpt³.log"} },
-		"CONIN$":                 func(m map[string]any) { m["output"].(map[string]any)["names"] = []any{"CONIN$"} },
-		"conout$.txt":            func(m map[string]any) { m["output"].(map[string]any)["names"] = []any{"conout$.txt"} },
-		"CONIN$.txt":             func(m map[string]any) { m["output"].(map[string]any)["names"] = []any{"CONIN$.txt"} },
+		"0 names":               func(m map[string]any) { m["output"].(map[string]any)["names"] = []any{} },
+		"17 names":              func(m map[string]any) { m["output"].(map[string]any)["names"] = outNames(MaxRunOutputs + 1) },
+		"no names":              func(m map[string]any) { delete(m["output"].(map[string]any), "names") },
+		"no folder":             func(m map[string]any) { delete(m["output"].(map[string]any), "folder") },
+		"a relative folder":     func(m map[string]any) { m["output"].(map[string]any)["folder"] = "out" },
+		"output not an object":  func(m map[string]any) { m["output"] = []any{} },
+		"names equal but case":  func(m map[string]any) { m["output"].(map[string]any)["names"] = []any{"a.pdf", "A.PDF"} },
+		"a name with /":         func(m map[string]any) { m["output"].(map[string]any)["names"] = []any{"a/b"} },
+		"a name with \\":        func(m map[string]any) { m["output"].(map[string]any)["names"] = []any{win("a", "b")} },
+		"a name with :":         func(m map[string]any) { m["output"].(map[string]any)["names"] = []any{"a:b"} },
+		"a name ..":             func(m map[string]any) { m["output"].(map[string]any)["names"] = []any{".."} },
+		"a name .":              func(m map[string]any) { m["output"].(map[string]any)["names"] = []any{"."} },
+		"a name trailing dot":   func(m map[string]any) { m["output"].(map[string]any)["names"] = []any{"a."} },
+		"a name trailing space": func(m map[string]any) { m["output"].(map[string]any)["names"] = []any{"a "} },
+		"a name empty":          func(m map[string]any) { m["output"].(map[string]any)["names"] = []any{""} },
+		"a name 256 bytes":      func(m map[string]any) { m["output"].(map[string]any)["names"] = []any{strings.Repeat("a", 256)} },
+		"a name control":        func(m map[string]any) { m["output"].(map[string]any)["names"] = []any{"a\x01"} },
+		"a name format char":    func(m map[string]any) { m["output"].(map[string]any)["names"] = []any{"a\u202eb"} },
+		"CON":                   func(m map[string]any) { m["output"].(map[string]any)["names"] = []any{"CON"} },
+		"nul.txt":               func(m map[string]any) { m["output"].(map[string]any)["names"] = []any{"nul.txt"} },
+		"Com1.tar.gz":           func(m map[string]any) { m["output"].(map[string]any)["names"] = []any{"Com1.tar.gz"} },
+		"lpt9":                  func(m map[string]any) { m["output"].(map[string]any)["names"] = []any{"lpt9"} },
+		"lpt0":                  func(m map[string]any) { m["output"].(map[string]any)["names"] = []any{"LPT0"} },
+		"com0.txt":              func(m map[string]any) { m["output"].(map[string]any)["names"] = []any{"com0.txt"} },
+		"COM superscript 1":     func(m map[string]any) { m["output"].(map[string]any)["names"] = []any{"COM¹"} },
+		"lpt superscript 3 ext": func(m map[string]any) { m["output"].(map[string]any)["names"] = []any{"lpt³.log"} },
+		"CONIN$":                func(m map[string]any) { m["output"].(map[string]any)["names"] = []any{"CONIN$"} },
+		"conout$.txt":           func(m map[string]any) { m["output"].(map[string]any)["names"] = []any{"conout$.txt"} },
+		"CONIN$.txt":            func(m map[string]any) { m["output"].(map[string]any)["names"] = []any{"CONIN$.txt"} },
+		// 0.93.2: compared upper-cased with strings.ToUpper, the dotless i
+		// reads as I.
+		"CON dotless-i N$": func(m map[string]any) {
+			m["output"].(map[string]any)["names"] = []any{"CON" + string(rune(0x131)) + "N$"}
+		},
+		"CON dotless-i N$.txt": func(m map[string]any) {
+			m["output"].(map[string]any)["names"] = []any{"CON" + string(rune(0x131)) + "N$.txt"}
+		},
 		"CON .txt":               func(m map[string]any) { m["output"].(map[string]any)["names"] = []any{"CON .txt"} },
 		"nul  .log":              func(m map[string]any) { m["output"].(map[string]any)["names"] = []any{"nul  .log"} },
 		"COM superscript 2":      func(m map[string]any) { m["output"].(map[string]any)["names"] = []any{"COM²"} },
@@ -519,17 +527,36 @@ func TestFoldKeyPairs(t *testing.T) {
 		{"/a/aί", "/a/áͅ"}, {"/a/\u017f", "/a/S"}, {"/a/\u212a", "/a/k"}, {"/a/x.", "/a/x"}, {"/a/x ", "/a/x"},
 		{"/a/b", "/a" + win("", "b")}, {win("C:", "x"), win("c:", "X")}, {win("C:", "x"), "C:/x"},
 	}
+	// 0.93.2: the dotless i keys as I (the upper step); the dotted capital
+	// I stays I + U+0307, apart from i.
+	dotless, dotted := string(rune(0x131)), string(rune(0x130))
+	same = append(same, [2]string{"/a/" + dotless, "/a/I"}, [2]string{"/a/" + dotless, "/a/i"},
+		[2]string{"/a/" + dotted, "/a/i" + string(rune(0x307))})
 	for _, p := range same {
 		if strings.Join(FolderKey(p[0]), "/") != strings.Join(FolderKey(p[1]), "/") {
 			t.Errorf("%q and %q: two keys %q %q", p[0], p[1], FolderKey(p[0]), FolderKey(p[1]))
 		}
 	}
-	for _, p := range [][2]string{{"/a/\u00df", "/a/ss"}, {"/a/work", "/a/work2"}, {"/a/e", "/a/\u00e9"}, {"/x", win("C:", "x")}} {
+	for _, p := range [][2]string{{"/a/\u00df", "/a/ss"}, {"/a/work", "/a/work2"}, {"/a/e", "/a/\u00e9"}, {"/x", win("C:", "x")},
+		{"/a/" + dotted, "/a/i"}} {
 		if strings.Join(FolderKey(p[0]), "/") == strings.Join(FolderKey(p[1]), "/") {
 			t.Errorf("%q and %q: one key", p[0], p[1])
 		}
 	}
 	if foldCase("\u01f0.txt") != foldCase("J\u030c.TXT") || foldCase("a.txt") == foldCase("b.txt") {
 		t.Error("the names' key")
+	}
+	if foldCase(dotless+".txt") != foldCase("I.TXT") || foldCase(dotted+".txt") == foldCase("i.txt") {
+		t.Error("the names' key of the dotless and the dotted i")
+	}
+	// Through ParseWays: /a/ı against /a/I (and /a/i) refused, /a/İ against
+	// /a/i two entries.
+	for _, other := range []string{"/a/I", "/a/i"} {
+		if _, err := parseWays(t, foldersBody(folder(other, false), folder("/a/"+dotless, false)), nil); err == nil {
+			t.Errorf("/a/%s against %s accepted", dotless, other)
+		}
+	}
+	if _, err := parseWays(t, foldersBody(folder("/a/"+dotted, false), folder("/a/i", false)), nil); err != nil {
+		t.Errorf("/a/%s against /a/i: %v", dotted, err)
 	}
 }

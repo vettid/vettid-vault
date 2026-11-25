@@ -94,8 +94,19 @@ func currentSalts(now time.Time) []paircode.Salt {
 	return l
 }
 
+// requirePairCodeTestCost skips a handler test in a build at the specified
+// cost: every request derives Argon2id at 256 MiB, slow under -race. The
+// derivations at that cost are vms/paircode's known-answer tests.
+func requirePairCodeTestCost(t *testing.T) {
+	t.Helper()
+	if !paircode.TestCost {
+		t.Skip("code pairing at 256 MiB: run with -tags vettid_testcost")
+	}
+}
+
 func newPCFixture(t *testing.T) (*devFixture, *pcRelay) {
 	t.Helper()
+	requirePairCodeTestCost(t)
 	d := newDevFixture(t)
 	// The vault's clock mid-hour (ahead of the real one, never behind):
 	// near an hour's edge the relay lists two salts, which would change

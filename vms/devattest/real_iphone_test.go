@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/vettid/vettid-vault/enclave/releasecfg"
 	"github.com/vettid/vettid-vault/vms/altchan"
 	"github.com/vettid/vettid-vault/vms/devattest"
 	"github.com/vettid/vettid-vault/vms/nitro"
@@ -16,12 +18,10 @@ import (
 )
 
 // realIOSAppIDs are the App IDs a real attestation file may name: the
-// production and staging apps (the channels' ios_app_id) and the debug and
-// dev-stack builds, which attest in the production environment when signed
-// with the production App Attest entitlement.
+// dev-stack and debug builds only (testdata/real/README.md: never export
+// from a Release or Staging build). They attest in the production
+// environment when signed with the production App Attest entitlement.
 var realIOSAppIDs = map[string]bool{
-	"3X25CJ86MV.com.vettid.app":          true,
-	"3X25CJ86MV.com.vettid.app.staging":  true,
 	"3X25CJ86MV.com.vettid.app.dev":      true,
 	"3X25CJ86MV.com.vettid.app.devstack": true,
 }
@@ -114,11 +114,36 @@ func TestRealIOSAttestations(t *testing.T) {
 				t.Logf("assertion %d: counter %d", i, nb.Counter)
 				b = nb
 			}
-			// The same objects under another App ID are refused.
-			other := *p
-			other.IOSAppID = "3X25CJ86MV.com.vettid.app.other"
-			if _, err := devattest.VerifyAttest(&other, d, hash32(t, "challenge", r.Challenge), at, nil); err == nil {
-				t.Fatal("accepted under another App ID")
+			// The refusals, on real data: each release channel's App ID
+			// refuses the attestation and its first assertion; a replayed
+			// assertion and a changed challenge are refused.
+			first := r.Assertions[0]
+			attested, err := devattest.VerifyAttest(p, d, hash32(t, "challenge", r.Challenge), at, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for ch, id := range releasecfg.IOSAppIDs {
+				other := *p
+				other.IOSAppID = id
+				if _, err := devattest.VerifyAttest(&other, d, hash32(t, "challenge", r.Challenge), at, nil); !errors.Is(err, devattest.ErrApplication) {
+					t.Fatalf("the %s App ID: the attestation gives %v", ch, err)
+				}
+				s := devattest.Signed{ClientDataHash: hash32(t, "client_data_hash", first.ClientDataHash)}
+				da := &altchan.DeviceAssertion{Platform: altchan.PlatformIOS, Assertion: b64(t, "assertion", first.Assertion)}
+				if _, err := devattest.VerifyAssertion(&other, attested, da, s, attested.Counter, at, nil); !errors.Is(err, devattest.ErrApplication) {
+					t.Fatalf("the %s App ID: the assertion gives %v", ch, err)
+				}
+			}
+			last := r.Assertions[len(r.Assertions)-1]
+			s := devattest.Signed{ClientDataHash: hash32(t, "client_data_hash", last.ClientDataHash)}
+			da := &altchan.DeviceAssertion{Platform: altchan.PlatformIOS, Assertion: b64(t, "assertion", last.Assertion)}
+			if _, err := devattest.VerifyAssertion(p, b, da, s, b.Counter, at, nil); !errors.Is(err, devattest.ErrCounter) {
+				t.Fatalf("a replayed assertion gives %v", err)
+			}
+			flipped := hash32(t, "challenge", r.Challenge)
+			flipped[0] ^= 1
+			if _, err := devattest.VerifyAttest(p, d, flipped, at, nil); !errors.Is(err, devattest.ErrChallenge) {
+				t.Fatalf("a changed challenge gives %v", err)
 			}
 		})
 	}

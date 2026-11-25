@@ -13,9 +13,9 @@ E2ETAGS   := devenclave e2e vettid_testcost
 # links). It must never link the AWS SDK, the parent, or any dev/test code.
 ENCLAVEPKGS := ./cmd/vault-enclave
 
-.PHONY: all test channels race lint vet staticcheck fuzz scan tidy vectors check-tcb e2e integration host-sums
+.PHONY: all test channels race lint vet staticcheck fuzz scan tidy vectors check-tcb e2e integration host-sums real-attest
 
-all: lint check-tcb test
+all: lint check-tcb real-attest test
 
 # The vmsvectors build regenerates the §16 vectors through the library's
 # sending code and compares them byte for byte with testdata/vectors.
@@ -61,6 +61,15 @@ staticcheck:
 	$(GO) run honnef.co/go/tools/cmd/staticcheck@v0.8.1 -tags 'devenclave integration' ./...
 
 lint: vet staticcheck
+
+# The verifiers against real hardware (vms/devattest/testdata/real/README.md):
+# TestRealIOSAttestations must run and pass on at least one committed
+# *.ios.json (a run without one skips, which fails here).
+real-attest:
+	@out=$$($(GO) test -count=1 -run '^TestRealIOSAttestations$$' -v ./vms/devattest/ 2>&1) || { printf '%s\n' "$$out"; exit 1; }; \
+	  printf '%s\n' "$$out" | grep -q '^--- PASS: TestRealIOSAttestations ' && printf '%s\n' "$$out" | grep -q '^    --- PASS: TestRealIOSAttestations/' || \
+	  { printf '%s\n' "$$out"; echo "real-attest: TestRealIOSAttestations did not run on a real App Attest file"; exit 1; }
+	@echo "real-attest: ok"
 
 # Release builds must not contain deterministic randomness (derandomized
 # HPKE, ML-KEM test encapsulation), the dev enclave, or test harnesses and

@@ -132,14 +132,50 @@ func Display(code []byte) string {
 	return string(code[:4]) + "-" + string(code[4:])
 }
 
-// Normalize applies the new device's input order (§6.7.2): spaces and
-// hyphens removed; if 8 characters remain it is a code, upper-cased, and
-// refused with ErrSymbol if any is outside the alphabet; otherwise it is
-// not a code (ErrCode: the caller parses the original input as a link).
+// Removed is the set the new device's input rule removes (VAULT-MESSAGING
+// 0.94.1 §6.7.2, chosen; not in the card): the ASCII tab, CR and LF; every
+// character of Unicode 15.0's categories Zs and Pd, listed here so that a
+// runtime with other Unicode tables removes the same set (Go 1.26's
+// unicode.Zs and unicode.Pd are this set: TestRemovedIsUnicode15); the
+// minus sign U+2212 (Sm); and the soft hyphen and the invisible characters
+// a paste brings, U+00AD, U+200B, U+200E, U+200F, U+2060 and U+FEFF.
+// Nothing else is removed.
+var Removed = map[rune]bool{
+	// ASCII tab, LF, CR
+	0x0009: true, 0x000A: true, 0x000D: true,
+	// Zs (Unicode 15.0, 17)
+	0x0020: true, 0x00A0: true, 0x1680: true, 0x2000: true, 0x2001: true, 0x2002: true, 0x2003: true,
+	0x2004: true, 0x2005: true, 0x2006: true, 0x2007: true, 0x2008: true, 0x2009: true, 0x200A: true,
+	0x202F: true, 0x205F: true, 0x3000: true,
+	// Pd (Unicode 15.0, 26)
+	0x002D: true, 0x058A: true, 0x05BE: true, 0x1400: true, 0x1806: true, 0x2010: true, 0x2011: true,
+	0x2012: true, 0x2013: true, 0x2014: true, 0x2015: true, 0x2E17: true, 0x2E1A: true, 0x2E3A: true,
+	0x2E3B: true, 0x2E40: true, 0x2E5D: true, 0x301C: true, 0x3030: true, 0x30A0: true, 0xFE31: true,
+	0xFE32: true, 0xFE58: true, 0xFE63: true, 0xFF0D: true, 0x10EAD: true,
+	// the minus sign (Sm)
+	0x2212: true,
+	// soft hyphen, zero width space, LRM, RLM, word joiner, BOM
+	0x00AD: true, 0x200B: true, 0x200E: true, 0x200F: true, 0x2060: true, 0xFEFF: true,
+}
+
+// Normalize applies the new device's input order (0.94.1 §6.7.2): the
+// characters of [Removed] removed; if 8 code points remain it is a code:
+// refused with ErrSymbol if any is not ASCII (before any case mapping),
+// then upper-cased and refused with ErrSymbol if any is outside the
+// alphabet; otherwise it is not a code (ErrCode: the caller parses the
+// original input as a link). An input that is not valid UTF-8 is no code.
 func Normalize(input string) ([]byte, error) {
-	s := strings.NewReplacer(" ", "", "-", "").Replace(input)
+	if !utf8.ValidString(input) {
+		return nil, ErrCode
+	}
+	s := strings.Map(func(r rune) rune {
+		if Removed[r] {
+			return -1
+		}
+		return r
+	}, input)
 	if utf8.RuneCountInString(s) != Length {
-		return nil, ErrCode // counted in characters, as typed
+		return nil, ErrCode // counted in code points
 	}
 	// Only ASCII is upper-cased: a non-ASCII character is refused before
 	// any case mapping (Go maps U+017F to S; full case mapping, as other

@@ -8,10 +8,12 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
 	"time"
+	"unicode"
 
 	"golang.org/x/crypto/argon2"
 	"golang.org/x/crypto/chacha20poly1305"
@@ -20,7 +22,7 @@ import (
 	"github.com/vettid/vettid-vault/vms/paircode"
 )
 
-// checkPairCodeVectors checks pair-code.json (0.94.0 §6.7.2) as a desktop
+// checkPairCodeVectors checks pair-code.json (0.94.1 §6.7.2) as a desktop
 // or an agent would: s_r, salt_id, pw, tag, x, k_w, the aad and the
 // opened blob recomputed from the spec's formulas with plain SHA-256,
 // Argon2id, HKDF and XChaCha20-Poly1305 (no paircode code), then the
@@ -181,6 +183,38 @@ func checkPairCodeVectors(t *testing.T, dir string) {
 		want := map[string]error{"": nil, "bad_symbol": paircode.ErrSymbol, "not_a_code": paircode.ErrCode}[c["error"]]
 		if string(got) != c["code"] || !errors.Is(err, want) {
 			t.Errorf("normalize %q: %q %v", c["input"], got, err)
+		}
+	}
+	// The removed set: every code point listed, and no other (the device's
+	// own table must equal it).
+	var removed []string
+	if json.Unmarshal(d.m["removed"], &removed) != nil || len(removed) != len(paircode.Removed) {
+		t.Fatalf("removed: %d listed, %d in the rule", len(removed), len(paircode.Removed))
+	}
+	prev := rune(-1)
+	for _, u := range removed {
+		var c rune
+		if _, err := fmt.Sscanf(u, "U+%X", &c); err != nil || c <= prev {
+			t.Fatalf("removed %s: not a code point in ascending order", u)
+		}
+		prev = c
+		// The rule removes it: inside a code it leaves the code.
+		if got, err := paircode.Normalize("K7QM" + string(c) + "4XPZ"); err != nil || string(got) != "K7QM4XPZ" {
+			t.Errorf("removed %s: not removed (%q %v)", u, got, err)
+		}
+	}
+	if unicode.Version == "15.0.0" {
+		// The set from Unicode 15.0's own tables, not from the rule's.
+		others := map[rune]bool{0x09: true, 0x0A: true, 0x0D: true, 0x2212: true, 0xAD: true, 0x200B: true, 0x200E: true,
+			0x200F: true, 0x2060: true, 0xFEFF: true}
+		n := 0
+		for c := rune(0); c <= unicode.MaxRune; c++ {
+			if unicode.Is(unicode.Zs, c) || unicode.Is(unicode.Pd, c) || others[c] {
+				n++
+			}
+		}
+		if n != len(removed) {
+			t.Fatalf("removed lists %d, Unicode 15.0 gives %d", len(removed), n)
 		}
 	}
 	var forms []map[string]any

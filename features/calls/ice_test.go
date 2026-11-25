@@ -27,9 +27,18 @@ type fakeIssuer struct {
 	err    error
 	n      int
 	extra  int // credentials beyond count in each answer
+	// hold, when set, keeps a request from being answered until it is
+	// closed (a background refill that must not finish yet).
+	hold chan struct{}
 }
 
 func (f *fakeIssuer) Credentials(_ context.Context, count int) (*callswire.Answer, error) {
+	f.mu.Lock()
+	hold := f.hold
+	f.mu.Unlock()
+	if hold != nil {
+		<-hold
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.counts = append(f.counts, count)
@@ -150,8 +159,15 @@ func TestPoolRefillAndUsable(t *testing.T) {
 	}
 	// 4 h later every credential has exactly 2 h left: none is usable, and the pool asks for 4.
 	is.set(t0.Add(10*time.Hour), nil)
+	// The refill Servers starts must not answer before Servers has picked:
+	// it runs in the background, and a fresh credential would be given.
+	hold := make(chan struct{})
+	is.mu.Lock()
+	is.hold = hold
+	is.mu.Unlock()
 	late := t0.Add(4 * time.Hour)
 	servers, exp, _ := p.Servers(nil, "late", late)
+	close(hold)
 	if _, ok := turnOf(servers); ok || !exp.Equal(late.Add(ICETTL)) {
 		// The refill runs in the background: this configuration has STUN only.
 		t.Fatalf("a credential in its last 2 h was given: %+v", servers)

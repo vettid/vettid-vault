@@ -104,15 +104,9 @@ func (p *vproc) heavyCall(f [][]byte) [][]byte {
 	}
 	switch string(f[0]) {
 	case vaultipc.HeavyAcquire:
-		if h.acquire(p.permitKey()) {
-			return hostproto.Strings(hostproto.StatusOK, "1")
-		}
-		return hostproto.Strings(hostproto.StatusOK, "0")
+		return permitReply(h.try(p.permitKey()))
 	case vaultipc.HeavyAcquireCode:
-		if h.acquireCode(p.permitKey()) {
-			return hostproto.Strings(hostproto.StatusOK, "1")
-		}
-		return hostproto.Strings(hostproto.StatusOK, "0")
+		return permitReply(h.tryCode(p.permitKey()))
 	case vaultipc.HeavyRelease:
 		h.release(p.permitKey())
 		return hostproto.Strings(hostproto.StatusOK, "1")
@@ -124,3 +118,15 @@ func (p *vproc) heavyCall(f [][]byte) [][]byte {
 // the process itself, so that a late exit of a vault's old process never
 // releases the permit its new process holds.
 func (p *vproc) permitKey() string { return fmt.Sprintf("%s/%p", p.vaultID, p) }
+
+// permitReply is a permit answer on the channel: "1" given, "0" held
+// (worth waiting), vaultipc.HeavyNoRoom no room (busy now).
+func permitReply(a permitAnswer) [][]byte {
+	switch a {
+	case permitGiven:
+		return hostproto.Strings(hostproto.StatusOK, "1")
+	case permitNoRoom:
+		return hostproto.Strings(hostproto.StatusOK, vaultipc.HeavyNoRoom)
+	}
+	return hostproto.Strings(hostproto.StatusOK, "0")
+}

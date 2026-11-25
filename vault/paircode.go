@@ -88,11 +88,12 @@ func (m *Manager) codePermit(ctx context.Context, deadline time.Time) (func(), b
 		return func() {}, true
 	}
 	for {
-		if rel, ok := take(ctx); ok {
+		rel, ok := take(ctx)
+		if ok {
 			return rel, true
 		}
-		if !pcNow().Before(deadline) {
-			return nil, false
+		if noRoom(rel) || !pcNow().Before(deadline) {
+			return nil, false // no room for 256 MiB: busy now (§6.7.2)
 		}
 		select {
 		case <-ctx.Done():

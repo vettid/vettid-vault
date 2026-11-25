@@ -128,18 +128,28 @@ func (m *Manager) permit(ctx context.Context, wait time.Duration) (func(), bool)
 	return pollPermit(ctx, m.opt.HeavyPermit, wait)
 }
 
+// NoRoom is what a permit function returns with ok false when it was
+// refused for lack of memory, not because another holds the permit
+// (Options.HeavyPermit, CodePermit): the vault answers busy at once,
+// without waiting. A refusal with a nil release is worth waiting for.
+func NoRoom() {}
+
+func noRoom(rel func()) bool { return rel != nil }
+
 // pollPermit asks take for the permit, every permitPoll for up to wait
-// (once with no wait); a nil take always gives it.
+// (once with no wait), and not again after a refusal for lack of memory;
+// a nil take always gives it.
 func pollPermit(ctx context.Context, take func(context.Context) (func(), bool), wait time.Duration) (func(), bool) {
 	if take == nil {
 		return func() {}, true
 	}
 	end := time.Now().Add(wait)
 	for {
-		if rel, ok := take(ctx); ok {
+		rel, ok := take(ctx)
+		if ok {
 			return rel, true
 		}
-		if wait <= 0 || time.Now().After(end) {
+		if noRoom(rel) || wait <= 0 || time.Now().After(end) {
 			return nil, false
 		}
 		select {

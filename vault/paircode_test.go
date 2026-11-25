@@ -1155,3 +1155,17 @@ func TestPairCodeFreesMemoryPerDerivation(t *testing.T) {
 		t.Fatalf("%d frees", frees)
 	}
 }
+
+// No room for 256 MiB is busy at once (§6.7.2), with no wait.
+func TestPairCodeNoRoomIsBusyAtOnce(t *testing.T) {
+	d, pr := newPCFixture(t)
+	asked := 0
+	d.m.opt.CodePermit = func(context.Context) (func(), bool) { asked++; return NoRoom, false }
+	start := time.Now()
+	if _, code := d.pcCreate(t, `{"role":"desktop","form":"code"}`); code != "busy" || asked != 1 || len(pr.puts) != 0 {
+		t.Fatalf("%q after %d asks", code, asked)
+	}
+	if time.Since(start) > 2*time.Second {
+		t.Fatal("waited on no room")
+	}
+}

@@ -48,11 +48,36 @@ func TestPermitsGoToTheSupervisor(t *testing.T) {
 	}
 }
 
-// The opened vault's options carry both permits.
+// The opened vault's options carry both permits, each asking its own op;
+// a "-" (no room) reads as no permit, not worth waiting for.
 func TestVaultOptionsCarryThePermits(t *testing.T) {
-	pr := &proc{p: Platform{}}
+	a, b := net.Pipe()
+	got := make(chan string, 8)
+	reply := "1"
+	sup := hostproto.NewConn(a, func(_ context.Context, f *hostproto.Frame) [][]byte {
+		got <- string(f.Fields[0])
+		return [][]byte{[]byte(hostproto.StatusOK), []byte(reply)}
+	}, nil)
+	defer sup.Close()
+	proc0 := hostproto.NewConn(b, nil, nil)
+	defer proc0.Close()
+	pr := &proc{p: Platform{}, ch: channel{c: proc0}}
 	o := pr.vaultOptions(enclave.Config{})
-	if o.HeavyPermit == nil || o.CodePermit == nil {
-		t.Fatal("a permit not wired")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, ok := o.CodePermit(ctx); !ok || <-got != vaultipc.HeavyAcquireCode {
+		t.Fatal("CodePermit does not ask acquire_code")
+	}
+	if _, ok := o.HeavyPermit(ctx); !ok || <-got != vaultipc.HeavyAcquire {
+		t.Fatal("HeavyPermit does not ask acquire")
+	}
+	reply = vaultipc.HeavyNoRoom
+	if rel, ok := o.CodePermit(ctx); ok || rel == nil {
+		t.Fatal("no room not read as busy now")
+	}
+	<-got
+	reply = "0"
+	if rel, ok := o.CodePermit(ctx); ok || rel != nil {
+		t.Fatal("held read as no room")
 	}
 }

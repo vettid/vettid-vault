@@ -24,7 +24,7 @@
 //	Push            [path, headers, body]         → [status, code, headers, body]
 //	Transfer        [ticket, priority, wait_ms]   → [status]   (ok: admitted; busy: not within wait_ms)
 //	Counter         [op, key, a, b]               → [status, ...] (release R)
-//	HeavyPermit     [acquire | acquire_code | release] → [status, "1" | "0"] (release R; acquire_code 0.94.0)
+//	HeavyPermit     [acquire | acquire_code | release] → [status, "1" | "0" | "-"] (release R; acquire_code, "-" 0.94.0)
 //	MarkDeleting    [vault_id]                    → [status] (0.51.0; the process's own vault only)
 //
 // Vault → supervisor (notifications): Lifecycle [event, vault_id,
@@ -188,9 +188,14 @@ const (
 const (
 	HeavyAcquire = "acquire"
 	// HeavyAcquireCode asks for the permit for a code pairing's
-	// derivation (0.94.0 §6.7.2): 256 MiB, never while a vault is opening.
+	// derivation (0.94.0 §6.7.2): 256 MiB, never while a vault is opening
+	// or a refused "acquire" still waits (its waiter mark).
 	HeavyAcquireCode = "acquire_code"
 	HeavyRelease     = "release"
+	// HeavyNoRoom is the answer to an acquire refused for lack of memory
+	// ("0" is one refused because another holds the permit): the vault
+	// answers busy at once instead of waiting.
+	HeavyNoRoom = "-"
 )
 
 // Vault → supervisor notifications.

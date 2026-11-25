@@ -63,15 +63,32 @@ func (h *heavyPermit) freeLocked() bool {
 }
 
 // acquire gives the permit to vault id, or refuses.
-func (h *heavyPermit) acquire(id string) bool {
+func (h *heavyPermit) acquire(id string) bool { return h.try(id) == permitGiven }
+
+// The answers to an ask for the permit.
+type permitAnswer int
+
+const (
+	permitGiven  permitAnswer = iota
+	permitHeld                // another holds it: worth waiting a little
+	permitNoRoom              // memory is short: busy now, no wait
+)
+
+// try is acquire with its answer: a refusal because another holds the
+// permit leaves the waiter mark (code permits wait behind it); one for
+// lack of room does not, and the asker answers busy at once.
+func (h *heavyPermit) try(id string) permitAnswer {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if !h.freeLocked() || !h.roomLocked() {
+	if !h.roomLocked() {
+		return permitNoRoom
+	}
+	if !h.freeLocked() {
 		h.waiter = h.now().Add(waiterHold)
-		return false
+		return permitHeld
 	}
 	h.holder, h.until, h.waiter = id, h.now().Add(heavyLease), time.Time{}
-	return true
+	return permitGiven
 }
 
 // acquireCode gives vault id the permit for a code pairing's derivation:
@@ -79,14 +96,21 @@ func (h *heavyPermit) acquire(id string) bool {
 // time), with room for 256 MiB above the floor, and never while a vault
 // process is opening (unlocks go first). It reserves nothing: refused, the
 // vault waits a little and then answers busy.
-func (h *heavyPermit) acquireCode(id string) bool {
+func (h *heavyPermit) acquireCode(id string) bool { return h.tryCode(id) == permitGiven }
+
+// tryCode is acquireCode with its answer: no room is busy now (§6.7.2);
+// another holder, a waiter or an open is worth waiting for.
+func (h *heavyPermit) tryCode(id string) permitAnswer {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if !h.freeLocked() || !h.roomFor(codeNeed()) || h.now().Before(h.waiter) || h.opening != nil && h.opening() {
-		return false
+	if !h.roomFor(codeNeed()) {
+		return permitNoRoom
+	}
+	if !h.freeLocked() || h.now().Before(h.waiter) || h.opening != nil && h.opening() {
+		return permitHeld
 	}
 	h.holder, h.until = id, h.now().Add(heavyLease)
-	return true
+	return permitGiven
 }
 
 // release returns vault id's permit.

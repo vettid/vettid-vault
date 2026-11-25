@@ -125,7 +125,10 @@ type Options struct {
 	// R, §11.14.4); nil: unreachable. HeavyPermit takes the supervisor's
 	// permit for the recovery wrap's heavy derivation and returns its
 	// release (§11.14.3); nil: always given (development, tests).
-	Counter     counter.Bucket
+	Counter counter.Bucket
+	// A refusal (ok false) with a non-nil release (NoRoom) is one for lack
+	// of memory: busy at once; with a nil one, another holds the permit
+	// and the vault may wait a little.
 	HeavyPermit func(ctx context.Context) (release func(), ok bool)
 	// CodePermit takes the supervisor's permit for a code pairing's two
 	// 256 MiB derivations (0.94.0 §6.7.2), refused while an unlock is in

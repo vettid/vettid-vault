@@ -252,3 +252,29 @@ func TestHeavyWaiterHasPrecedence(t *testing.T) {
 		t.Fatal("a waiter that gave up still holds codes back")
 	}
 }
+
+// A refusal for lack of memory is not waited for: it leaves no waiter
+// mark (a code is given once room is back) and goes out as "-"; one
+// because another holds the permit leaves it, as "0".
+func TestPermitNoRoomAnswer(t *testing.T) {
+	now := time.Date(2026, 11, 25, 12, 0, 0, 0, time.UTC)
+	floor := uint64(768 << 20)
+	room := uint64(0)
+	h := &heavyPermit{avail: func() uint64 { return floor + room }, floor: func() uint64 { return floor }, now: func() time.Time { return now }}
+	if h.try("r1") != permitNoRoom || h.tryCode("c1") != permitNoRoom {
+		t.Fatal("no room not told apart")
+	}
+	room = max(heavyNeed(), codeNeed())
+	if h.tryCode("c1") != permitGiven {
+		t.Fatal("a no-room refusal left a waiter mark")
+	}
+	if h.try("r1") != permitHeld || h.tryCode("c2") != permitHeld {
+		t.Fatal("held not told")
+	}
+	if r := permitReply(permitNoRoom); string(r[1]) != vaultipc.HeavyNoRoom {
+		t.Fatalf("%q", r)
+	}
+	if r := permitReply(permitHeld); string(r[1]) != "0" {
+		t.Fatalf("%q", r)
+	}
+}

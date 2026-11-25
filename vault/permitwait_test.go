@@ -15,7 +15,10 @@ func TestPollPermitWaits(t *testing.T) {
 	asked := 0
 	take := func(context.Context) (func(), bool) {
 		asked++
-		return func() {}, asked >= 3
+		if asked < 3 {
+			return nil, false
+		}
+		return func() {}, true
 	}
 	start := time.Now()
 	if _, ok := pollPermit(context.Background(), take, HeavyPermitWait); !ok || asked != 3 {
@@ -46,7 +49,10 @@ func TestPollPermitWaits(t *testing.T) {
 func refusedTwice(asked *int) func(context.Context) (func(), bool) {
 	return func(context.Context) (func(), bool) {
 		*asked++
-		return func() {}, *asked >= 3
+		if *asked < 3 {
+			return nil, false // held by another: worth waiting for
+		}
+		return func() {}, true
 	}
 }
 
@@ -79,4 +85,49 @@ func TestChangeWaitsForThePermit(t *testing.T) {
 	if err := f.change(SecretChange{Reason: ReplacePassword, PIN: testPIN, Password: []byte(rPW), NewPassword: []byte(rNewPW)}); err != nil || asked != 3 {
 		t.Fatalf("%v after %d asks", err, asked)
 	}
+}
+
+// A refusal for lack of memory (NoRoom) is busy at once: no wait.
+func TestPollPermitNoRoomDoesNotWait(t *testing.T) {
+	asked := 0
+	start := time.Now()
+	if _, ok := pollPermit(context.Background(), func(context.Context) (func(), bool) { asked++; return NoRoom, false }, HeavyPermitWait); ok || asked != 1 {
+		t.Fatalf("no room: %v after %d asks", ok, asked)
+	}
+	if time.Since(start) > permitPoll {
+		t.Fatal("waited on no room")
+	}
+}
+
+// A recovery open waits up to 2 s for a held permit, then is busy; a
+// refusal for lack of memory is busy at once.
+func TestRecoveryOpenPermitWait(t *testing.T) {
+	t.Run("given within the wait", func(t *testing.T) {
+		f := newOpenFixture(t)
+		asked := 0
+		f.opts.HeavyPermit = refusedTwice(&asked)
+		if m, out := f.open(testPIN, rPW); m == nil || !out.OK || asked != 3 {
+			t.Fatalf("%+v after %d asks", out, asked)
+		}
+	})
+	t.Run("held past the wait", func(t *testing.T) {
+		f := newOpenFixture(t)
+		f.opts.HeavyPermit = func(context.Context) (func(), bool) { return nil, false }
+		start := time.Now()
+		if m, out := f.open(testPIN, rPW); m != nil || out.Code != OpenBusy {
+			t.Fatalf("%+v", out)
+		}
+		if d := time.Since(start); d < RecoveryOpenPermitWait {
+			t.Fatalf("busy after %v", d)
+		}
+	})
+	t.Run("no room", func(t *testing.T) {
+		f := newOpenFixture(t)
+		asked := 0
+		f.opts.HeavyPermit = func(context.Context) (func(), bool) { asked++; return NoRoom, false }
+		start := time.Now()
+		if m, out := f.open(testPIN, rPW); m != nil || out.Code != OpenBusy || asked != 1 || time.Since(start) > time.Second {
+			t.Fatalf("%+v, %d asks", out, asked)
+		}
+	})
 }

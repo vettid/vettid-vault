@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/vettid/vettid-vault/internal/vaultipc"
+	"github.com/vettid/vettid-vault/vault"
 	"github.com/vettid/vettid-vault/vault/counter"
 )
 
@@ -95,6 +96,9 @@ func codePermit(ch channel) func(ctx context.Context) (func(), bool) {
 func permitFor(ch channel, op string) func(ctx context.Context) (func(), bool) {
 	return func(ctx context.Context) (func(), bool) {
 		r, err := ch.call(ctx, vaultipc.KindHeavyPermit, []byte(op))
+		if err == nil && ok(r, 2) && string(r[1]) == vaultipc.HeavyNoRoom {
+			return vault.NoRoom, false // busy now: no wait
+		}
 		if err != nil || !ok(r, 2) || string(r[1]) != "1" {
 			return nil, false
 		}

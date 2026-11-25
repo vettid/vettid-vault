@@ -96,7 +96,7 @@ func (m *Manager) approveTransferR(ctx context.Context, r *Request, pin string, 
 	if len(m.transferSecret) != recovery.SecretSize {
 		return errNotFound // the vault locked since the hs.init: the transfer starts again
 	}
-	rel0, ok := m.permit(ctx, 0)
+	rel0, ok := m.permit(ctx, HeavyPermitWait) // a busy here spends the UTK: it waits a little first
 	if !ok {
 		return errBusy
 	}

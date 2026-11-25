@@ -24,7 +24,7 @@
 //	Push            [path, headers, body]         → [status, code, headers, body]
 //	Transfer        [ticket, priority, wait_ms]   → [status]   (ok: admitted; busy: not within wait_ms)
 //	Counter         [op, key, a, b]               → [status, ...] (release R)
-//	HeavyPermit     [acquire | release]           → [status, "1" | "0"] (release R)
+//	HeavyPermit     [acquire | acquire_code | release] → [status, "1" | "0" | "-"] (release R; acquire_code, "-" 0.94.0)
 //	MarkDeleting    [vault_id]                    → [status] (0.51.0; the process's own vault only)
 //
 // Vault → supervisor (notifications): Lifecycle [event, vault_id,
@@ -135,10 +135,13 @@ const (
 	// supervisor admits only keys under recovery/v1/ and, once a process
 	// has named its vault's prefix, only that prefix.
 	KindCounter hostproto.Kind = 0x5b
-	// KindHeavyPermit [op] → [status, "1" | "0"]: op "acquire" asks for
-	// the one permit for the recovery wrap's heavy derivation (§11.14.3),
-	// given only while free memory is at least the memory-pressure floor
-	// plus the derivation's need; "release" returns it.
+	// KindHeavyPermit [op] → [status, "1" | "0" | "-"]: the one permit for a
+	// heavy derivation, given only while free memory is at least the
+	// memory-pressure floor plus the derivation's need. Op "acquire" asks
+	// for it for the recovery wrap (§11.14.3), "acquire_code" for a code
+	// pairing's derivation (0.94.0 §6.7.2: 256 MiB, never while a vault
+	// opens, nor while a refused "acquire" still waits), "release"
+	// returns either.
 	KindHeavyPermit hostproto.Kind = 0x5c
 	// KindMarkDeleting [vault_id] → [ok | error]: the deletion's mark at
 	// the host (VAULT-MESSAGING 0.51.0 §12.5, VAULT-HOST-PROTOCOL §5.6),
@@ -184,7 +187,15 @@ const (
 // Heavy permit operations.
 const (
 	HeavyAcquire = "acquire"
-	HeavyRelease = "release"
+	// HeavyAcquireCode asks for the permit for a code pairing's
+	// derivation (0.94.0 §6.7.2): 256 MiB, never while a vault is opening
+	// or a refused "acquire" still waits (its waiter mark).
+	HeavyAcquireCode = "acquire_code"
+	HeavyRelease     = "release"
+	// HeavyNoRoom is the answer to an acquire refused for lack of memory
+	// ("0" is one refused because another holds the permit): the vault
+	// answers busy at once instead of waiting.
+	HeavyNoRoom = "-"
 )
 
 // Vault → supervisor notifications.

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"errors"
+	"runtime/debug"
 	"time"
 
 	"github.com/vettid/vettid-vault/vms/handshake"
@@ -87,11 +88,12 @@ func (m *Manager) codePermit(ctx context.Context, deadline time.Time) (func(), b
 		return func() {}, true
 	}
 	for {
-		if rel, ok := take(ctx); ok {
+		rel, ok := take(ctx)
+		if ok {
 			return rel, true
 		}
-		if !pcNow().Before(deadline) {
-			return nil, false
+		if noRoom(rel) || !pcNow().Before(deadline) {
+			return nil, false // no room for 256 MiB: busy now (§6.7.2)
 		}
 		select {
 		case <-ctx.Done():
@@ -372,6 +374,14 @@ func (m *Manager) putCodeClaim(ctx context.Context, pc PairCodeRelay, purpose, r
 		if err != nil {
 			return errUnavailable
 		}
+		return nil
+	}); err != nil {
+		return nil, "", false, err
+	}
+	// The tag under a permit of its own: an unlock that opened since x's
+	// runs first (the request's one deadline covers both).
+	if err := m.underPermit(ctx, deadline, func() error {
+		var err error
 		if tag, err = paircode.Tag(purpose, r, code, order[0].SR); err != nil {
 			return errUnavailable
 		}
@@ -420,9 +430,17 @@ func (m *Manager) underPermit(ctx context.Context, deadline time.Time, f func() 
 	if !ok {
 		return errPairBusy
 	}
-	defer rel()
+	// The derivation's 256 MiB back to the OS before the permit goes (it
+	// admits that much), also if f panics.
+	defer func() {
+		freeOS()
+		rel()
+	}()
 	return f()
 }
+
+// freeOS returns freed memory to the OS (tests count its calls).
+var freeOS = debug.FreeOSMemory
 
 // unopenedPairing is the desktop or agent pairing pid that no device has
 // opened yet (no hs.init), or nil.

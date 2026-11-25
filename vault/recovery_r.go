@@ -111,23 +111,58 @@ func (m *Manager) noteCounter(ok bool) {
 	}
 }
 
+// The waits for the heavy-derivation permit (chosen; not in the spec: a
+// code pairing's derivations hold it at most about 1.6 s, and a busy here
+// costs the member a step done again, a transfer approval its UTK): a
+// transfer approval and a PIN or password change wait up to
+// HeavyPermitWait, a recovery open (under its request lock) up to
+// RecoveryOpenPermitWait, polling every permitPoll.
+const (
+	HeavyPermitWait        = 3 * time.Second
+	RecoveryOpenPermitWait = 2 * time.Second
+	permitPoll             = 250 * time.Millisecond
+)
+
 // permit takes the heavy-derivation permit, waiting up to wait for it.
 func (m *Manager) permit(ctx context.Context, wait time.Duration) (func(), bool) {
-	if m.opt.HeavyPermit == nil {
+	return pollPermit(ctx, m.opt.HeavyPermit, wait)
+}
+
+// NoRoom is what a permit function returns with ok false when it was
+// refused for lack of memory, not because another holds the permit
+// (Options.HeavyPermit, CodePermit): the vault answers busy at once,
+// without waiting. A refusal with a nil release is worth waiting for.
+func NoRoom() {}
+
+func noRoom(rel func()) bool { return rel != nil }
+
+// pollPermit asks take for the permit, every permitPoll for up to wait
+// (once with no wait), and not again after a refusal for lack of memory;
+// a nil take always gives it.
+func pollPermit(ctx context.Context, take func(context.Context) (func(), bool), wait time.Duration) (func(), bool) {
+	return pollPermitFor(ctx, take, wait, false)
+}
+
+// pollPermitFor is pollPermit; with throughNoRoom it keeps asking within
+// wait after a refusal for lack of memory too (the recovery wrap's arming).
+func pollPermitFor(ctx context.Context, take func(context.Context) (func(), bool), wait time.Duration,
+	throughNoRoom bool) (func(), bool) {
+	if take == nil {
 		return func() {}, true
 	}
 	end := time.Now().Add(wait)
 	for {
-		if rel, ok := m.opt.HeavyPermit(ctx); ok {
+		rel, ok := take(ctx)
+		if ok {
 			return rel, true
 		}
-		if wait <= 0 || time.Now().After(end) {
+		if noRoom(rel) && !throughNoRoom || wait <= 0 || time.Now().After(end) {
 			return nil, false
 		}
 		select {
 		case <-ctx.Done():
 			return nil, false
-		case <-time.After(time.Second):
+		case <-time.After(permitPoll):
 		}
 	}
 }
@@ -283,7 +318,10 @@ func (m *Manager) arm(ctx context.Context, pin string, pw []byte, wait time.Dura
 			return RecoveryChangeRequired
 		}
 	}
-	rel, ok := m.permit(ctx, wait)
+	// Arming waits up to wait inside the request (VAULT-MESSAGING: up to 60
+	// s for the heavy-derivation permit), also while memory is short: room
+	// may come within it.
+	rel, ok := pollPermitFor(ctx, m.opt.HeavyPermit, wait, true)
 	if !ok {
 		return RecoveryNeedsCheck // busy: the next check arms
 	}
@@ -326,7 +364,7 @@ func (m *Manager) changeSecrets(ctx context.Context, c SecretChange, now time.Ti
 	}
 	// The heavy-derivation permit is taken first (busy changes nothing)
 	// and returned after the derivations, before any counter call.
-	rel0, ok := m.permit(ctx, 0)
+	rel0, ok := m.permit(ctx, HeavyPermitWait)
 	if !ok {
 		return errBusy
 	}

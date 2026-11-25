@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"runtime/debug"
 	"slices"
 	"strings"
 	"sync"
@@ -338,7 +339,7 @@ func TestPairCodeBusy(t *testing.T) {
 		}
 		return func() { released++ }, true
 	}
-	if _, code := d.pcCreate(t, `{"role":"desktop","form":"code"}`); code != "" || released != 1 {
+	if _, code := d.pcCreate(t, `{"role":"desktop","form":"code"}`); code != "" || released != 2 { // x, then the tag
 		t.Fatalf("%q, released %d", code, released)
 	}
 }
@@ -694,8 +695,8 @@ func TestPairCodePermitNotHeldAcrossAPut(t *testing.T) {
 	if pr.putWhileHeld || held {
 		t.Fatal("a permit held across a PUT, or not given back")
 	}
-	if taken != 2 || len(pr.puts) != 2 {
-		t.Fatalf("%d permits for %d PUTs (the other salt's tag takes its own)", taken, len(pr.puts))
+	if taken != 3 || len(pr.puts) != 2 {
+		t.Fatalf("%d permits for %d PUTs (x, then each tag under its own)", taken, len(pr.puts))
 	}
 }
 
@@ -1143,5 +1144,39 @@ func TestSentOnceIsOnlyForTheMarkedAnswer(t *testing.T) {
 	}
 	if !bytes.Equal(out2.Body, make([]byte, len(out2.Body))) {
 		t.Fatal("the sent-once answer's body was not wiped once sealed")
+	}
+}
+
+// Each derivation's memory goes back to the OS before its permit does.
+func TestPairCodeFreesMemoryPerDerivation(t *testing.T) {
+	d, pr := newPCFixture(t)
+	frees, held := 0, false
+	freeOS = func() {
+		if !held {
+			t.Error("memory freed after the permit went")
+		}
+		frees++
+	}
+	defer func() { freeOS = debug.FreeOSMemory }()
+	d.m.opt.CodePermit = func(context.Context) (func(), bool) { held = true; return func() { held = false }, true }
+	if _, code := d.pcCreate(t, `{"role":"desktop","form":"code"}`); code != "" || len(pr.puts) != 1 {
+		t.Fatalf("%q", code)
+	}
+	if frees != 2 { // x (with k_w and the seal), then the tag
+		t.Fatalf("%d frees", frees)
+	}
+}
+
+// No room for 256 MiB is busy at once (§6.7.2), with no wait.
+func TestPairCodeNoRoomIsBusyAtOnce(t *testing.T) {
+	d, pr := newPCFixture(t)
+	asked := 0
+	d.m.opt.CodePermit = func(context.Context) (func(), bool) { asked++; return NoRoom, false }
+	start := time.Now()
+	if _, code := d.pcCreate(t, `{"role":"desktop","form":"code"}`); code != "busy" || asked != 1 || len(pr.puts) != 0 {
+		t.Fatalf("%q after %d asks", code, asked)
+	}
+	if time.Since(start) > 2*time.Second {
+		t.Fatal("waited on no room")
 	}
 }

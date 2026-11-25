@@ -116,7 +116,12 @@ func newRFixture(t *testing.T) *rFixture {
 	f.opts = Options{Store: f.st, Sealer: testSealer{key: bytes.Repeat([]byte{7}, 32)}, Release: testRelease, MarkDeleting: NoHostMark, ConfirmAppKey: NoHostAppKey,
 		Relay:   func(base string, key ed25519.PrivateKey) Relay { return &stubRelay{base: base, key: key} },
 		Counter: f.bucket, Features: []Feature{f.backup}, RecoveryWaitUnit: 10 * time.Minute,
-		HeavyPermit: func(context.Context) (func(), bool) { return func() {}, f.permit }}
+		HeavyPermit: func(context.Context) (func(), bool) {
+			if !f.permit {
+				return NoRoom, false // no room: busy at once
+			}
+			return func() {}, true
+		}}
 	k, _ := MinKDF()
 	m, err := Create(context.Background(), CreateParams{Options: f.opts, UserGUID: "u1", PIN: testPIN, UnlockSecret: testSecret, KDF: k, RelayURL: "https://relay.example.org"})
 	if err != nil {

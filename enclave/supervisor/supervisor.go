@@ -406,7 +406,7 @@ func (s *Supervisor) start() error {
 	for _, h := range hosts {
 		s.relays[h] = true
 	}
-	s.host = newProcHost(s, s.cfg.Proc)
+	s.host = newProcHost(s, s.cfg.Proc) // also gives the heavy permit its opening probe
 	// The instance keeps the ETKs and the outer decryption; vaults run in
 	// their own processes and their secrets never enter this one (§12.4).
 	in, err := enclave.New(enclave.Options{Config: cfg, NSM: s.cfg.NSM, Store: s.st, Host: s.host, Lifecycle: s.lifecycle, Now: s.now})

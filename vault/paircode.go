@@ -304,7 +304,7 @@ func (m *Manager) createCodePairing(ctx context.Context, role, by string, now ti
 			// until the pairing's 10 minutes end, the token denylisted, and
 			// the app falls back to the link.
 			m.denyUnusedToken(jti, exp, now)
-			m.queue(&OutboxEntry{ID: m.newID(now), Op: OpDeletePairCode, Value: claimID, Created: now, NotAfter: exp})
+			m.queue(&OutboxEntry{ID: m.newID(now), Op: OpDeletePairCode, Value: claimID, Created: now, NotAfter: exp.Add(time.Minute)})
 			return nil, nil, errClaim
 		default:
 			m.denyUnusedToken(jti, exp, now)

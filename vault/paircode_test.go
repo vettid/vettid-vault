@@ -96,6 +96,11 @@ func currentSalts(now time.Time) []paircode.Salt {
 func newPCFixture(t *testing.T) (*devFixture, *pcRelay) {
 	t.Helper()
 	d := newDevFixture(t)
+	// The vault's clock mid-hour (ahead of the real one, never behind):
+	// near an hour's edge the relay lists two salts, which would change
+	// what a test sees (one PUT, or two).
+	at := time.Unix((paircode.Epoch(d.m.now())+1)*paircode.Hour+30*60, 0)
+	d.m.now = func() time.Time { return at }
 	pr := &pcRelay{stubRelay: d.relay, offers: true, clock: d.m.now, salts: currentSalts}
 	d.m.relay = pr
 	return d, pr
@@ -627,7 +632,7 @@ func TestPairCodeUnknownPutDeletesTheClaim(t *testing.T) {
 	for _, e := range d.m.st.Outbox {
 		if e.Op == OpDeletePairCode && e.Value == pr.puts[0].claimID {
 			found = true
-			want := d.m.now().UTC().Truncate(time.Second).Add(paircode.TTL)
+			want := d.m.now().UTC().Truncate(time.Second).Add(paircode.TTL + time.Minute)
 			if e.NotAfter.IsZero() || e.NotAfter.After(want) {
 				t.Fatalf("its retries end at %v, want by %v", e.NotAfter, want)
 			}

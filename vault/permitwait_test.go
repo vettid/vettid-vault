@@ -117,8 +117,8 @@ func TestRecoveryOpenPermitWait(t *testing.T) {
 		if m, out := f.open(testPIN, rPW); m != nil || out.Code != OpenBusy {
 			t.Fatalf("%+v", out)
 		}
-		if d := time.Since(start); d < RecoveryOpenPermitWait {
-			t.Fatalf("busy after %v", d)
+		if d := time.Since(start); d < 2*time.Second || d > 3*time.Second {
+			t.Fatalf("busy after %v (the wait under the request lock is 2 s)", d)
 		}
 	})
 	t.Run("no room", func(t *testing.T) {
@@ -130,4 +130,43 @@ func TestRecoveryOpenPermitWait(t *testing.T) {
 			t.Fatalf("%+v, %d asks", out, asked)
 		}
 	})
+}
+
+// The arming of the recovery wrap keeps waiting through a refusal for lack
+// of memory, within its wait; every other caller is busy at once on it.
+func TestArmingWaitsThroughNoRoom(t *testing.T) {
+	asked := 0
+	take := func(context.Context) (func(), bool) {
+		asked++
+		if asked < 3 {
+			return NoRoom, false
+		}
+		return func() {}, true
+	}
+	if _, ok := pollPermitFor(context.Background(), take, HeavyPermitWait, true); !ok || asked != 3 {
+		t.Fatalf("arming: %v after %d asks", ok, asked)
+	}
+	asked = 0
+	if _, ok := pollPermitFor(context.Background(), take, HeavyPermitWait, false); ok || asked != 1 {
+		t.Fatalf("another caller: %v after %d asks", ok, asked)
+	}
+}
+
+// The recovery wrap's arming waits through no room for the permit.
+func TestArmWaitsThroughNoRoom(t *testing.T) {
+	f := newRFixture(t)
+	asked := 0
+	f.m.opt.HeavyPermit = func(context.Context) (func(), bool) {
+		asked++
+		if asked < 3 {
+			return NoRoom, false
+		}
+		return func() {}, true
+	}
+	f.m.mu.Lock()
+	st := f.m.arm(context.Background(), testPIN, []byte(rPW), 3*time.Second, f.backup.on, f.m.now()) // credential.create's wait
+	f.m.mu.Unlock()
+	if st != RecoveryArmed || asked != 3 {
+		t.Fatalf("%s after %d asks", st, asked)
+	}
 }

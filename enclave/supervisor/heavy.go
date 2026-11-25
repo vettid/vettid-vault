@@ -80,12 +80,14 @@ const (
 func (h *heavyPermit) try(id string) permitAnswer {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if !h.roomLocked() {
-		return permitNoRoom
-	}
+	// The holder first: a holder's own derivation lowers free memory, so
+	// "no room" is judged only while the permit is free.
 	if !h.freeLocked() {
 		h.waiter = h.now().Add(waiterHold)
 		return permitHeld
+	}
+	if !h.roomLocked() {
+		return permitNoRoom
 	}
 	h.holder, h.until, h.waiter = id, h.now().Add(heavyLease), time.Time{}
 	return permitGiven
@@ -103,11 +105,13 @@ func (h *heavyPermit) acquireCode(id string) bool { return h.tryCode(id) == perm
 func (h *heavyPermit) tryCode(id string) permitAnswer {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if !h.roomFor(codeNeed()) {
-		return permitNoRoom
-	}
+	// Held first (another holder, a waiter, an open): no room only while
+	// the permit is free.
 	if !h.freeLocked() || h.now().Before(h.waiter) || h.opening != nil && h.opening() {
 		return permitHeld
+	}
+	if !h.roomFor(codeNeed()) {
+		return permitNoRoom
 	}
 	h.holder, h.until = id, h.now().Add(heavyLease)
 	return permitGiven

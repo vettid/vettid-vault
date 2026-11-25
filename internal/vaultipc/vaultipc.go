@@ -135,7 +135,7 @@ const (
 	// supervisor admits only keys under recovery/v1/ and, once a process
 	// has named its vault's prefix, only that prefix.
 	KindCounter hostproto.Kind = 0x5b
-	// KindHeavyPermit [op] → [status, "1" | "0"]: the one permit for a
+	// KindHeavyPermit [op] → [status, "1" | "0" | "-"]: the one permit for a
 	// heavy derivation, given only while free memory is at least the
 	// memory-pressure floor plus the derivation's need. Op "acquire" asks
 	// for it for the recovery wrap (§11.14.3), "acquire_code" for a code

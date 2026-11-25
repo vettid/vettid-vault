@@ -278,3 +278,34 @@ func TestPermitNoRoomAnswer(t *testing.T) {
 		t.Fatalf("%q", r)
 	}
 }
+
+// A holder's own derivation lowers free memory: an ask meanwhile is held
+// (with the waiter mark for a heavy ask), never "no room".
+func TestHolderBeforeRoom(t *testing.T) {
+	now := time.Date(2026, 11, 25, 12, 0, 0, 0, time.UTC)
+	floor := uint64(768 << 20)
+	need := max(heavyNeed(), codeNeed())
+	held := false
+	h := &heavyPermit{now: func() time.Time { return now }, floor: func() uint64 { return floor }}
+	h.avail = func() uint64 {
+		if held {
+			return floor // the holder's derivation took all the headroom
+		}
+		return floor + need
+	}
+	if h.try("r1") != permitGiven {
+		t.Fatal("setup")
+	}
+	held = true
+	if a := h.try("r2"); a != permitHeld || !now.Before(h.waiter) {
+		t.Fatalf("a heavy ask during a holder's derivation: %v, mark %v", a, h.waiter)
+	}
+	if a := h.tryCode("c1"); a != permitHeld {
+		t.Fatalf("a code ask during a holder's derivation: %v", a)
+	}
+	h.release("r1")
+	held = false
+	if h.tryCode("c1") != permitHeld { // the waiter's mark still holds codes back
+		t.Fatal("the waiter lost to a code")
+	}
+}

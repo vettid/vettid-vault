@@ -140,6 +140,13 @@ func noRoom(rel func()) bool { return rel != nil }
 // (once with no wait), and not again after a refusal for lack of memory;
 // a nil take always gives it.
 func pollPermit(ctx context.Context, take func(context.Context) (func(), bool), wait time.Duration) (func(), bool) {
+	return pollPermitFor(ctx, take, wait, false)
+}
+
+// pollPermitFor is pollPermit; with throughNoRoom it keeps asking within
+// wait after a refusal for lack of memory too (the recovery wrap's arming).
+func pollPermitFor(ctx context.Context, take func(context.Context) (func(), bool), wait time.Duration,
+	throughNoRoom bool) (func(), bool) {
 	if take == nil {
 		return func() {}, true
 	}
@@ -149,7 +156,7 @@ func pollPermit(ctx context.Context, take func(context.Context) (func(), bool), 
 		if ok {
 			return rel, true
 		}
-		if noRoom(rel) || wait <= 0 || time.Now().After(end) {
+		if noRoom(rel) && !throughNoRoom || wait <= 0 || time.Now().After(end) {
 			return nil, false
 		}
 		select {
@@ -311,7 +318,10 @@ func (m *Manager) arm(ctx context.Context, pin string, pw []byte, wait time.Dura
 			return RecoveryChangeRequired
 		}
 	}
-	rel, ok := m.permit(ctx, wait)
+	// Arming waits up to wait inside the request (VAULT-MESSAGING: up to 60
+	// s for the heavy-derivation permit), also while memory is short: room
+	// may come within it.
+	rel, ok := pollPermitFor(ctx, m.opt.HeavyPermit, wait, true)
 	if !ok {
 		return RecoveryNeedsCheck // busy: the next check arms
 	}

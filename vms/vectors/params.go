@@ -101,6 +101,12 @@ const (
 	KeyDesktopBundle   byte = 0x89
 	NonceDesktopBundle byte = 0x8a
 
+	// §6.7.2 short pairing codes (pair-code.json, 0.94.0).
+	NoncePairRelay  byte = 0xa0 // the relay's nonce for the epoch
+	SaltPairClaim   byte = 0xa1 // s_c
+	NoncePairBundle byte = 0xa2 // the blob's XChaCha20 nonce
+	NoncePairRelay2 byte = 0xa3 // the next epoch's nonce
+
 	SessionSenderKid    byte = 0x02
 	SessionRecipientKid byte = 0x01
 

@@ -415,6 +415,15 @@ func Generate() (map[string][]byte, error) {
 	if err := put("relay_rotate.json", rrv); err != nil {
 		return nil, err
 	}
+
+	// pair-code.json (0.94.0 §6.7.2)
+	pcv, err := genPairCode(vault)
+	if err != nil {
+		return nil, err
+	}
+	if err := put("pair-code.json", pcv); err != nil {
+		return nil, err
+	}
 	return out, nil
 }
 

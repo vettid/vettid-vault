@@ -8,7 +8,9 @@
 # the PUBLIC credential key of the §10.11 LEASH vectors (seed 32 x 0x30,
 # leash.json), and the PUBLIC key (SPKI) of the 0.15.0 app-key vector
 # (scalar 32 x 0x41, appkey.json), and the placeholder APNs token of
-# PUSH-GATEWAY 0.4.0 §15's registration vector (random, no device).
+# PUSH-GATEWAY 0.4.0 §15's registration vector (random, no device), and
+# the §6.7.2 pair-code vectors (pair-code.json), derived from a fixed test
+# code, test salts and nonces; no real code or key.
 # They are public by design and are regenerated deterministically by
 # `go generate ./vms/vectors`. Also allowlisted: the example ULID of
 # VAULT-MESSAGING §5.3, which tests use as a dummy id (for instance as a
@@ -30,6 +32,7 @@ regexes = [
   '''01JB2Z6V9K3M4N5P6Q7R8S9T0V''',
   '''MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEZpI3VGYrivhlu/KoncHtr3sZZHVE''',
   '''740f4707bebcf74f9b7c25d48e3358945f6aa01da5ddb387462c7eaf61bb78ad''',
+  '''7665747469642f706169722d636f64652f312f6b657900610068747470733a2f2f72656c61792e7665747469642e6f7267004b37514d3458505a''',
 ]
 
 # Release R test vectors (VAULT-MESSAGING 0.33.0 §16, vettid-vault #96):

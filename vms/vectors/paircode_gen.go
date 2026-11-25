@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"slices"
 	"strings"
 	"time"
 	"unicode/utf16"
@@ -28,7 +27,7 @@ const (
 )
 
 // genPairCode builds pair-code.json (VAULT-MESSAGING 0.94.1 §6.7.2,
-// RELAY-PROTOCOL 0.14.0 §6.9.1): for a fixed code, relay, epoch, relay
+// RELAY-PROTOCOL 0.14.1 §6.9.1): for a fixed code, relay, epoch, relay
 // nonce, s_c and bundle nonce, the lookup salt and its id, pw with its
 // 0x00 bytes, tag, x, k_w, the associated data and the blob of an agent
 // bundle (the vault of keys.json), the desktop purpose's tag for the same
@@ -359,11 +358,7 @@ func asciiJSON(s string) json.RawMessage {
 // removedList is every code point the input rule removes (0.94.1 §6.7.2),
 // as U+XXXX, in order.
 func removedList() []string {
-	var cps []rune
-	for c := range paircode.Removed {
-		cps = append(cps, c)
-	}
-	slices.Sort(cps)
+	cps := paircode.RemovedSet()
 	out := make([]string, len(cps))
 	for i, c := range cps {
 		out[i] = fmt.Sprintf("U+%04X", c)

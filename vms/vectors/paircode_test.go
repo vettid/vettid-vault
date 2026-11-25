@@ -8,8 +8,9 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
+	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -188,13 +189,17 @@ func checkPairCodeVectors(t *testing.T, dir string) {
 	// The removed set: every code point listed, and no other (the device's
 	// own table must equal it).
 	var removed []string
-	if json.Unmarshal(d.m["removed"], &removed) != nil || len(removed) != len(paircode.Removed) {
-		t.Fatalf("removed: %d listed, %d in the rule", len(removed), len(paircode.Removed))
+	if json.Unmarshal(d.m["removed"], &removed) != nil || len(removed) != len(paircode.RemovedSet()) {
+		t.Fatalf("removed: %d listed, %d in the rule", len(removed), len(paircode.RemovedSet()))
 	}
 	prev := rune(-1)
 	for _, u := range removed {
-		var c rune
-		if _, err := fmt.Sscanf(u, "U+%X", &c); err != nil || c <= prev {
+		if !removedEntry.MatchString(u) {
+			t.Fatalf("removed %q: not U+ and 4 to 6 upper-case hex digits", u)
+		}
+		n, _ := strconv.ParseUint(u[2:], 16, 32)
+		c := rune(n)
+		if c <= prev {
 			t.Fatalf("removed %s: not a code point in ascending order", u)
 		}
 		prev = c
@@ -296,3 +301,5 @@ func checkPairCodeVectors(t *testing.T, dir string) {
 		}
 	}
 }
+
+var removedEntry = regexp.MustCompile(`^U\+[0-9A-F]{4,6}$`)

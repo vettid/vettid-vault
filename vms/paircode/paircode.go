@@ -1,6 +1,6 @@
 // Package paircode implements the crypto of the short pairing codes for
-// desktops and agents (VAULT-MESSAGING 0.94.0 §6.7.2, RELAY-PROTOCOL
-// 0.14.0 §6.9.1): the 8-symbol code, the relay's canonical base URL `r`,
+// desktops and agents (VAULT-MESSAGING 0.94.1 §6.7.2, RELAY-PROTOCOL
+// 0.14.1 §6.9.1): the 8-symbol code, the relay's canonical base URL `r`,
 // the hourly lookup salts and their checks, the lookup tag, the key k_w
 // and the sealed bundle.
 //
@@ -17,6 +17,7 @@ import (
 	"errors"
 	"net"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -132,15 +133,16 @@ func Display(code []byte) string {
 	return string(code[:4]) + "-" + string(code[4:])
 }
 
-// Removed is the set the new device's input rule removes (VAULT-MESSAGING
+// removed is the set the new device's input rule removes (VAULT-MESSAGING
 // 0.94.1 §6.7.2, chosen; not in the card): the ASCII tab, CR and LF; every
 // character of Unicode 15.0's categories Zs and Pd, listed here so that a
 // runtime with other Unicode tables removes the same set (Go 1.26's
-// unicode.Zs and unicode.Pd are this set: TestRemovedIsUnicode15); the
+// unicode.Zs and unicode.Pd are this set: TestRemovedIsUnicode15, and the
+// list is pinned by its digest, whatever Go's tables become); the
 // minus sign U+2212 (Sm); and the soft hyphen and the invisible characters
 // a paste brings, U+00AD, U+200B, U+200E, U+200F, U+2060 and U+FEFF.
 // Nothing else is removed.
-var Removed = map[rune]bool{
+var removed = map[rune]bool{
 	// ASCII tab, LF, CR
 	0x0009: true, 0x000A: true, 0x000D: true,
 	// Zs (Unicode 15.0, 17)
@@ -158,8 +160,21 @@ var Removed = map[rune]bool{
 	0x00AD: true, 0x200B: true, 0x200E: true, 0x200F: true, 0x2060: true, 0xFEFF: true,
 }
 
+// IsRemoved reports whether the input rule removes c.
+func IsRemoved(c rune) bool { return removed[c] }
+
+// RemovedSet returns the removed set's code points, ascending.
+func RemovedSet() []rune {
+	out := make([]rune, 0, len(removed))
+	for c := range removed {
+		out = append(out, c)
+	}
+	slices.Sort(out)
+	return out
+}
+
 // Normalize applies the new device's input order (0.94.1 §6.7.2): the
-// characters of [Removed] removed; if 8 code points remain it is a code:
+// characters of the removed set ([IsRemoved]) removed; if 8 code points remain it is a code:
 // refused with ErrSymbol if any is not ASCII (before any case mapping),
 // then upper-cased and refused with ErrSymbol if any is outside the
 // alphabet; otherwise it is not a code (ErrCode: the caller parses the
@@ -169,7 +184,7 @@ func Normalize(input string) ([]byte, error) {
 		return nil, ErrCode
 	}
 	s := strings.Map(func(r rune) rune {
-		if Removed[r] {
+		if removed[r] {
 			return -1
 		}
 		return r

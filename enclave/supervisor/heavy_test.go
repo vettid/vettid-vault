@@ -201,8 +201,54 @@ func TestCodePermitLeaseAndExit(t *testing.T) {
 	}
 	s := &Supervisor{heavy: h}
 	ph := newProcHost(s, ProcConfig{})
-	ph.exited(&vproc{vaultID: "v2", h: ph, stopping: true})
+	h.release("v2")
+	// A vault's process holds the permit; its old process, ending late,
+	// does not release it; its own end does.
+	old := &vproc{vaultID: "vv", h: ph, stopping: true}
+	cur := &vproc{vaultID: "vv", h: ph, stopping: true}
+	if !h.acquireCode(cur.permitKey()) {
+		t.Fatal("setup")
+	}
+	ph.exited(old)
+	if h.acquireCode("v3") {
+		t.Fatal("a vault's old process released its new process's permit")
+	}
+	ph.exited(cur)
 	if !h.acquireCode("v3") {
 		t.Fatal("an ended process kept its permit")
+	}
+}
+
+// A refused heavy acquire (a recovery wrap, a transfer approval, a PIN
+// change, a recovery open that waits) keeps code permits back while it
+// still polls, then no longer.
+func TestHeavyWaiterHasPrecedence(t *testing.T) {
+	now := time.Date(2026, 11, 25, 12, 0, 0, 0, time.UTC)
+	floor := uint64(768 << 20)
+	h := &heavyPermit{avail: func() uint64 { return floor + max(heavyNeed(), codeNeed()) }, floor: func() uint64 { return floor },
+		now: func() time.Time { return now }}
+	if !h.acquireCode("c1") || h.acquire("r1") {
+		t.Fatal("setup: a code holds it, the recovery is refused")
+	}
+	h.release("c1")
+	if h.acquireCode("c2") {
+		t.Fatal("a code took the permit a refused acquire waits for")
+	}
+	if !h.acquire("r1") {
+		t.Fatal("the waiter did not get it")
+	}
+	h.release("r1")
+	if !h.acquireCode("c2") {
+		t.Fatal("a code refused once the waiter had it and gave it back")
+	}
+	h.release("c2")
+	// A waiter that stopped polling holds codes back only until its mark ends.
+	if !h.acquireCode("c3") || h.acquire("r2") {
+		t.Fatal("setup 2")
+	}
+	h.release("c3")
+	now = now.Add(waiterHold + time.Millisecond)
+	if !h.acquireCode("c4") {
+		t.Fatal("a waiter that gave up still holds codes back")
 	}
 }

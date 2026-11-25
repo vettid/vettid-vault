@@ -402,7 +402,7 @@ func (h *procHost) exited(p *vproc) {
 		h.s.xfers.releaseAll(p) // its transfers ended with it
 	}
 	if h.s.heavy != nil {
-		h.s.heavy.release(p.vaultID) // a permit it held ended with it, not at its lease
+		h.s.heavy.release(p.permitKey()) // a permit it held ended with it, not at its lease
 	}
 	p.mu.Lock()
 	stopping := p.stopping
@@ -546,7 +546,8 @@ func (h *procHost) reserve(ctx context.Context, j *enclave.Job) (done func(), ok
 }
 
 // openingAny reports whether any vault process is opening here (an
-// unlock, an enrolment or a recovery between its spawn and its answer).
+// unlock, an enrolment or a recovery, from its reservation to its answer;
+// a delete_resume is not counted: it opens no vault).
 func (h *procHost) openingAny() bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()

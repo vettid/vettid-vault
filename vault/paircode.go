@@ -373,8 +373,14 @@ func (m *Manager) putCodeClaim(ctx context.Context, pc PairCodeRelay, purpose, r
 		if err != nil {
 			return errUnavailable
 		}
-		// x's 256 MiB back before the tag's: the permit admits one at a time.
-		debug.FreeOSMemory()
+		return nil
+	}); err != nil {
+		return nil, "", false, err
+	}
+	// The tag under a permit of its own: an unlock that opened since x's
+	// runs first (the request's one deadline covers both).
+	if err := m.underPermit(ctx, deadline, func() error {
+		var err error
 		if tag, err = paircode.Tag(purpose, r, code, order[0].SR); err != nil {
 			return errUnavailable
 		}
@@ -423,11 +429,17 @@ func (m *Manager) underPermit(ctx context.Context, deadline time.Time, f func() 
 	if !ok {
 		return errPairBusy
 	}
-	defer rel()
-	err := f()
-	debug.FreeOSMemory() // the derivation's 256 MiB back before the permit goes (it admits that much)
-	return err
+	// The derivation's 256 MiB back to the OS before the permit goes (it
+	// admits that much), also if f panics.
+	defer func() {
+		freeOS()
+		rel()
+	}()
+	return f()
 }
+
+// freeOS returns freed memory to the OS (tests count its calls).
+var freeOS = debug.FreeOSMemory
 
 // unopenedPairing is the desktop or agent pairing pid that no device has
 // opened yet (no hs.init), or nil.

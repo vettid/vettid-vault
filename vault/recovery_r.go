@@ -111,14 +111,32 @@ func (m *Manager) noteCounter(ok bool) {
 	}
 }
 
+// The waits for the heavy-derivation permit (chosen; not in the spec: a
+// code pairing's derivations hold it at most about 1.6 s, and a busy here
+// costs the member a step done again, a transfer approval its UTK): a
+// transfer approval and a PIN or password change wait up to
+// HeavyPermitWait, a recovery open (under its request lock) up to
+// RecoveryOpenPermitWait, polling every permitPoll.
+const (
+	HeavyPermitWait        = 3 * time.Second
+	RecoveryOpenPermitWait = 2 * time.Second
+	permitPoll             = 250 * time.Millisecond
+)
+
 // permit takes the heavy-derivation permit, waiting up to wait for it.
 func (m *Manager) permit(ctx context.Context, wait time.Duration) (func(), bool) {
-	if m.opt.HeavyPermit == nil {
+	return pollPermit(ctx, m.opt.HeavyPermit, wait)
+}
+
+// pollPermit asks take for the permit, every permitPoll for up to wait
+// (once with no wait); a nil take always gives it.
+func pollPermit(ctx context.Context, take func(context.Context) (func(), bool), wait time.Duration) (func(), bool) {
+	if take == nil {
 		return func() {}, true
 	}
 	end := time.Now().Add(wait)
 	for {
-		if rel, ok := m.opt.HeavyPermit(ctx); ok {
+		if rel, ok := take(ctx); ok {
 			return rel, true
 		}
 		if wait <= 0 || time.Now().After(end) {
@@ -127,7 +145,7 @@ func (m *Manager) permit(ctx context.Context, wait time.Duration) (func(), bool)
 		select {
 		case <-ctx.Done():
 			return nil, false
-		case <-time.After(time.Second):
+		case <-time.After(permitPoll):
 		}
 	}
 }
@@ -326,7 +344,7 @@ func (m *Manager) changeSecrets(ctx context.Context, c SecretChange, now time.Ti
 	}
 	// The heavy-derivation permit is taken first (busy changes nothing)
 	// and returned after the derivations, before any counter call.
-	rel0, ok := m.permit(ctx, 0)
+	rel0, ok := m.permit(ctx, HeavyPermitWait)
 	if !ok {
 		return errBusy
 	}

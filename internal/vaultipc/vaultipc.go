@@ -135,10 +135,13 @@ const (
 	// supervisor admits only keys under recovery/v1/ and, once a process
 	// has named its vault's prefix, only that prefix.
 	KindCounter hostproto.Kind = 0x5b
-	// KindHeavyPermit [op] → [status, "1" | "0"]: op "acquire" asks for
-	// the one permit for the recovery wrap's heavy derivation (§11.14.3),
-	// given only while free memory is at least the memory-pressure floor
-	// plus the derivation's need; "release" returns it.
+	// KindHeavyPermit [op] → [status, "1" | "0"]: the one permit for a
+	// heavy derivation, given only while free memory is at least the
+	// memory-pressure floor plus the derivation's need. Op "acquire" asks
+	// for it for the recovery wrap (§11.14.3), "acquire_code" for a code
+	// pairing's derivation (0.94.0 §6.7.2: 256 MiB, never while a vault
+	// opens, nor while a refused "acquire" still waits), "release"
+	// returns either.
 	KindHeavyPermit hostproto.Kind = 0x5c
 	// KindMarkDeleting [vault_id] → [ok | error]: the deletion's mark at
 	// the host (VAULT-MESSAGING 0.51.0 §12.5, VAULT-HOST-PROTOCOL §5.6),
@@ -187,7 +190,7 @@ const (
 	// HeavyAcquireCode asks for the permit for a code pairing's
 	// derivation (0.94.0 §6.7.2): 256 MiB, never while a vault is opening.
 	HeavyAcquireCode = "acquire_code"
-	HeavyRelease = "release"
+	HeavyRelease     = "release"
 )
 
 // Vault → supervisor notifications.

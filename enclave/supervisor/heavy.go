@@ -27,8 +27,19 @@ type heavyPermit struct {
 	// opening reports whether a vault process is opening (an unlock, an
 	// enrolment, a recovery in flight); nil: never. A code pairing's
 	// permit is not given meanwhile: unlocks go first (0.94.0 §6.7.2).
+	// Lock order: heavy.mu, then (in opening) procHost.mu; nothing takes
+	// them the other way round.
 	opening func() bool
+	// waiter is until when a refused acquire (a recovery wrap, a transfer
+	// approval, a PIN change, a recovery open) still waits: no code permit
+	// is given meanwhile, so a short wait is not lost to code pollers.
+	// Each refused poll moves it on.
+	waiter time.Time
 }
+
+// waiterHold is how long a refused acquire keeps code permits back
+// (chosen; not in the spec: longer than its 250 ms poll).
+const waiterHold = 2 * time.Second
 
 func heavyNeed() uint64 { return recovery.HeavyMemoryBytes() * 6 / 5 }
 
@@ -56,9 +67,10 @@ func (h *heavyPermit) acquire(id string) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if !h.freeLocked() || !h.roomLocked() {
+		h.waiter = h.now().Add(waiterHold)
 		return false
 	}
-	h.holder, h.until = id, h.now().Add(heavyLease)
+	h.holder, h.until, h.waiter = id, h.now().Add(heavyLease), time.Time{}
 	return true
 }
 
@@ -70,7 +82,7 @@ func (h *heavyPermit) acquire(id string) bool {
 func (h *heavyPermit) acquireCode(id string) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if !h.freeLocked() || !h.roomFor(codeNeed()) || h.opening != nil && h.opening() {
+	if !h.freeLocked() || !h.roomFor(codeNeed()) || h.now().Before(h.waiter) || h.opening != nil && h.opening() {
 		return false
 	}
 	h.holder, h.until = id, h.now().Add(heavyLease)

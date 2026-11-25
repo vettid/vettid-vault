@@ -216,13 +216,10 @@ func RecoveryOpen(ctx context.Context, p RecoveryOpenParams) (*Manager, *Recover
 	}
 	g := wrap.Generation
 	// Step 2a: the permit, x, and the same wrong pair from this phone.
-	rel := func() {}
-	if p.HeavyPermit != nil {
-		var got bool
-		if rel, got = p.HeavyPermit(ctx); !got {
-			hdr.logRecovery(now, "recovery.open", openRef(r, OpenBusy))
-			return nil, out.fail(OpenBusy)
-		}
+	rel, got := pollPermit(ctx, p.HeavyPermit, RecoveryOpenPermitWait)
+	if !got {
+		hdr.logRecovery(now, "recovery.open", openRef(r, OpenBusy))
+		return nil, out.fail(OpenBusy)
 	}
 	x, err := heavyX(p.PIN, pw, wrap.KDF)
 	rel() // the permit covers the derivation only, never the counter's calls

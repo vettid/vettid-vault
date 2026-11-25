@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/vettid/vettid-vault/enclave"
 	"github.com/vettid/vettid-vault/internal/hostproto"
 	"github.com/vettid/vettid-vault/internal/vaultipc"
 )
@@ -44,5 +45,14 @@ func TestPermitsGoToTheSupervisor(t *testing.T) {
 	give = "0"
 	if _, ok := codePermit(ch)(ctx); ok {
 		t.Fatal("a refusal taken as a permit")
+	}
+}
+
+// The opened vault's options carry both permits.
+func TestVaultOptionsCarryThePermits(t *testing.T) {
+	pr := &proc{p: Platform{}}
+	o := pr.vaultOptions(enclave.Config{})
+	if o.HeavyPermit == nil || o.CodePermit == nil {
+		t.Fatal("a permit not wired")
 	}
 }

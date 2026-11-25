@@ -3,6 +3,7 @@ package supervisor
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strconv"
 	"strings"
 	"time"
@@ -103,18 +104,23 @@ func (p *vproc) heavyCall(f [][]byte) [][]byte {
 	}
 	switch string(f[0]) {
 	case vaultipc.HeavyAcquire:
-		if h.acquire(p.vaultID) {
+		if h.acquire(p.permitKey()) {
 			return hostproto.Strings(hostproto.StatusOK, "1")
 		}
 		return hostproto.Strings(hostproto.StatusOK, "0")
 	case vaultipc.HeavyAcquireCode:
-		if h.acquireCode(p.vaultID) {
+		if h.acquireCode(p.permitKey()) {
 			return hostproto.Strings(hostproto.StatusOK, "1")
 		}
 		return hostproto.Strings(hostproto.StatusOK, "0")
 	case vaultipc.HeavyRelease:
-		h.release(p.vaultID)
+		h.release(p.permitKey())
 		return hostproto.Strings(hostproto.StatusOK, "1")
 	}
 	return deny()
 }
+
+// permitKey names this process as a heavy permit's holder: its vault and
+// the process itself, so that a late exit of a vault's old process never
+// releases the permit its new process holds.
+func (p *vproc) permitKey() string { return fmt.Sprintf("%s/%p", p.vaultID, p) }

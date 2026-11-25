@@ -208,9 +208,7 @@ func (pr *proc) open(ctx context.Context, f [][]byte) [][]byte {
 		StatusList: sl.get,
 		// Long-poll only: the relay requests share the supervisor's
 		// HTTP/2 connections (§12.2).
-		Vault: vault.Options{HTTP: &http.Client{Transport: chanTransport{ch: pr.ch}, Timeout: 75 * time.Second}, WebSocket: false,
-			PollWait: pr.p.PollWait, Push: pushGateway(cfg.PushURL, pr.ch), Calls: callsIssuer(cfg.CallsURL, pr.ch), Transfers: chanGate{ch: pr.ch},
-			Counter: chanCounter{ch: pr.ch}, HeavyPermit: heavyPermit(pr.ch), CodePermit: codePermit(pr.ch), MarkDeleting: pr.ch.markDeleting, ConfirmAppKey: pr.ch.confirmAppKey},
+		Vault:    pr.vaultOptions(cfg),
 		Features: pr.p.Features,
 		Log:      func(msg string, args ...any) { pr.log.Info(msg, args...) },
 		Lifecycle: func(ev vault.LifecycleEvent) {
@@ -345,4 +343,14 @@ func errText(err error) string {
 		s = s[:80]
 	}
 	return s
+}
+
+// vaultOptions are the vault's options in this process: its requests go
+// over the channel to the supervisor, its heavy derivations (the recovery
+// wrap's and a code pairing's) under the supervisor's permits.
+func (pr *proc) vaultOptions(cfg enclave.Config) vault.Options {
+	return vault.Options{HTTP: &http.Client{Transport: chanTransport{ch: pr.ch}, Timeout: 75 * time.Second}, WebSocket: false,
+		PollWait: pr.p.PollWait, Push: pushGateway(cfg.PushURL, pr.ch), Calls: callsIssuer(cfg.CallsURL, pr.ch), Transfers: chanGate{ch: pr.ch},
+		Counter: chanCounter{ch: pr.ch}, HeavyPermit: heavyPermit(pr.ch), CodePermit: codePermit(pr.ch), MarkDeleting: pr.ch.markDeleting,
+		ConfirmAppKey: pr.ch.confirmAppKey}
 }

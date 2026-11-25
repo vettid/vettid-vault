@@ -526,7 +526,7 @@ func (m *Manager) startRelayRotation(seed []byte, byCredential bool, now time.Ti
 // every recipient, held (§3.4 steps 1 and 2).
 func (m *Manager) newPendingRelay(seed []byte, marks, named *RotationOwed, now time.Time) {
 	pr := &PendingRelay{Seed: seed, Held: map[string]*HeldTokens{}, Marks: marks, Named: named, Recovery: m.rk.openRecovery}
-	if m.limits != (Limits{}) {
+	if !noLimits(m.limits) {
 		lim := m.limits
 		pr.Limits = &lim
 	}
@@ -621,7 +621,7 @@ func issuedOf(list []IssuedToken, kind string) (IssuedToken, bool) {
 // keepRelayLimits stores the limits of a registration just answered with a
 // pending key, which an unlock that registers no key uses.
 func (m *Manager) keepRelayLimits() {
-	if pr := m.st.Relay.Pending; pr != nil && m.limits != (Limits{}) {
+	if pr := m.st.Relay.Pending; pr != nil && !noLimits(m.limits) {
 		lim := m.limits
 		pr.Limits = &lim
 		m.dirty = true
@@ -1148,7 +1148,7 @@ func (m *Manager) makePendingCurrent(created bool, now time.Time) bool {
 	m.st.Relay.Seed, m.st.Relay.Mailbox, m.st.Relay.Anchor = pr.Seed, mailboxOf(m.keys.pendingRelay), time.Time{}
 	m.keys.relay, m.keys.pendingRelay = m.keys.pendingRelay, nil
 	m.relay, m.rk.pending = newRelay, nil
-	if m.limits == (Limits{}) && pr.Limits != nil {
+	if noLimits(m.limits) && pr.Limits != nil {
 		m.limits = *pr.Limits
 	}
 	m.st.Relay.Pending = nil // its retry_after and refused mark go with it

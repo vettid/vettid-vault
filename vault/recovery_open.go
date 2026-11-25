@@ -602,7 +602,7 @@ func (m *Manager) finishOpen(ctx context.Context, p RecoveryOpenParams, mv *Mani
 	}
 	m.rk.pending, m.rk.old = nil, nil
 	if !m.openRegisters() {
-		if pr := m.st.Relay.Pending; pr != nil && pr.Limits != nil && m.limits == (Limits{}) {
+		if pr := m.st.Relay.Pending; pr != nil && pr.Limits != nil && noLimits(m.limits) {
 			m.limits = *pr.Limits
 		}
 	} else if m.limits, err = m.relay.Register(ctx); err != nil {

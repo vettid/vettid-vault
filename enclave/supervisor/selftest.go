@@ -68,6 +68,13 @@ func errStr(err error) string {
 }
 
 func (s *Supervisor) runSelftest(ctx context.Context, req *selftest.Request) *selftest.Report {
+	// A self-test enclave never runs start(): the heavy-derivation permit
+	// is made here, as start() makes it, before any vault process exists
+	// (each one reads it, also when it exits). The capacity run's floor
+	// joins it when that run begins (selftestCapacity).
+	if req.Capacity != nil && s.heavy == nil {
+		s.heavy = s.selftestPermit()
+	}
 	r := &selftest.Report{Version: 1}
 	s.selftestNSM(r)
 	s.selftestProcess(r)

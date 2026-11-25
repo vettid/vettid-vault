@@ -142,7 +142,10 @@ type Supervisor struct {
 	descMu   sync.Mutex
 	lastDesc []byte
 
-	selftestMode  bool          // set once, before selftestReady closes
+	selftestMode bool // set once, before selftestReady closes
+	// capFloor is the self-test capacity run's memory floor, which the
+	// self-test's heavy permit keeps when it is above MemoryReserve.
+	capFloor      atomic.Uint64
 	selftestReady chan struct{} // closed when the hello asked for a self-test
 	selftestOnce  sync.Once
 	selftestDone  chan struct{}
@@ -311,6 +314,14 @@ func (s *Supervisor) Run(ctx context.Context) error {
 }
 
 // connect dials the parent (with backoff) and exchanges hello.
+// selftestAllowed reports whether the parent's hello ([hello], its third
+// field) puts this supervisor in self-test mode: only when asked for, and
+// only on an enclave that holds no instance and was never given one (the
+// self-test, its capacity run included, never runs beside members' vaults).
+func (s *Supervisor) selftestAllowed(hello string) bool {
+	return hello == "selftest" && s.inst.Load() == nil && s.instID == ""
+}
+
 func (s *Supervisor) connect(ctx context.Context, release string) (*hostproto.Conn, error) {
 	backoff := 200 * time.Millisecond
 	for {
@@ -341,7 +352,7 @@ func (s *Supervisor) dial(ctx context.Context, release string) (*hostproto.Conn,
 		conn.Close()
 		return nil, ErrHello
 	}
-	if string(r[2]) == "selftest" && s.inst.Load() == nil && s.instID == "" {
+	if s.selftestAllowed(string(r[2])) {
 		s.selftestMode = true
 		close(s.selftestReady)
 	}

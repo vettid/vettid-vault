@@ -42,13 +42,17 @@ phone can be added with `git add -f` if it is to be kept.
 
 # Real App Attest objects (iOS)
 
-`TestRealIOSAttestations` (`vms/devattest/real_ios_test.go`) runs
+`TestRealIOSAttestations` (`vms/devattest/real_iphone_test.go`; not
+`real_ios_test.go`, which Go would build only for GOOS=ios) runs
 `verifyIOS` and `verifyIOSAssertion` against every `*.ios.json` file in
 this directory, with the Apple App Attestation root the release pins
 (`pins.AppleAppAttestRoot`) and the production environment only. With no
-file here the test is skipped:
+file here the test is skipped, but CI runs `make real-attest`, which fails
+unless the test runs and passes on at least one file:
 
-    go test -p 1 -count=1 -run TestRealIOSAttestations -v ./vms/devattest/
+    make real-attest
+
+`iphone15-devstack.ios.json` is the test iPhone 15's DevStack build.
 
 ## Format
 

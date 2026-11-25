@@ -28,6 +28,8 @@ jobs:
         run: make staticcheck
       - name: no vector-only code in library packages
         run: make check-tcb
+      - name: the App Attest verifier against a real iPhone (must run, never skip)
+        run: make real-attest
       - name: go test -race (incl. vector regeneration)
         run: |
           go test -race -count=1 ./...

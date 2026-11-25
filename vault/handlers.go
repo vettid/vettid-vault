@@ -224,6 +224,7 @@ type Session struct {
 	epoch *handshake.Epoch
 	// cacheBody, if set, is the body the request's answer is cached with instead of the one sent (CacheResponseAs).
 	cacheBody json.RawMessage
+	sentOnce  bool // CacheResponseAsSentOnce: the answer is deposited from memory only
 	// agentRefusal and approval are set by the AgentPolicy while it decides
 	// an agent's request (RefuseAgentWith, FlagApproval, ApprovalPrevious,
 	// NoteApproval).
@@ -389,6 +390,16 @@ func (s *Session) HeldNote() json.RawMessage { return append(json.RawMessage(nil
 // For an answer that holds something the vault must not keep in its state (VAULT-MESSAGING §10.10, 0.90.15: a TURN
 // credential); body must be a valid answer to the same request.
 func (s *Session) CacheResponseAs(body json.RawMessage) { s.cacheBody = body }
+
+// CacheResponseAsSentOnce is CacheResponseAs for an answer whose secret
+// must not be in saved state at all (0.94.0 §6.7.2: a pairing code): the
+// answer the handler returns is sealed and deposited once, from memory,
+// never in the stored outbox, and its body is wiped once sealed, so the
+// handler returns a slice of its own. A lost deposit is answered from the
+// cached copy on retransmission.
+func (s *Session) CacheResponseAsSentOnce(body json.RawMessage) {
+	s.cacheBody, s.sentOnce = body, true
+}
 
 // CachedResponseBody returns the body set by CacheResponseAs (nil: the answer is cached as sent).
 func (s *Session) CachedResponseBody() json.RawMessage { return s.cacheBody }

@@ -218,7 +218,7 @@ func (h managerHost) CancelInvite(id string, now time.Time) {
 		return
 	}
 	h.m.denyJTI(inv.OpenJTI, now)
-	h.m.queueDeleteClaim(inv.ClaimID, now)
+	h.m.queueDeleteInviteClaim(inv, now)
 	delete(h.m.st.Invites, id)
 	h.m.dirty = true
 }
@@ -350,6 +350,8 @@ func auditKind(event string) string {
 		return "" // recorded as connection.stale
 	case "unconfirmed_late":
 		return "" // not dropped: it still goes; recorded as message.delivery_unconfirmed (#7901)
+	case EventSaltsRefused:
+		return EventSaltsRefused // not a drop: a relay whose codes never work (0.94.0 §6.7.2)
 	}
 	return "drop." + event
 }

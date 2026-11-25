@@ -171,8 +171,8 @@ func (m *Manager) beginDelete(via string, now time.Time) {
 		if !sortedOK {
 			continue // removed earlier in this loop
 		}
-		if !inv.Used && inv.ClaimID != "" {
-			m.queueDeleteClaim(inv.ClaimID, now)
+		if !inv.Used {
+			m.queueDeleteInviteClaim(inv, now)
 		}
 		delete(m.st.Invites, id)
 	}
@@ -431,7 +431,7 @@ func (m *Manager) deleteMailbox(ctx context.Context) {
 		}
 	}
 	for _, e := range m.st.Outbox {
-		if e.Op == OpRevoke || e.Op == OpDeleteClaim {
+		if e.Op == OpRevoke || e.Op == OpDeleteClaim || e.Op == OpDeletePairCode {
 			e.Done = true
 		}
 	}

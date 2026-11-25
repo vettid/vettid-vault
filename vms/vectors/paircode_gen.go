@@ -34,6 +34,9 @@ const (
 // code, the input normalization, the relay forms, the salt list checks,
 // and the changes that must not open.
 func genPairCode(vault *principal) (obj, error) {
+	if paircode.TestCost {
+		return nil, errors.New("vectors: pair-code.json needs the specified cost (built with vettid_testcost)")
+	}
 	r, err := paircode.CanonicalRelay(RelayURL)
 	if err != nil || r != RelayURL {
 		return nil, errors.New("vectors: the relay is not canonical")

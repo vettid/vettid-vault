@@ -497,7 +497,7 @@ func derive(label, purpose, r string, code, salt []byte) ([]byte, error) {
 	}
 	pw := PW(label, purpose, r, code)
 	defer suite.Wipe(pw)
-	return argon2.IDKey(pw, salt, ArgonTime, ArgonMemoryKiB, ArgonThreads, KeySize), nil
+	return argon2.IDKey(pw, salt, argonTime, argonMemoryKiB, ArgonThreads, KeySize), nil
 }
 
 // Tag returns the lookup tag Argon2id(pw("lookup"), s_r, P).

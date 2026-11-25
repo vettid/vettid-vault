@@ -1447,6 +1447,7 @@ func (m *Manager) zeroize() {
 	}
 	if m.st != nil {
 		m.wipeSnapshots()
+		m.st.wipePlaintexts()
 		if m.st.PendingUnlink != nil {
 			m.st.PendingUnlink.wipe() // the kept send key (§11.14.10); stored under the DEK
 		}
@@ -1471,6 +1472,27 @@ func (m *Manager) zeroize() {
 		}
 	}
 	m.st = nil
+}
+
+// wipePlaintexts wipes the message plaintexts a state keeps: the held
+// requests' inners (§6.8), the cached answers' inners (§8.2) and the held
+// outbox entries' plaintexts (§3.4.1). For a whole state that is dropped
+// (zeroize, and a decoded state an unlock refuses): the running vault
+// wipes each where it drops it (#301).
+func (st *State) wipePlaintexts() {
+	for _, h := range st.Held {
+		if h != nil {
+			suite.Wipe(h.Inner)
+		}
+	}
+	for _, r := range st.Responses {
+		suite.Wipe(r.Inner) // the map holds the struct; its Inner shares the stored bytes
+	}
+	for _, e := range st.Outbox {
+		if e != nil {
+			suite.Wipe(e.Held)
+		}
+	}
 }
 
 // wipeSnapshots wipes the state's session and handshake snapshots (every

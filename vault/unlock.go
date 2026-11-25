@@ -454,10 +454,12 @@ func UnlockAlt(ctx context.Context, p AltUnlockParams) (*Manager, *AltUnlockOutc
 	suite.Wipe(pt)
 	if err != nil || st.VaultID != p.VaultID || st.StateSeq != blobSeq {
 		suite.Wipe(dek)
+		dropDecoded(&st)
 		return nil, out.fail(CodeMissing, ErrState)
 	}
 	if st.StateSeq < hdr.StateSeq || st.StateSeq < p.MinStateSeq {
 		suite.Wipe(dek)
+		dropDecoded(&st)
 		return nil, out.fail(CodeRollback, ErrRollback)
 	}
 	st.init()
@@ -482,6 +484,7 @@ func UnlockAlt(ctx context.Context, p AltUnlockParams) (*Manager, *AltUnlockOutc
 		suite.Wipe(op.dek1)
 		suite.Wipe(op.uk)
 		suite.Wipe(dek)
+		dropDecoded(&st)
 		out.StateSeq = st.StateSeq // as state_unreadable: the state read, not run
 		return nil, out.fail(CodeStateUnsupported, ErrStateUnsupported)
 	}
@@ -1032,4 +1035,17 @@ func uitoa(n uint64) string {
 		n /= 10
 	}
 	return string(b[i:])
+}
+
+// testDroppedStateHook, when set (tests), sees each decoded state an unlock
+// refuses, after its plaintexts are wiped.
+var testDroppedStateHook func(*State)
+
+// dropDecoded wipes the message plaintexts of a state an unlock decoded and
+// then refused (it never runs): as zeroize does for a running vault's state.
+func dropDecoded(st *State) {
+	st.wipePlaintexts()
+	if testDroppedStateHook != nil {
+		testDroppedStateHook(st)
+	}
 }

@@ -22,12 +22,21 @@ func TestCapacityRequest(t *testing.T) {
 	if c.StateKiB != 1024 || len(c.UnlockConcurrency) != 3 || c.UnlockSamples != 8 || c.SettleSeconds != 180 || c.IdleSeconds != 60 || c.StepEvery != 5 {
 		t.Fatalf("defaults %+v", c)
 	}
+	if c.Codes != 0 || c.CodeConcurrency != 0 || c.CodeSeconds != 0 {
+		t.Fatalf("the code phase is off unless asked: %+v", c)
+	}
+	r, err = ParseRequest(req(`,"capacity":{"max_vaults":3,"codes":10}`))
+	if err != nil || r.Capacity.CodeConcurrency != 2 || r.Capacity.CodeUnlocks != 4 || r.Capacity.CodeSeconds != 300 {
+		t.Fatalf("code defaults: %v %+v", err, r.Capacity)
+	}
 	for _, bad := range []string{
 		`{"max_vaults":0}`, `{"max_vaults":1001}`, `{"max_vaults":-1}`,
 		`{"max_vaults":2,"state_kib":65537}`, `{"max_vaults":2,"floor_mib":-1}`,
 		`{"max_vaults":2,"unlock_concurrency":[0]}`, `{"max_vaults":2,"unlock_concurrency":[9]}`,
 		`{"max_vaults":2,"unlock_concurrency":[1,1,1,1,1]}`, `{"max_vaults":2,"unlock_samples":65}`,
 		`{"max_vaults":2,"settle_seconds":901}`, `{"max_vaults":2,"idle_seconds":-5}`, `"x"`,
+		`{"max_vaults":2,"codes":201}`, `{"max_vaults":2,"codes":-1}`, `{"max_vaults":2,"codes":5,"code_concurrency":5}`,
+		`{"max_vaults":2,"codes":5,"code_unlocks":17}`, `{"max_vaults":2,"codes":5,"code_seconds":1801}`,
 	} {
 		if _, err := ParseRequest(req(`,"capacity":` + bad)); err == nil {
 			t.Errorf("accepted %s", bad)
@@ -59,8 +68,10 @@ func TestCapacityLines(t *testing.T) {
 	}
 	c := &CapacityReport{Held: 7, StopReason: "memory_floor", ProjectedMax: 61, Unlock: []UnlockLevel{{Concurrency: 1, Samples: 8, P50Ms: 310},
 		{Concurrency: 4, Skipped: "memory floor"}}, Steps: []CapacityStep{{Vaults: 0, Available: 4 << 30}}, Notes: []string{"n"}}
+	c.Codes = &CodeReport{Requests: 10, Done: 8, Busy: 2, XMs: Millis{N: 8, P50: 1200}, Unlocks: 4, UnlockMs: Millis{N: 4, P50: 330}}
 	out := strings.Join(c.Lines(), "\n")
-	for _, want := range []string{"held 7 vaults (stop: memory_floor", "projected max 61", "unlock x1 n=8 p50=310ms", "unlock x4 skipped", "0:4096.0MiB", "note: n"} {
+	for _, want := range []string{"held 7 vaults (stop: memory_floor", "projected max 61", "unlock x1 n=8 p50=310ms", "unlock x4 skipped", "0:4096.0MiB", "note: n",
+		"codes 10 asked: 8 done, 2 busy", "x p50 1200ms", "4 during (0 skipped, 0 over a derivation) p50 330ms", "granted during an unlock 0"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("missing %q in\n%s", want, out)
 		}

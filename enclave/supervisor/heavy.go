@@ -35,6 +35,9 @@ type heavyPermit struct {
 	// is given meanwhile, so a short wait is not lost to code pollers.
 	// Each refused poll moves it on.
 	waiter time.Time
+	// codeGranted, when set (the self-test's capacity run), is told of each
+	// code permit given, under mu, with the time it was given.
+	codeGranted func(at time.Time)
 }
 
 // waiterHold is how long a refused acquire keeps code permits back
@@ -114,7 +117,17 @@ func (h *heavyPermit) tryCode(id string) permitAnswer {
 		return permitNoRoom
 	}
 	h.holder, h.until = id, h.now().Add(heavyLease)
+	if h.codeGranted != nil {
+		h.codeGranted(h.now())
+	}
 	return permitGiven
+}
+
+// setCodeGranted sets codeGranted, under mu (tryCode reads it there).
+func (h *heavyPermit) setCodeGranted(f func(at time.Time)) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.codeGranted = f
 }
 
 // release returns vault id's permit.

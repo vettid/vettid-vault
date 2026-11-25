@@ -698,6 +698,34 @@ func TestSelftestCapacity(t *testing.T) {
 	}
 }
 
+// The capacity run's code phase with real vault processes and the real
+// supervisor: the code permit exists in a self-test enclave, each request
+// gets its two derivations, and none is given while an unlock opens.
+func TestSelftestCapacityCodes(t *testing.T) {
+	_, rep := runSelftestE2E(t, &selftest.CapacityRequest{MaxVaults: 2, StateKiB: 256, UnlockConcurrency: []int{1}, UnlockSamples: 1,
+		SettleSeconds: 1, IdleSeconds: 1, StepEvery: 1, Codes: 3, CodeConcurrency: 1, CodeUnlocks: 2, CodeSeconds: 120})
+	c := rep.Capacity
+	if c == nil || c.Codes == nil {
+		t.Fatal("no code report")
+	}
+	for _, l := range c.Lines() {
+		t.Log(l)
+	}
+	k := c.Codes
+	// The supervisor's own record of the permits it gave: two per request.
+	if k.Done != 3 || k.Busy != 0 || k.NoRoom != 0 || k.Failed != 0 || k.XMs.N != 3 || k.TagMs.N != 3 || k.Overlap != 0 || !c.TornDown ||
+		k.Grants != 2*k.Done || k.UnlockBeforeMs.N != 2 || k.HeadroomBytes <= 0 {
+		t.Fatalf("codes %+v, torn down %v", k, c.TornDown)
+	}
+	ok := map[string]bool{}
+	for _, ch := range rep.Checks {
+		ok[ch.Name] = ch.OK
+	}
+	if !ok["capacity.codes"] {
+		t.Fatalf("checks %+v", rep.Checks)
+	}
+}
+
 // The hardware smoke test's plumbing off hardware (docs/SMOKE.md): the
 // parent in self-test mode, the dev supervisor and a re-executed vault
 // process, against the fake KMS with a deletable-style test key whose

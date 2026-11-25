@@ -14,6 +14,27 @@ import (
 	"github.com/vettid/vettid-vault/parent"
 )
 
+// The code phase's flags: within the enclave's limits, refused outside.
+func TestCapacityCodeFlags(t *testing.T) {
+	c, err := capacityRequest(50, 1024, 0, "1", 8, time.Minute, time.Minute, 90*time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := withCodes(c, 20, 2, 4, 5*time.Minute); err != nil || c.Codes != 20 || c.CodeConcurrency != 2 || c.CodeUnlocks != 4 || c.CodeSeconds != 300 {
+		t.Fatalf("%v %+v", err, c)
+	}
+	for name, args := range map[string][3]int{"too many": {201, 2, 4}, "concurrency 5": {20, 5, 4}, "concurrency 0": {20, 0, 4}, "unlocks 17": {20, 2, 17}} {
+		c, _ := capacityRequest(50, 1024, 0, "1", 8, time.Minute, time.Minute, 90*time.Minute)
+		if withCodes(c, args[0], args[1], args[2], 5*time.Minute) == nil {
+			t.Errorf("%s accepted", name)
+		}
+	}
+	c, _ = capacityRequest(50, 1024, 0, "1", 8, time.Minute, time.Minute, 90*time.Minute)
+	if withCodes(c, 20, 2, 4, 0) == nil || withCodes(c, 20, 2, 4, 31*time.Minute) == nil {
+		t.Error("a code time outside 1s to 30m accepted")
+	}
+}
+
 func TestCapacityRequestFlags(t *testing.T) {
 	c, err := capacityRequest(200, 1024, 0, "1, 2,4", 8, 150*time.Second, time.Minute, 90*time.Minute)
 	if err != nil || c.MaxVaults != 200 || len(c.UnlockConcurrency) != 3 || c.UnlockConcurrency[1] != 2 || c.SettleSeconds != 150 ||

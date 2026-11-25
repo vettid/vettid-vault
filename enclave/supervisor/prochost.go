@@ -545,6 +545,22 @@ func (h *procHost) reserve(ctx context.Context, j *enclave.Job) (done func(), ok
 	}, true, nil
 }
 
+// markOpening counts id as a vault opening (openingAny) until the returned
+// func is called: the self-test's capacity run marks its synthetic unlocks
+// so, as a real open is marked.
+func (h *procHost) markOpening(id string) func() {
+	h.mu.Lock()
+	h.opening[id]++
+	h.mu.Unlock()
+	return func() {
+		h.mu.Lock()
+		if h.opening[id]--; h.opening[id] <= 0 {
+			delete(h.opening, id)
+		}
+		h.mu.Unlock()
+	}
+}
+
 // openingAny reports whether any vault process is opening here (an
 // unlock, an enrolment or a recovery, from its reservation to its answer;
 // a delete_resume is not counted: it opens no vault).

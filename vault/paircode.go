@@ -92,20 +92,43 @@ func (m *Manager) codePermit(ctx context.Context, deadline time.Time) (func(), b
 	if take == nil {
 		return func() {}, true
 	}
+	rel, ok, _ := PollCodePermit(ctx, take, deadline)
+	return rel, ok
+}
+
+// PollCodePermit asks take for a code pairing's permit until deadline,
+// every 250 ms, as a vault does (§6.7.2): ok with its release, or not, and
+// whether the refusal was no room (refused at once, no wait). The
+// self-test's capacity run makes its synthetic requests with it.
+func PollCodePermit(ctx context.Context, take func(context.Context) (func(), bool), deadline time.Time) (rel func(), ok, noRoomNow bool) {
 	for {
 		rel, ok := take(ctx)
 		if ok {
-			return rel, true
+			return rel, true, false
 		}
-		if noRoom(rel) || !pcNow().Before(deadline) {
-			return nil, false // no room for 256 MiB: busy now (§6.7.2)
+		if noRoom(rel) {
+			return nil, false, true // no room for 256 MiB: busy now (§6.7.2)
+		}
+		if !pcNow().Before(deadline) {
+			return nil, false, false
 		}
 		select {
 		case <-ctx.Done():
-			return nil, false
+			return nil, false, false
 		case <-time.After(250 * time.Millisecond):
 		}
 	}
+}
+
+// RunUnderPermit runs f, one derivation, under a code permit already held:
+// the derivation's memory goes back to the OS before the permit is
+// released (it admits that much), also if f panics.
+func RunUnderPermit(rel func(), f func() error) error {
+	defer func() {
+		freeOS()
+		rel()
+	}()
+	return f()
 }
 
 // pairCodeAttemptable prunes the attempt stamps and reports whether
@@ -464,13 +487,7 @@ func (m *Manager) underPermit(ctx context.Context, deadline time.Time, granted f
 		return errPairBusy
 	}
 	granted()
-	// The derivation's 256 MiB back to the OS before the permit goes (it
-	// admits that much), also if f panics.
-	defer func() {
-		freeOS()
-		rel()
-	}()
-	return f()
+	return RunUnderPermit(rel, f)
 }
 
 // freeOS returns freed memory to the OS (tests count its calls).

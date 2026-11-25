@@ -16,6 +16,7 @@ import (
 	"github.com/vettid/vettid-vault/internal/selftest"
 	"github.com/vettid/vettid-vault/internal/vaultipc"
 	"github.com/vettid/vettid-vault/vault"
+	"github.com/vettid/vettid-vault/vms/paircode"
 	"github.com/vettid/vettid-vault/vms/suite"
 )
 
@@ -70,6 +71,11 @@ func (cv *capacityVault) handle(ch channel, done <-chan struct{}, f [][]byte) []
 			go idleLoop(ch, done, s, vault.LongPollWait)
 		}
 		suite.Wipe(k)
+	case "code":
+		// A code pairing's two derivations (VAULT-MESSAGING 0.94.1
+		// §6.7.2), each under the supervisor's code permit as a vault asks
+		// for it, within one wait for the request.
+		cv.code(ch, &st)
 	case "stats":
 	default:
 		return hostproto.Strings(hostproto.StatusInvalid)
@@ -80,6 +86,68 @@ func (cv *capacityVault) handle(ch channel, done <-chan struct{}, f [][]byte) []
 	st.CPUMicros = cpuMicros()
 	b, _ := json.Marshal(st)
 	return [][]byte{[]byte(hostproto.StatusOK), b}
+}
+
+// capacityRelay is the relay name the synthetic code derivations bind
+// (any canonical one: nothing is sent to it).
+const capacityRelay = "https://relay.selftest.vettid.test"
+
+// code runs a code pairing's derivations as a vault does: x (and k_w),
+// then the tag, each under its own code permit asked for and released by
+// the vault's own functions (vault.PollCodePermit, vault.RunUnderPermit:
+// the waits within one PairCodePermitWait for the request, busy at once on
+// no room, the memory returned before each release). The code, salts and
+// inputs are random: nothing of a member.
+func (cv *capacityVault) code(ch channel, st *selftest.CapacityStats) {
+	take := codePermit(ch)
+	deadline := time.Now().Add(vault.PairCodePermitWait)
+	var wait time.Duration
+	code, err := paircode.NewCode()
+	if err != nil {
+		st.Code = "error"
+		return
+	}
+	defer suite.Wipe(code)
+	salt := func() []byte {
+		b := make([]byte, paircode.SaltSize)
+		_, _ = rand.Read(b)
+		return b
+	}
+	// derive runs one derivation under its own permit: its time, or why
+	// there was none ("busy", "no_room", "error").
+	derive := func(f func() ([]byte, error)) (int64, string) {
+		w0 := time.Now()
+		rel, ok, noRoom := vault.PollCodePermit(context.Background(), take, deadline)
+		wait += time.Since(w0)
+		if !ok {
+			if noRoom {
+				return 0, "no_room"
+			}
+			return 0, "busy"
+		}
+		st.GrantedAtsMs = append(st.GrantedAtsMs, time.Now().UnixMilli())
+		var us int64
+		err := vault.RunUnderPermit(rel, func() error {
+			d0 := time.Now()
+			k, err := f()
+			us = time.Since(d0).Microseconds()
+			suite.Wipe(k)
+			return err
+		})
+		if err != nil {
+			return us, "error"
+		}
+		return us, ""
+	}
+	var why string
+	if st.XMicros, why = derive(func() ([]byte, error) { return paircode.X(paircode.PurposeDesktop, capacityRelay, code, salt()) }); why == "" {
+		st.TagMicros, why = derive(func() ([]byte, error) { return paircode.Tag(paircode.PurposeDesktop, capacityRelay, code, salt()) })
+	}
+	st.WaitMicros = wait.Microseconds()
+	st.Code = "done"
+	if why != "" {
+		st.Code = why
+	}
 }
 
 // openState makes n bytes of random state, seals it under key as the

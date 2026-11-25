@@ -20,12 +20,11 @@ import (
 // sealed answer to the app (§13.6).
 
 // PairCodeRelay is what a Relay offers for code claims (RELAY-PROTOCOL
-// 0.14.0 §6.9.1). A Relay without it, or whose relay does not advertise
-// pair_codes, makes no code pairing (claim_unavailable). Each call is one
-// attempt; the vault decides what follows (§6.7.2).
+// 0.14.0 §6.9.1). A Relay without it, or whose relay did not advertise
+// pair_codes at registration (Limits.OffersPairCodes), makes no code
+// pairing (claim_unavailable). Each call is one attempt; the vault decides
+// what follows (§6.7.2).
 type PairCodeRelay interface {
-	// OffersPairCodes reports the relay's limits.pair_codes.
-	OffersPairCodes() bool
 	// PairCodeSalts lists the relay's lookup salts, unchecked.
 	PairCodeSalts(ctx context.Context) ([]paircode.Salt, error)
 	// PutPairCode creates the code claim claimID. A 409 is the relay code
@@ -41,7 +40,13 @@ type PairCodeRelay interface {
 const (
 	PairCodesPerHour = 5
 	PairCodesPerDay  = 20
-	pairCodeRetries  = 3
+	// PairCodeAttemptsPerHour caps the requests that reach a derivation,
+	// whatever their outcome (a relay that fails every PUT, salts refused
+	// at the PUT, busy after a derivation), so that no vault holds the
+	// enclave's shared derivation permit most of the time (the owner's
+	// number; not in the spec).
+	PairCodeAttemptsPerHour = 10
+	pairCodeRetries         = 3
 )
 
 // PairCodePermitWait is how long a code pairing waits for the heavy
@@ -101,6 +106,19 @@ func (m *Manager) codePermit(ctx context.Context, deadline time.Time) (func(), b
 		case <-time.After(250 * time.Millisecond):
 		}
 	}
+}
+
+// pairCodeAttemptable prunes the attempt stamps and reports whether
+// another request may reach a derivation this hour.
+func (m *Manager) pairCodeAttemptable(now time.Time) bool {
+	kept := m.st.PairCodeAttempts[:0]
+	for _, t := range m.st.PairCodeAttempts {
+		if now.Sub(t) < time.Hour {
+			kept = append(kept, t)
+		}
+	}
+	m.st.PairCodeAttempts = kept
+	return len(kept) < PairCodeAttemptsPerHour
 }
 
 // pairCodeIssuable prunes the issuance stamps and reports whether another
@@ -214,13 +232,14 @@ func (m *Manager) createCodePairing(ctx context.Context, role, by string, now ti
 	if purpose == "" {
 		return nil, nil, errBadRequest
 	}
-	// 1. The issuance limit, then the live code pairing cancelled.
-	if !m.pairCodeIssuable(now) {
+	// 1. The issuance limit and the attempt cap, then the live code
+	// pairing cancelled.
+	if !m.pairCodeIssuable(now) || !m.pairCodeAttemptable(now) {
 		return nil, nil, errPairLimit
 	}
 	m.cancelLiveCode(now)
 	pc, ok := m.relay.(PairCodeRelay)
-	if !ok || !pc.OffersPairCodes() {
+	if !ok || !m.limits.OffersPairCodes() {
 		return nil, nil, errClaim
 	}
 	r, err := paircode.CanonicalRelay(m.relay.BaseURL())
@@ -271,8 +290,20 @@ func (m *Manager) createCodePairing(ctx context.Context, role, by string, now ti
 
 	// (0.94.1) One wait for room per request, for all its derivations.
 	deadline := pcNow().Add(pairCodePermitWait)
+	// The request counts against the attempt cap once its first permit is
+	// granted (a derivation then runs), whatever its outcome; a request
+	// busy before any derivation (the enclave full of others' work) does
+	// not.
+	stamped := false
+	granted := func() {
+		if !stamped {
+			stamped = true
+			m.st.PairCodeAttempts = append(m.st.PairCodeAttempts, now)
+			m.dirty = true // stored with the answer, whatever else the batch holds
+		}
+	}
 	for try := 0; try <= pairCodeRetries; try++ {
-		code, claimID, refusedFirst, err := m.putCodeClaim(ctx, pc, purpose, r, order, bj, deadline)
+		code, claimID, refusedFirst, err := m.putCodeClaim(ctx, pc, purpose, r, order, bj, deadline, granted)
 		if refusedFirst && len(order) > 1 {
 			order = order[1:] // the relay refused that salt: later codes go to the other at once
 		}
@@ -339,7 +370,7 @@ var (
 // error whose outcome at the relay is not known, the claim id is
 // returned too, for its deletion.
 func (m *Manager) putCodeClaim(ctx context.Context, pc PairCodeRelay, purpose, r string, order []paircode.Salt,
-	bundle []byte, deadline time.Time) (_ []byte, unknownClaim string, refusedFirst bool, err error) {
+	bundle []byte, deadline time.Time, granted func()) (_ []byte, unknownClaim string, refusedFirst bool, err error) {
 	code, err := paircode.NewCode()
 	if err != nil {
 		return nil, "", false, errUnavailable
@@ -358,7 +389,7 @@ func (m *Manager) putCodeClaim(ctx context.Context, pc PairCodeRelay, purpose, r
 		return nil, "", false, errUnavailable
 	}
 	var blob, tag []byte
-	if err := m.underPermit(ctx, deadline, func() error {
+	if err := m.underPermit(ctx, deadline, granted, func() error {
 		// x, then the tag: one derivation at a time.
 		x, err := paircode.X(purpose, r, code, sc)
 		if err != nil {
@@ -380,7 +411,7 @@ func (m *Manager) putCodeClaim(ctx context.Context, pc PairCodeRelay, purpose, r
 	}
 	// The tag under a permit of its own: an unlock that opened since x's
 	// runs first (the request's one deadline covers both).
-	if err := m.underPermit(ctx, deadline, func() error {
+	if err := m.underPermit(ctx, deadline, granted, func() error {
 		var err error
 		if tag, err = paircode.Tag(purpose, r, code, order[0].SR); err != nil {
 			return errUnavailable
@@ -394,7 +425,7 @@ func (m *Manager) putCodeClaim(ctx context.Context, pc PairCodeRelay, purpose, r
 			break // at most 2 PUTs for the salt
 		}
 		if i > 0 {
-			if err := m.underPermit(ctx, deadline, func() error {
+			if err := m.underPermit(ctx, deadline, granted, func() error {
 				var err error
 				if tag, err = paircode.Tag(purpose, r, code, e.SR); err != nil {
 					return errUnavailable
@@ -425,11 +456,14 @@ func (m *Manager) putCodeClaim(ctx context.Context, pc PairCodeRelay, purpose, r
 
 // underPermit runs one code pairing's derivations under the heavy
 // permit, waiting for it until the request's deadline (busy without).
-func (m *Manager) underPermit(ctx context.Context, deadline time.Time, f func() error) error {
+// granted is called once the permit is held, before f: the request
+// reaches a derivation, and the attempt cap counts it.
+func (m *Manager) underPermit(ctx context.Context, deadline time.Time, granted func(), f func() error) error {
 	rel, ok := m.codePermit(ctx, deadline)
 	if !ok {
 		return errPairBusy
 	}
+	granted()
 	// The derivation's 256 MiB back to the OS before the permit goes (it
 	// admits that much), also if f panics.
 	defer func() {

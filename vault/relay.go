@@ -3,15 +3,18 @@ package vault
 import (
 	"context"
 	"crypto/ed25519"
+	"encoding/json"
 	"errors"
 	"math/rand/v2"
 	"net/http"
+	"reflect"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/vettid/vettid-relay/relayauth"
 	"github.com/vettid/vettid-relay/relayclient"
+	"github.com/vettid/vettid-vault/vms/paircode"
 	"github.com/vettid/vettid-vault/vms/suite"
 )
 
@@ -466,7 +469,23 @@ func (r *ClientRelay) BaseURL() string { return r.base }
 
 func (r *ClientRelay) Register(ctx context.Context) (Limits, error) {
 	reg, err := guarded(r, ctx, func(c context.Context) (relayclient.Registration, error) { return r.client(r.base).Register(c) })
-	return reg.Limits, err
+	return normalLimits(reg.Limits), err
+}
+
+// normalLimits keeps the relay's true-only flags (reports_tombstones,
+// pair_codes) as true or absent, never as the relay sent them: the limits
+// are kept in memory and in the stored state (PendingRelay.Limits), and a
+// relay's answer may be as large as its body.
+func normalLimits(l Limits) Limits {
+	flag := func(raw json.RawMessage) json.RawMessage {
+		var b bool
+		if json.Unmarshal(raw, &b) == nil && b {
+			return json.RawMessage("true")
+		}
+		return nil
+	}
+	l.ReportsTombstones, l.PairCodes = flag(l.ReportsTombstones), flag(l.PairCodes)
+	return l
 }
 
 // once is the client for one attempt (RelayRotator).
@@ -477,12 +496,17 @@ func (r *ClientRelay) once() *relayclient.Client {
 }
 
 func (r *ClientRelay) Rotate(ctx context.Context, newKey ed25519.PrivateKey) (string, error) {
-	return guarded(r, ctx, func(c context.Context) (string, error) { return r.once().Rotate(c, newKey) })
+	// The answer's tombstone report (RELAY-PROTOCOL 0.13.0 §6.7) is not
+	// used here: the successor's mailbox id, as before.
+	return guarded(r, ctx, func(c context.Context) (string, error) {
+		rot, err := r.once().Rotate(c, newKey)
+		return rot.MailboxID, err
+	})
 }
 
 func (r *ClientRelay) RegisterCreated(ctx context.Context) (Limits, bool, error) {
 	reg, err := guarded(r, ctx, func(c context.Context) (relayclient.Registration, error) { return r.once().Register(c) })
-	return reg.Limits, reg.Created, err
+	return normalLimits(reg.Limits), reg.Created, err
 }
 
 // WithKey is a relay for another of the vault's relay keys, of r's family:
@@ -731,3 +755,37 @@ func (w *wsCollector) Ack(ctx context.Context, id string) error {
 }
 
 func (w *wsCollector) Close() error { return w.s.Close() }
+
+// noLimits reports whether l holds no relay limits yet (none read at
+// registration). Limits holds raw JSON members, so it is compared deeply.
+func noLimits(l Limits) bool { return reflect.DeepEqual(l, Limits{}) }
+
+// The code claim calls (RELAY-PROTOCOL 0.14.0 §6.9.1; PairCodeRelay): on
+// the vault's own relay, signed by its key (the salts read is not), each
+// one attempt.
+
+func (r *ClientRelay) PairCodeSalts(ctx context.Context) ([]paircode.Salt, error) {
+	return guarded(r, ctx, func(c context.Context) ([]paircode.Salt, error) {
+		got, err := r.client(r.base).PairCodeSalts(c)
+		if err != nil {
+			return nil, err
+		}
+		out := make([]paircode.Salt, len(got))
+		for i, s := range got {
+			out[i] = paircode.Salt{SaltID: s.SaltID, Epoch: s.Epoch, Nonce: s.Nonce}
+		}
+		return out, nil
+	})
+}
+
+func (r *ClientRelay) PutPairCode(ctx context.Context, claimID, saltID string, tag, salt, blob []byte) (time.Time, error) {
+	return guarded(r, ctx, func(c context.Context) (time.Time, error) {
+		return r.client(r.base).PutPairCode(c, claimID, relayclient.PairCodePut{SaltID: saltID, Tag: tag, Salt: salt, Blob: blob})
+	})
+}
+
+func (r *ClientRelay) DeletePairCode(ctx context.Context, claimID string) error {
+	return guardedErr(r, ctx, func(c context.Context) error { return r.client(r.base).DeletePairCode(c, claimID) })
+}
+
+var _ PairCodeRelay = (*ClientRelay)(nil)

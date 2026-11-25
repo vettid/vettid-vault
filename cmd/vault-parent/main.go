@@ -92,6 +92,10 @@ func main() {
 		capSettle    = flag.Duration("capacity-settle", 180*time.Second, "selftest -capacity: wait for memory to come back at the floor, and before the steady-state measurement")
 		capIdle      = flag.Duration("capacity-idle", 60*time.Second, "selftest -capacity: idle CPU measurement window")
 		capBudget    = flag.Duration("capacity-budget", 90*time.Minute, "selftest -capacity: time for the whole measurement (the fill stops early enough)")
+		capCodes     = flag.Int("capacity-codes", 0, "selftest -capacity: code pairings' derivations run by the held vaults under the code permit, with unlocks meanwhile (0: off)")
+		capCodeConc  = flag.Int("capacity-code-concurrency", 2, "selftest -capacity-codes: code requests at a time (1-4)")
+		capCodeUnl   = flag.Int("capacity-code-unlocks", 4, "selftest -capacity-codes: unlocks started while the codes run (1-16)")
+		capCodeTime  = flag.Duration("capacity-code-time", 5*time.Minute, "selftest -capacity-codes: time for the phase (part of the budget)")
 		resolve      multi
 		extraAllowed multi
 	)
@@ -177,11 +181,17 @@ func main() {
 		res[h] = a
 	}
 	var capReq *selftest.CapacityRequest
+	if *capCodes != 0 && *capVaults == 0 {
+		fail("configuration", errors.New("-capacity-codes runs only with -capacity"))
+	}
 	if *capVaults != 0 {
 		if !*selftestMode {
 			fail("configuration", errors.New("-capacity runs only with -selftest"))
 		}
 		capReq, err = capacityRequest(*capVaults, *capStateKiB, *capFloorMiB, *capUnlocks, *capSamples, *capSettle, *capIdle, *capBudget)
+		if err == nil && *capCodes != 0 {
+			err = withCodes(capReq, *capCodes, *capCodeConc, *capCodeUnl, *capCodeTime)
+		}
 		if err != nil {
 			fail("configuration", err)
 		}
@@ -310,4 +320,18 @@ func capacityRequest(n, stateKiB, floorMiB int, unlocks string, samples int, set
 		return nil, errors.New("bad -capacity parameters (docs/SMOKE.md has the limits)")
 	}
 	return c, nil
+}
+
+// withCodes adds the code-derivation phase to c, validated with the
+// enclave's rules.
+func withCodes(c *selftest.CapacityRequest, codes, concurrency, unlocks int, d time.Duration) error {
+	if concurrency < 1 || unlocks < 1 || d < time.Second {
+		return errors.New("-capacity-code-concurrency and -capacity-code-unlocks must be at least 1, -capacity-code-time at least 1s")
+	}
+	c.Codes, c.CodeConcurrency, c.CodeUnlocks, c.CodeSeconds = codes, concurrency, unlocks, int(d/time.Second)
+	b, _ := json.Marshal(selftest.Request{RunID: "check", KeyARN: "x", Account: "000000000000", Region: "us-east-1", Capacity: c})
+	if _, err := selftest.ParseRequest(b); err != nil {
+		return errors.New("bad -capacity-code parameters (docs/SMOKE.md has the limits)")
+	}
+	return nil
 }

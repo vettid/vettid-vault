@@ -121,7 +121,37 @@ no key leaves a process; the report holds sizes, times and counts only.
    private memory, the enclave's available memory and the supervisor's
    RSS; then idle CPU time per vault and of the supervisor over
    `-capacity-idle` (default 60 s).
-4. Teardown: every synthetic process ends; the available memory after
+4. Code pairings (only with `-capacity-codes K`, after the steady state,
+   the vaults still held): K requests of a code pairing's derivations
+   (VAULT-MESSAGING 0.94.1 §6.7.2), `-capacity-code-concurrency` at a
+   time (default 2, at most 4), each by a held vault as a vault makes
+   them: x at the release's parameters (Argon2id t=3, 256 MiB) under the
+   supervisor's code permit, the memory returned, then the tag under a
+   permit of its own, the waits within one 5 s wait for the request, and
+   busy at once when the permit says there is no room. Meanwhile
+   `-capacity-code-unlocks` (default 4, at most 16) fresh synthetic
+   vaults unlock one after another, each counted as a vault opening, so
+   the permit gives way to them as it does to real unlocks.
+   `-capacity-code-time` (default 5 min, at most 30) bounds the phase and
+   comes out of the fill's time. The code, salts and inputs are random;
+   nothing is sent anywhere. Before the first code, as many unlocks are
+   timed at the same held count (`unlock_before_ms`, the fair comparison
+   for `unlock_ms`), and unlocks stop being started once the codes are
+   done. Free memory is sampled every 200 ms for the phase.
+   - The phase measures anything only with room for one derivation above
+     the floor: `headroom_bytes` (available less the floor and 1.2 ×
+     256 MiB at its start) negative means every request is answered no
+     room, and the report says so. Choose `-capacity` below the count the
+     fill would stop at (`memory_floor`), so room is left; a raised
+     `-capacity-floor-mib` raises the no-room count the same way.
+   - What it does not reproduce: a synthetic unlock is shorter than a
+     real one (no KMS or S3 round trip), so `unlock_ms` understates how
+     long a real unlock holds code derivations back; and its code
+     requests come from held synthetic vaults, not from members' vaults
+     with their own state and traffic.
+   - `-capacity-codes` without `-capacity` is refused.
+
+5. Teardown: every synthetic process ends; the available memory after
    it is reported.
 
 **Safety limits.**
@@ -155,9 +185,17 @@ bytes, times in ms): `params`, `mem_total_bytes`, `floor_bytes`,
 steady available) / held), `projected_max_vaults` ((baseline − floor −
 one unlock's peak) / marginal), `idle_cpu_ms_per_vault_minute`,
 `supervisor_cpu_ms_per_minute_idle`, `torn_down`,
-`available_after_bytes`. The parent also prints `CAPACITY …` lines.
+`available_after_bytes`; with `-capacity-codes`, `codes`: `requests`,
+`done`, `busy`, `no_room`, `failed`, `x_ms` and `tag_ms` (per derivation,
+of the requests done), `permit_wait_ms`, `unlocks` and `unlock_ms` (the
+unlocks during the phase, against the empty enclave's in `unlock`),
+`unlocks_skipped`, `min_available_bytes`, `code_vault_peak_rss_bytes`,
+`granted_during_unlock` (permits granted while an unlock was opening: the
+rule allows none) and `duration_ms`. The parent also prints `CAPACITY …`
+lines.
 Checks: `capacity.measured` and `capacity.torn_down` (required),
-`capacity.unlock_latency` (informational).
+`capacity.unlock_latency` and, with `-capacity-codes`, `capacity.codes`
+(informational: some done and none granted during an unlock).
 
 The answer to O6 is `held` when the run stopped at `memory_floor` (the
 vaults the enclave held with room for one more unlock), and

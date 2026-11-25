@@ -42,12 +42,25 @@ type CapacityRequest struct {
 	// 240): the fill stops ("time_budget") early enough for the settle and
 	// idle windows and the teardown to fit.
 	BudgetMinutes int `json:"budget_minutes,omitempty"`
+	// Codes is how many code pairings' derivations (VAULT-MESSAGING
+	// 0.94.1 §6.7.2: x, then the tag, each at the release's 256 MiB under
+	// the supervisor's code permit) the held vaults run after the steady
+	// state, CodeConcurrency at a time (default 2, at most 4); 0 (the
+	// default) skips the phase. CodeUnlocks unlocks (default 4, at most 16)
+	// are started while they run, each counted as a vault opening, so the
+	// permit's unlock-first rule is measured under load. CodeSeconds bounds
+	// the phase (default 300, at most 1800).
+	Codes           int `json:"codes,omitempty"`
+	CodeConcurrency int `json:"code_concurrency,omitempty"`
+	CodeUnlocks     int `json:"code_unlocks,omitempty"`
+	CodeSeconds     int `json:"code_seconds,omitempty"`
 }
 
 // Capacity limits.
 const (
 	MaxCapacityVaults = 1000
 	MinFloorMiB       = 256
+	MaxCapacityCodes  = 200
 )
 
 // Defaults fills in the zero values.
@@ -73,13 +86,26 @@ func (c *CapacityRequest) Defaults() {
 	if c.BudgetMinutes == 0 {
 		c.BudgetMinutes = 90
 	}
+	if c.Codes > 0 {
+		if c.CodeConcurrency == 0 {
+			c.CodeConcurrency = 2
+		}
+		if c.CodeUnlocks == 0 {
+			c.CodeUnlocks = 4
+		}
+		if c.CodeSeconds == 0 {
+			c.CodeSeconds = 300
+		}
+	}
 }
 
 func (c *CapacityRequest) valid() bool {
 	if c.MaxVaults < 1 || c.MaxVaults > MaxCapacityVaults || c.StateKiB < 0 || c.StateKiB > 64<<10 || c.FloorMiB < 0 || c.FloorMiB > 1<<20 ||
 		len(c.UnlockConcurrency) > 4 || c.UnlockSamples < 0 || c.UnlockSamples > 64 || c.SettleSeconds < 0 || c.SettleSeconds > 900 ||
 		c.IdleSeconds < 0 || c.IdleSeconds > 900 || c.StepEvery < 0 || c.StepEvery > MaxCapacityVaults ||
-		c.BudgetMinutes < 0 || c.BudgetMinutes > 240 {
+		c.BudgetMinutes < 0 || c.BudgetMinutes > 240 ||
+		c.Codes < 0 || c.Codes > MaxCapacityCodes || c.CodeConcurrency < 0 || c.CodeConcurrency > 4 ||
+		c.CodeUnlocks < 0 || c.CodeUnlocks > 16 || c.CodeSeconds < 0 || c.CodeSeconds > 1800 {
 		return false
 	}
 	for _, n := range c.UnlockConcurrency {
@@ -139,6 +165,9 @@ type CapacityReport struct {
 	IdleCPUMsPerVaultMinute      float64 `json:"idle_cpu_ms_per_vault_minute"`
 	SupervisorCPUMsPerMinuteIdle float64 `json:"supervisor_cpu_ms_per_minute_idle"`
 
+	// Codes is the code-derivation phase (nil when not run).
+	Codes *CodeReport `json:"codes,omitempty"`
+
 	// TornDown: every synthetic vault process exited; AvailableAfter is
 	// the available memory after the teardown.
 	TornDown       bool     `json:"torn_down"`
@@ -159,6 +188,64 @@ type UnlockLevel struct {
 	KDFP50Ms    float64 `json:"kdf_p50_ms"`
 	KDFP95Ms    float64 `json:"kdf_p95_ms"`
 	Skipped     string  `json:"skipped,omitempty"`
+}
+
+// CodeReport is the code-derivation phase: code pairings' two derivations
+// run by held vaults under the supervisor's code permit while unlocks are
+// started, times in milliseconds.
+type CodeReport struct {
+	// Requests asked; Done got both permits and derived both; Busy were
+	// held past their wait (another holder, or an unlock opening); NoRoom
+	// were refused for memory at once; Failed did not answer.
+	Requests int `json:"requests"`
+	Done     int `json:"done"`
+	Busy     int `json:"busy"`
+	NoRoom   int `json:"no_room"`
+	Failed   int `json:"failed"`
+	// CutShort were ended by the phase's time bound (CodeSeconds).
+	CutShort int `json:"cut_short"`
+	// Grants is the code permits the supervisor gave (2 per request done).
+	Grants int `json:"grants"`
+	// HeadroomBytes is, at the phase's start, available memory less the
+	// floor and one code derivation's need (1.2 × 256 MiB): negative, every
+	// request is answered no room (the fill stopped at the floor).
+	HeadroomBytes int64 `json:"headroom_bytes"`
+	// The derivations of the requests that were done.
+	XMs   Millis `json:"x_ms"`
+	TagMs Millis `json:"tag_ms"`
+	// PermitWaitMs is each request's time waiting for its permits, done or
+	// not.
+	PermitWaitMs Millis `json:"permit_wait_ms"`
+	// Unlocks during the phase, each an opening the permit gives way to:
+	// their latency, against the empty enclave's single unlock (Unlock[0]).
+	// UnlockBeforeMs: as many unlocks, one after another, at the same held
+	// count just before the first code (the fair comparison).
+	UnlockBeforeMs Millis `json:"unlock_before_ms"`
+	Unlocks        int    `json:"unlocks"`
+	UnlockMs       Millis `json:"unlock_ms"`
+	// UnlocksOverlapping is how many of the unlocks during the phase ran
+	// while a derivation was in progress.
+	UnlocksOverlapping int    `json:"unlocks_overlapping"`
+	UnlocksSkipped     int    `json:"unlocks_skipped"`
+	MinAvailable       uint64 `json:"min_available_bytes"`
+	CodeVaultPeakRSS   uint64 `json:"code_vault_peak_rss_bytes"`
+	// Overlap is how many code derivations were granted while an unlock
+	// was opening (the rule says none).
+	Overlap    int   `json:"granted_during_unlock"`
+	DurationMs int64 `json:"duration_ms"`
+}
+
+// Millis summarizes durations in milliseconds.
+type Millis struct {
+	N   int     `json:"n"`
+	P50 float64 `json:"p50"`
+	P95 float64 `json:"p95"`
+	Max float64 `json:"max"`
+}
+
+// MillisOf summarizes v.
+func MillisOf(v []float64) Millis {
+	return Millis{N: len(v), P50: Percentile(v, 50), P95: Percentile(v, 95), Max: Percentile(v, 100)}
 }
 
 // CapacityStep is one point of the fill.
@@ -205,12 +292,19 @@ func Percentile(v []float64, p float64) float64 {
 // CapacityStats is what a synthetic vault process reports about itself
 // (sizes in bytes, times in microseconds).
 type CapacityStats struct {
-	KDFMicros int64  `json:"kdf_us,omitempty"`
-	RSS       uint64 `json:"rss"`
-	PeakRSS   uint64 `json:"peak_rss"`
-	PSS       uint64 `json:"pss"`
-	Private   uint64 `json:"private"`
-	CPUMicros int64  `json:"cpu_us"`
+	KDFMicros int64 `json:"kdf_us,omitempty"`
+	// Code: a "code" request's outcome ("done", "busy", "no_room") and
+	// times; the start of each granted permit, for the overlap count.
+	Code         string  `json:"code,omitempty"`
+	XMicros      int64   `json:"x_us,omitempty"`
+	TagMicros    int64   `json:"tag_us,omitempty"`
+	WaitMicros   int64   `json:"wait_us,omitempty"`
+	GrantedAtsMs []int64 `json:"granted_at_ms,omitempty"`
+	RSS          uint64  `json:"rss"`
+	PeakRSS      uint64  `json:"peak_rss"`
+	PSS          uint64  `json:"pss"`
+	Private      uint64  `json:"private"`
+	CPUMicros    int64   `json:"cpu_us"`
 }
 
 const mib = 1 << 20
@@ -249,6 +343,16 @@ func (c *CapacityReport) Lines() []string {
 		fmt.Sprintf("CAPACITY idle cpu %.1fms per vault per minute, supervisor %.1fms per minute", c.IdleCPUMsPerVaultMinute, c.SupervisorCPUMsPerMinuteIdle),
 		fmt.Sprintf("CAPACITY torn down %v, available after %s, %ds", c.TornDown, m(c.AvailableAfter), c.DurationMs/1000),
 	)
+	if k := c.Codes; k != nil {
+		out = append(out,
+			fmt.Sprintf("CAPACITY codes %d asked: %d done, %d busy, %d no room, %d failed; x p50 %.0fms p95 %.0fms, tag p50 %.0fms p95 %.0fms; permit wait p50 %.0fms max %.0fms",
+				k.Requests, k.Done, k.Busy, k.NoRoom, k.Failed, k.XMs.P50, k.XMs.P95, k.TagMs.P50, k.TagMs.P95, k.PermitWaitMs.P50, k.PermitWaitMs.Max),
+			fmt.Sprintf("CAPACITY codes: unlocks before p50 %.0fms p95 %.0fms; %d during (%d skipped, %d over a derivation) p50 %.0fms p95 %.0fms max %.0fms",
+				k.UnlockBeforeMs.P50, k.UnlockBeforeMs.P95, k.Unlocks, k.UnlocksSkipped, k.UnlocksOverlapping, k.UnlockMs.P50, k.UnlockMs.P95, k.UnlockMs.Max),
+			fmt.Sprintf("CAPACITY codes: %d cut short, %d permits given, granted during an unlock %d; headroom %+.1fMiB; min available %s; code vault peak %s; %ds",
+				k.CutShort, k.Grants, k.Overlap, float64(k.HeadroomBytes)/mib, m(k.MinAvailable), m(k.CodeVaultPeakRSS), k.DurationMs/1000),
+		)
+	}
 	for _, n := range c.Notes {
 		out = append(out, "CAPACITY note: "+n)
 	}

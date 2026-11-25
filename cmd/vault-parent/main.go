@@ -181,13 +181,10 @@ func main() {
 		res[h] = a
 	}
 	var capReq *selftest.CapacityRequest
-	if *capCodes != 0 && *capVaults == 0 {
-		fail("configuration", errors.New("-capacity-codes runs only with -capacity"))
+	if err := capacityModes(*selftestMode, *capVaults, *capCodes); err != nil {
+		fail("configuration", err)
 	}
 	if *capVaults != 0 {
-		if !*selftestMode {
-			fail("configuration", errors.New("-capacity runs only with -selftest"))
-		}
 		capReq, err = capacityRequest(*capVaults, *capStateKiB, *capFloorMiB, *capUnlocks, *capSamples, *capSettle, *capIdle, *capBudget)
 		if err == nil && *capCodes != 0 {
 			err = withCodes(capReq, *capCodes, *capCodeConc, *capCodeUnl, *capCodeTime)
@@ -320,6 +317,18 @@ func capacityRequest(n, stateKiB, floorMiB int, unlocks string, samples int, set
 		return nil, errors.New("bad -capacity parameters (docs/SMOKE.md has the limits)")
 	}
 	return c, nil
+}
+
+// capacityModes checks that the capacity flags go together: -capacity only
+// with -selftest, -capacity-codes only with -capacity.
+func capacityModes(selftest bool, vaults, codes int) error {
+	switch {
+	case codes != 0 && vaults == 0:
+		return errors.New("-capacity-codes runs only with -capacity")
+	case vaults != 0 && !selftest:
+		return errors.New("-capacity runs only with -selftest")
+	}
+	return nil
 }
 
 // withCodes adds the code-derivation phase to c, validated with the

@@ -434,6 +434,7 @@ func openState(ctx context.Context, p RecoveryOpenParams, hdr *Header, hver stor
 	suite.Wipe(pt)
 	if err != nil || st.VaultID != p.VaultID || st.StateSeq != seq || st.StateSeq < hdr.StateSeq {
 		suite.Wipe(dek)
+		dropDecoded(&st)
 		return nil, OpenStoredMismatch
 	}
 	st.init()

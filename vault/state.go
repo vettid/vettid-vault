@@ -98,6 +98,12 @@ type State struct {
 	AccessRequests map[string]*AccessRequest `json:"access_requests,omitempty"`
 	// Held are requests held for an app's approval (§6.8), by approval id.
 	Held map[string]*HeldRequest `json:"held,omitempty"`
+	// PairCodeIssued are the times of the code pairings made in the last
+	// 24 hours (0.94.0 §6.7.2's issuance limit), PairCodeSeen the relay
+	// nonces of the epochs seen in the last hours (an epoch seen again
+	// must come with the same nonce).
+	PairCodeIssued []time.Time `json:"pair_code_issued,omitempty"`
+	PairCodeSeen   []SeenSalt  `json:"pair_code_seen,omitempty"`
 	// Transfer is the direct transfer to a new phone in progress (§6.7.1),
 	// at most one.
 	Transfer *Transfer `json:"transfer,omitempty"`
@@ -863,6 +869,10 @@ type Invite struct {
 	// Transfer marks the pairing of a direct transfer's new app (§6.7.1),
 	// the only app pairing a vault accepts after enrollment.
 	Transfer bool `json:"transfer,omitempty"`
+	// Code marks a code pairing (0.94.0 §6.7.2): ClaimID is a code claim
+	// (RELAY-PROTOCOL §6.9.1), deleted by its own route. The code itself
+	// is never stored.
+	Code bool `json:"code,omitempty"`
 }
 
 // AwaitingHS is a handshake where the vault sent hs.resp and awaits hs.fin.
@@ -1031,6 +1041,8 @@ const (
 	OpDeposit     = "deposit"
 	OpRevoke      = "revoke"
 	OpDeleteClaim = "delete_claim"
+	// OpDeletePairCode deletes a code claim (0.94.0 §6.7.2).
+	OpDeletePairCode = "delete_pair_code"
 )
 
 // DepositTimes are the relay's times of a request's deposits.

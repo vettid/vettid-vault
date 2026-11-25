@@ -57,6 +57,8 @@ type stubRelay struct {
 	// claims holds claims put through this relay; two fixtures may share
 	// it (a connection between two vaults in process).
 	claims *map[string][]byte
+	// claimDeletes records the claim ids deleted by the claim route.
+	claimDeletes []string
 	// blobs is an in-memory blob store (RELAY-PROTOCOL §6.8) two fixtures
 	// may share; nil: the relay has no blobs.
 	blobs *stubBlobs
@@ -159,7 +161,12 @@ func (r *stubRelay) GetClaim(_ context.Context, _, id string) ([]byte, error) {
 	delete(*r.claims, id) // single fetch
 	return b, nil
 }
-func (r *stubRelay) DeleteClaim(context.Context, string) error { return nil }
+func (r *stubRelay) DeleteClaim(_ context.Context, id string) error {
+	r.mu.Lock()
+	r.claimDeletes = append(r.claimDeletes, id)
+	r.mu.Unlock()
+	return nil
+}
 func (r *stubRelay) DeleteMailbox(context.Context) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()

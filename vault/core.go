@@ -203,6 +203,22 @@ func (m *Manager) hPairCreate(ctx context.Context, s *Session, in *envelope.Inne
 		// direct transfer (§6.7.1), never as a second app.
 		return nil, NewError("one_app", "")
 	}
+	// 0.94.0 §6.7.2: form "code" makes a code pairing; absent or "link",
+	// a link pairing as before.
+	form := "link"
+	if _, has := o["form"]; has {
+		if form, err = str(o, "form"); err != nil || form != "link" && form != "code" {
+			return nil, errBadRequest
+		}
+	}
+	if form == "code" {
+		answer, cached, err := m.createCodePairing(ctx, role, s.peer.ID, s.now)
+		if err != nil {
+			return nil, err
+		}
+		s.CacheResponseAs(cached) // no code in the response cache (§6.7.2)
+		return answer, nil
+	}
 	inv, link, err := m.createInvite(ctx, role, PairingApprovalTTL, s.peer.ID, s.now)
 	if err != nil {
 		return nil, NewError("relay_error", "")
@@ -293,6 +309,12 @@ func (m *Manager) hPairReject(_ context.Context, s *Session, in *envelope.Inner)
 	case waiting != "" && !m.isTransferRequest(waiting):
 		pid = m.st.Awaiting[waiting].InviteID
 		m.dropAwaiting(waiting, "rejected", s.now)
+	case m.unopenedPairing(pid) != nil:
+		// An invite no device has opened yet (owner decision 2026-11-02;
+		// 0.94.0 §6.7.2: a code pairing rejected before it is redeemed):
+		// its token denylisted and its claim deleted.
+		m.endInvite(m.unopenedPairing(pid), s.now)
+		return nil, nil
 	default:
 		return nil, errNotFound
 	}
@@ -457,7 +479,7 @@ func (m *Manager) hInviteCancel(_ context.Context, s *Session, in *envelope.Inne
 		return nil, errNotFound
 	}
 	m.denyJTI(inv.OpenJTI, s.now)
-	m.queueDeleteClaim(inv.ClaimID, s.now)
+	m.queueDeleteInviteClaim(inv, s.now)
 	delete(m.st.Invites, id)
 	return nil, nil
 }

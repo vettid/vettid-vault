@@ -127,6 +127,10 @@ type Options struct {
 	// release (§11.14.3); nil: always given (development, tests).
 	Counter     counter.Bucket
 	HeavyPermit func(ctx context.Context) (release func(), ok bool)
+	// CodePermit takes the supervisor's permit for a code pairing's two
+	// 256 MiB derivations (0.94.0 §6.7.2), refused while an unlock is in
+	// flight (unlocks go first) or without room; nil: always given.
+	CodePermit func(ctx context.Context) (release func(), ok bool)
 	// RecoveryWaitUnit and RecoveryQuiet are the release constants
 	// recovery_wait_unit_seconds and recovery_quiet_seconds (§11.10.8);
 	// zero: 24 h and 72 h.

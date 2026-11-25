@@ -20,12 +20,11 @@ import (
 // sealed answer to the app (§13.6).
 
 // PairCodeRelay is what a Relay offers for code claims (RELAY-PROTOCOL
-// 0.14.0 §6.9.1). A Relay without it, or whose relay does not advertise
-// pair_codes, makes no code pairing (claim_unavailable). Each call is one
-// attempt; the vault decides what follows (§6.7.2).
+// 0.14.0 §6.9.1). A Relay without it, or whose relay did not advertise
+// pair_codes at registration (Limits.OffersPairCodes), makes no code
+// pairing (claim_unavailable). Each call is one attempt; the vault decides
+// what follows (§6.7.2).
 type PairCodeRelay interface {
-	// OffersPairCodes reports the relay's limits.pair_codes.
-	OffersPairCodes() bool
 	// PairCodeSalts lists the relay's lookup salts, unchecked.
 	PairCodeSalts(ctx context.Context) ([]paircode.Salt, error)
 	// PutPairCode creates the code claim claimID. A 409 is the relay code
@@ -240,7 +239,7 @@ func (m *Manager) createCodePairing(ctx context.Context, role, by string, now ti
 	}
 	m.cancelLiveCode(now)
 	pc, ok := m.relay.(PairCodeRelay)
-	if !ok || !pc.OffersPairCodes() {
+	if !ok || !m.limits.OffersPairCodes() {
 		return nil, nil, errClaim
 	}
 	r, err := paircode.CanonicalRelay(m.relay.BaseURL())

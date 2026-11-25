@@ -32,7 +32,6 @@ type pcRelay struct {
 	// a PUT made while one is held fails the test.
 	permitHeld   func() bool
 	putWhileHeld bool
-	offers       bool
 	clock        func() time.Time
 	salts        func(now time.Time) []paircode.Salt
 	saltErr      error
@@ -47,8 +46,6 @@ type pcPut struct {
 	claimID, saltID string
 	tag, salt, blob []byte
 }
-
-func (r *pcRelay) OffersPairCodes() bool { return r.offers }
 
 func (r *pcRelay) PairCodeSalts(context.Context) ([]paircode.Salt, error) {
 	r.mu.Lock()
@@ -117,7 +114,8 @@ func newPCFixture(t *testing.T) (*devFixture, *pcRelay) {
 	// what a test sees (one PUT, or two).
 	at := time.Unix((paircode.Epoch(d.m.now())+1)*paircode.Hour+30*60, 0)
 	d.m.now = func() time.Time { return at }
-	pr := &pcRelay{stubRelay: d.relay, offers: true, clock: d.m.now, salts: currentSalts}
+	pr := &pcRelay{stubRelay: d.relay, clock: d.m.now, salts: currentSalts}
+	d.m.limits.PairCodes = json.RawMessage(`true`) // the relay advertised pair_codes at registration
 	d.m.relay = pr
 	return d, pr
 }
@@ -244,7 +242,7 @@ func TestPairCodeForm(t *testing.T) {
 
 func TestPairCodeClaimUnavailable(t *testing.T) {
 	for name, set := range map[string]func(*pcRelay, *devFixture){
-		"no pair_codes": func(pr *pcRelay, _ *devFixture) { pr.offers = false },
+		"no pair_codes": func(_ *pcRelay, d *devFixture) { d.m.limits.PairCodes = nil },
 		"a relay without code claims": func(pr *pcRelay, d *devFixture) {
 			d.m.relay = pr.stubRelay
 		},
@@ -258,8 +256,8 @@ func TestPairCodeClaimUnavailable(t *testing.T) {
 			if _, code := d.pcCreate(t, `{"role":"desktop","form":"code"}`); code != "claim_unavailable" {
 				t.Fatalf("%q", code)
 			}
-			if len(pr.puts) != 0 || permits != 0 {
-				t.Fatalf("%d PUTs, %d permits", len(pr.puts), permits)
+			if len(pr.puts) != 0 || permits != 0 || pr.saltCalls != 0 {
+				t.Fatalf("%d PUTs, %d permits, %d salt listings", len(pr.puts), permits, pr.saltCalls)
 			}
 		})
 	}
@@ -470,7 +468,7 @@ func TestPairCodeLimit(t *testing.T) {
 	}
 	// Refusals do not count.
 	n := len(d.m.st.PairCodeIssued)
-	d.m.relay.(*pcRelay).offers = false
+	d.m.limits.PairCodes = nil
 	_, _ = d.pcCreate(t, `{"role":"desktop","form":"code"}`)
 	if len(d.m.st.PairCodeIssued) != n {
 		t.Fatal("a refusal counted")

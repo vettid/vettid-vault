@@ -24,7 +24,7 @@
 //	Push            [path, headers, body]         → [status, code, headers, body]
 //	Transfer        [ticket, priority, wait_ms]   → [status]   (ok: admitted; busy: not within wait_ms)
 //	Counter         [op, key, a, b]               → [status, ...] (release R)
-//	HeavyPermit     [acquire | release]           → [status, "1" | "0"] (release R)
+//	HeavyPermit     [acquire | acquire_code | release] → [status, "1" | "0"] (release R; acquire_code 0.94.0)
 //	MarkDeleting    [vault_id]                    → [status] (0.51.0; the process's own vault only)
 //
 // Vault → supervisor (notifications): Lifecycle [event, vault_id,
@@ -184,6 +184,9 @@ const (
 // Heavy permit operations.
 const (
 	HeavyAcquire = "acquire"
+	// HeavyAcquireCode asks for the permit for a code pairing's
+	// derivation (0.94.0 §6.7.2): 256 MiB, never while a vault is opening.
+	HeavyAcquireCode = "acquire_code"
 	HeavyRelease = "release"
 )
 

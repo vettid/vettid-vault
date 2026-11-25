@@ -107,6 +107,11 @@ func (p *vproc) heavyCall(f [][]byte) [][]byte {
 			return hostproto.Strings(hostproto.StatusOK, "1")
 		}
 		return hostproto.Strings(hostproto.StatusOK, "0")
+	case vaultipc.HeavyAcquireCode:
+		if h.acquireCode(p.vaultID) {
+			return hostproto.Strings(hostproto.StatusOK, "1")
+		}
+		return hostproto.Strings(hostproto.StatusOK, "0")
 	case vaultipc.HeavyRelease:
 		h.release(p.vaultID)
 		return hostproto.Strings(hostproto.StatusOK, "1")

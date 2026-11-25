@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"errors"
+	"runtime/debug"
 	"time"
 
 	"github.com/vettid/vettid-vault/vms/handshake"
@@ -372,6 +373,8 @@ func (m *Manager) putCodeClaim(ctx context.Context, pc PairCodeRelay, purpose, r
 		if err != nil {
 			return errUnavailable
 		}
+		// x's 256 MiB back before the tag's: the permit admits one at a time.
+		debug.FreeOSMemory()
 		if tag, err = paircode.Tag(purpose, r, code, order[0].SR); err != nil {
 			return errUnavailable
 		}
@@ -421,7 +424,9 @@ func (m *Manager) underPermit(ctx context.Context, deadline time.Time, f func() 
 		return errPairBusy
 	}
 	defer rel()
-	return f()
+	err := f()
+	debug.FreeOSMemory() // the derivation's 256 MiB back before the permit goes (it admits that much)
+	return err
 }
 
 // unopenedPairing is the desktop or agent pairing pid that no device has

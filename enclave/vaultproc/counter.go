@@ -83,8 +83,18 @@ func (c chanCounter) GetVersion(ctx context.Context, key, version string) ([]byt
 // heavyPermit asks the supervisor for the heavy-derivation permit
 // (§11.14.3) and returns its release, or ok false.
 func heavyPermit(ch channel) func(ctx context.Context) (func(), bool) {
+	return permitFor(ch, vaultipc.HeavyAcquire)
+}
+
+// codePermit asks for the permit of a code pairing's derivation (0.94.0
+// §6.7.2: refused while an unlock is in flight, or without room).
+func codePermit(ch channel) func(ctx context.Context) (func(), bool) {
+	return permitFor(ch, vaultipc.HeavyAcquireCode)
+}
+
+func permitFor(ch channel, op string) func(ctx context.Context) (func(), bool) {
 	return func(ctx context.Context) (func(), bool) {
-		r, err := ch.call(ctx, vaultipc.KindHeavyPermit, []byte(vaultipc.HeavyAcquire))
+		r, err := ch.call(ctx, vaultipc.KindHeavyPermit, []byte(op))
 		if err != nil || !ok(r, 2) || string(r[1]) != "1" {
 			return nil, false
 		}

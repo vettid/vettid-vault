@@ -147,8 +147,14 @@ var _ enclave.Host = (*procHost)(nil)
 
 func newProcHost(s *Supervisor, cfg ProcConfig) *procHost {
 	cfg.defaults()
-	return &procHost{s: s, cfg: cfg, procs: map[string]*vproc{}, slots: make([]bool, cfg.MaxProcs),
+	h := &procHost{s: s, cfg: cfg, procs: map[string]*vproc{}, slots: make([]bool, cfg.MaxProcs),
 		opening: map[string]int{}, resuming: map[string]chan struct{}{}}
+	if s != nil && s.heavy != nil {
+		// A code pairing's permit is not given while a vault opens here
+		// (0.94.0 §6.7.2: unlocks go first).
+		s.heavy.opening = h.openingAny
+	}
+	return h
 }
 
 var (
@@ -395,6 +401,9 @@ func (h *procHost) exited(p *vproc) {
 	if h.s.xfers != nil {
 		h.s.xfers.releaseAll(p) // its transfers ended with it
 	}
+	if h.s.heavy != nil {
+		h.s.heavy.release(p.vaultID) // a permit it held ended with it, not at its lease
+	}
 	p.mu.Lock()
 	stopping := p.stopping
 	p.mu.Unlock()
@@ -534,6 +543,14 @@ func (h *procHost) reserve(ctx context.Context, j *enclave.Job) (done func(), ok
 		}
 		h.mu.Unlock()
 	}, true, nil
+}
+
+// openingAny reports whether any vault process is opening here (an
+// unlock, an enrolment or a recovery between its spawn and its answer).
+func (h *procHost) openingAny() bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return len(h.opening) > 0
 }
 
 // stop ends a process that holds no unlocked vault (closing its channel

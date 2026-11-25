@@ -289,8 +289,8 @@ func (m *Manager) abortTransfer(reason string, now time.Time) {
 		if inv.OpenJTI != "" {
 			m.denyJTI(inv.OpenJTI, now)
 		}
-		if !inv.Used && inv.ClaimID != "" {
-			m.queueDeleteClaim(inv.ClaimID, now)
+		if !inv.Used {
+			m.queueDeleteInviteClaim(inv, now)
 		}
 		delete(m.st.Invites, t.ID)
 	}

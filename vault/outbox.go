@@ -35,10 +35,6 @@ func (m *Manager) queueRevoke(kind, value string, now time.Time) {
 	m.queue(&OutboxEntry{ID: m.newID(now), Op: OpRevoke, Kind: kind, Value: value, Created: now})
 }
 
-func (m *Manager) queueDeleteClaim(id string, now time.Time) {
-	m.queue(&OutboxEntry{ID: m.newID(now), Op: OpDeleteClaim, Value: id, Created: now})
-}
-
 // queue adds e to the outbox. It is not sent before a state write stores
 // it (§11.14.2 "order of writes", §8.3: nothing leaves the vault before
 // the write that commits it): until then it is unstored, and a drain
@@ -703,6 +699,12 @@ func (m *Manager) drainOutbox(ctx context.Context) {
 			if RelayCode(err) == CodeClaimUnknown {
 				err = nil
 			}
+		case OpDeletePairCode:
+			// Idempotent at the relay; a relay without code claims has
+			// none to delete.
+			if pc, ok := m.relay.(PairCodeRelay); ok {
+				err = pc.DeletePairCode(ctx, e.Value)
+			}
 		}
 		m.dirty = true
 		if err != nil && e.Done && e.QuotaRefresh {
@@ -987,9 +989,7 @@ func (m *Manager) housekeeping(now time.Time) {
 			if inv.OpenJTI != "" {
 				m.denyJTI(inv.OpenJTI, now)
 			}
-			if inv.ClaimID != "" {
-				m.queueDeleteClaim(inv.ClaimID, now)
-			}
+			m.queueDeleteInviteClaim(inv, now)
 			delete(m.st.Invites, id)
 		} else if inv.Used && now.Sub(inv.Exp) > 24*time.Hour {
 			delete(m.st.Invites, id)

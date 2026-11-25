@@ -221,9 +221,7 @@ func (m *Manager) handleInit(ctx context.Context, raw []byte, sender ed25519.Pub
 	if inv.OpenJTI != "" {
 		m.queueRevoke("jti", inv.OpenJTI, now)
 	}
-	if inv.ClaimID != "" {
-		m.queueDeleteClaim(inv.ClaimID, now)
-	}
+	m.queueDeleteInviteClaim(inv, now)
 	m.respondFirst(pi, inv, sender, binding, now)
 	return ackAfterFlush
 }

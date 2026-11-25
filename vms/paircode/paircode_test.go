@@ -297,6 +297,9 @@ func TestSealChecksTheBinding(t *testing.T) {
 // and Open against testdata/vectors/pair-code.json (its generator runs
 // only under -tags vmsvectors).
 func TestKnownAnswers(t *testing.T) {
+	if TestCost {
+		t.Skip("the vectors are at the specified cost: run without -tags vettid_testcost")
+	}
 	raw, err := os.ReadFile("../../testdata/vectors/pair-code.json")
 	if err != nil {
 		t.Fatal(err)

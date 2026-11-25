@@ -20,6 +20,7 @@ import (
 	"github.com/vettid/vettid-vault/internal/vsock"
 	toolchain "github.com/vettid/vettid-vault/release"
 	"github.com/vettid/vettid-vault/vault"
+	"github.com/vettid/vettid-vault/vms/paircode"
 	"github.com/vettid/vettid-vault/vms/pins"
 	"github.com/vettid/vettid-vault/vms/recovery"
 )
@@ -35,7 +36,7 @@ const (
 )
 
 func platform() (supervisor.Config, error) {
-	if recovery.TestCost {
+	if recovery.TestCost || paircode.TestCost {
 		return supervisor.Config{}, errTestCost
 	}
 	kernelRelease, kernelHardened := toolchain.Kernel()
@@ -120,7 +121,7 @@ const vaultUIDBase = 200000
 
 // vaultPlatform is a vault process's pinned configuration.
 func vaultPlatform([]string) (vaultproc.Platform, error) {
-	if recovery.TestCost {
+	if recovery.TestCost || paircode.TestCost {
 		return vaultproc.Platform{}, errTestCost
 	}
 	return vaultproc.Platform{

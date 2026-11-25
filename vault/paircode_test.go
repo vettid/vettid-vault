@@ -765,21 +765,36 @@ func TestPairCodeNotInTheStoredOutbox(t *testing.T) {
 	// Deposits to the device fail, so whatever was queued stays stored.
 	d.relay.failMailbox = map[string]error{d.devPeer.Relay.Mailbox: errors.New("relay down")}
 	d.sendAs(d.self(), "device.pair.create", `{"role":"desktop","form":"code"}`)
-	var a pcAnswer
+	made := false
 	for _, inv := range d.m.st.Invites {
-		if inv.Code {
-			a.PairingID = inv.ID
-		}
+		made = made || inv.Code
 	}
-	if a.PairingID == "" {
+	if !made {
 		t.Fatal("no code pairing made")
 	}
-	kr := d.m.sessions[d.devPeer.ID]
-	if kr == nil || kr.Current() == nil {
-		t.Fatal("no session")
+	// A positive control: a durable message to the same device, stored.
+	d.m.mu.Lock()
+	d.m.sendTo(d.m.st.Devices[d.devPeer.ID], "sync.event", []byte(`{"kind":"control"}`), d.m.now())
+	if err := d.m.persist(context.Background(), false); err != nil {
+		d.m.mu.Unlock()
+		t.Fatal(err)
 	}
-	opened := 0
-	for _, e := range d.m.st.Outbox {
+	raw, err := json.Marshal(d.m.st)
+	d.m.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Open with the keys of the state as stored, not the keyring in memory.
+	var st State
+	if err := json.Unmarshal(raw, &st); err != nil {
+		t.Fatal(err)
+	}
+	kr, err := handshake.ImportKeyring(st.Devices[d.devPeer.ID].Sessions)
+	if err != nil || kr.Current() == nil {
+		t.Fatalf("the stored keyring: %v", err)
+	}
+	opened, control := 0, false
+	for _, e := range st.Outbox {
 		if e.Op != OpDeposit || len(e.Payload) == 0 {
 			continue
 		}
@@ -792,12 +807,15 @@ func TestPairCodeNotInTheStoredOutbox(t *testing.T) {
 			continue
 		}
 		opened++
+		control = control || bytes.Contains(in.Body, []byte(`"control"`))
 		var b map[string]json.RawMessage
 		if json.Unmarshal(in.Body, &b) == nil && b["code"] != nil {
 			t.Fatal("a stored deposit holds the answer with the code")
 		}
 	}
-	_ = opened
+	if opened < 1 || !control {
+		t.Fatalf("the positive control did not open (%d opened): the check proves nothing", opened)
+	}
 }
 
 // Fail closed: without a code permit the heavy-derivation permit admits
@@ -1023,7 +1041,7 @@ func TestPairCodeClaimDeletedElsewhere(t *testing.T) {
 			}
 		}
 		d.m.mu.Unlock()
-		if e == nil || !e.NotAfter.Equal(inv.Exp) {
+		if e == nil || !e.NotAfter.Equal(inv.Exp.Add(time.Minute)) {
 			t.Fatalf("the claim's deletion: %+v", e)
 		}
 		// The mailbox deletion settles it (once the deletion is recorded:
@@ -1070,5 +1088,44 @@ func TestPairCodeDuplicateInOneBatch(t *testing.T) {
 			}
 			return k
 		}())
+	}
+}
+
+// Only an answer marked sent-once (the pairing code) leaves the stored
+// outbox: any other with a cached copy (a LEASH value, a TURN credential)
+// keeps its durable deposit and its retries.
+func TestSentOnceIsOnlyForTheMarkedAnswer(t *testing.T) {
+	d := newDevFixture(t)
+	req := &envelope.Inner{ID: "01JB2Z6V9K3M4N5P6Q7R8S9TB0", Type: "item.get"}
+	stored := func(id string) bool {
+		for _, e := range d.m.st.Outbox {
+			if e.Op == OpDeposit && e.InnerID == id {
+				return true
+			}
+		}
+		return false
+	}
+	inMemory := func(id string) bool {
+		for _, e := range d.m.volatile {
+			if e.ID == id {
+				return true
+			}
+		}
+		return false
+	}
+	d.m.mu.Lock()
+	defer d.m.mu.Unlock()
+	out := &envelope.Inner{Type: req.Type, Re: req.ID, Status: envelope.StatusOK, Body: []byte(`{"value":"s3cr3t"}`)}
+	d.m.sendResponseCached(d.devPeer, req, "k1", out, json.RawMessage(`{"withheld":true}`), false, d.m.now())
+	if !stored(out.ID) || inMemory(out.ID) {
+		t.Fatal("a cached-copy answer not marked sent-once lost its durable deposit")
+	}
+	out2 := &envelope.Inner{Type: "device.pair.create", Re: "01JB2Z6V9K3M4N5P6Q7R8S9TB1", Status: envelope.StatusOK, Body: []byte(`{"code":"ABCDEFGH"}`)}
+	d.m.sendResponseCached(d.devPeer, &envelope.Inner{ID: out2.Re, Type: out2.Type}, "k2", out2, json.RawMessage(`{}`), true, d.m.now())
+	if stored(out2.ID) || !inMemory(out2.ID) {
+		t.Fatal("the sent-once answer is in the stored outbox")
+	}
+	if !bytes.Equal(out2.Body, make([]byte, len(out2.Body))) {
+		t.Fatal("the sent-once answer's body was not wiped once sealed")
 	}
 }

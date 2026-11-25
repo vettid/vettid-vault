@@ -216,7 +216,7 @@ func (m *Manager) hPairCreate(ctx context.Context, s *Session, in *envelope.Inne
 		if err != nil {
 			return nil, err
 		}
-		s.CacheResponseAs(cached) // no code in the response cache (§6.7.2)
+		s.CacheResponseAsSentOnce(cached) // no code in the response cache or the stored outbox (§6.7.2)
 		return answer, nil
 	}
 	inv, link, err := m.createInvite(ctx, role, PairingApprovalTTL, s.peer.ID, s.now)

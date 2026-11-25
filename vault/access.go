@@ -522,7 +522,7 @@ func (m *Manager) runHeld(ctx context.Context, h *HeldRequest, now time.Time) st
 	var ra *ReferAgainError
 	switch {
 	case herr == nil:
-		m.respondCached(p, in, key, body, s.cacheBody, now) // the handler's cached form too (CacheResponseAs)
+		m.respondCached(p, in, key, body, s.cacheBody, s.sentOnce, now) // the handler's cached form too (CacheResponseAs)
 		return "ok"
 	case errors.As(herr, &ra) && p.Kind == KindAgent:
 		// (§10.11, 0.85.3) Held again, the same request byte for byte,

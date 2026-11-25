@@ -152,7 +152,7 @@ func (m *Manager) queueDeleteInviteClaim(inv *Invite, now time.Time) {
 	if inv.Code {
 		// A code claim lives at most the pairing's 10 minutes at the relay:
 		// its deletion is retried until then (0.94.1).
-		e.Op, e.NotAfter = OpDeletePairCode, inv.Exp
+		e.Op, e.NotAfter = OpDeletePairCode, inv.Exp.Add(time.Minute) // a minute past the claim's end at the relay
 	}
 	m.queue(e)
 }

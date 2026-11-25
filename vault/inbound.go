@@ -841,7 +841,7 @@ func (m *Manager) dispatch(ctx context.Context, p *Peer, in *envelope.Inner, ep 
 			// (message.attachment.get, §10.5.1), or when a blob call has run
 			// (BlobHost, vote.site.sync).
 		case herr == nil:
-			m.respondCached(p, in, rkey, body, s.cacheBody, now)
+			m.respondCached(p, in, rkey, body, s.cacheBody, s.sentOnce, now)
 		case errors.As(herr, &he):
 			m.respondErrorBody(p, in, rkey, he.Code, he.Message, he.Body, now)
 		default:
@@ -862,15 +862,15 @@ func disp(eph bool) disposition {
 // respond deposits a response to the requester only (§9.1), and caches it
 // for 24 h (§8.2).
 func (m *Manager) respond(p *Peer, req *envelope.Inner, key string, body json.RawMessage, now time.Time) {
-	m.respondCached(p, req, key, body, nil, now)
+	m.respondCached(p, req, key, body, nil, false, now)
 }
 
 // respondCached is respond with cached, if not nil, as the body of the cached copy (Session.CacheResponseAs).
-func (m *Manager) respondCached(p *Peer, req *envelope.Inner, key string, body, cached json.RawMessage, now time.Time) {
+func (m *Manager) respondCached(p *Peer, req *envelope.Inner, key string, body, cached json.RawMessage, sentOnce bool, now time.Time) {
 	if body == nil {
 		body = json.RawMessage(`{}`)
 	}
-	m.sendResponseCached(p, req, key, &envelope.Inner{Type: req.Type, Re: req.ID, Status: envelope.StatusOK, Body: body}, cached, now)
+	m.sendResponseCached(p, req, key, &envelope.Inner{Type: req.Type, Re: req.ID, Status: envelope.StatusOK, Body: body}, cached, sentOnce, now)
 }
 
 // volatileKey is the response key of an answer to a volatile request
@@ -900,13 +900,13 @@ func (m *Manager) respondErrorBody(p *Peer, req *envelope.Inner, key, code, msg 
 }
 
 func (m *Manager) sendResponse(p *Peer, req *envelope.Inner, key string, out *envelope.Inner, now time.Time) {
-	m.sendResponseCached(p, req, key, out, nil, now)
+	m.sendResponseCached(p, req, key, out, nil, false, now)
 }
 
 // sendResponseCached is sendResponse with cached, if not nil, as the body of the copy kept for retransmissions:
 // the same id, time, type and re (a retransmission is the same answer), another body.
 func (m *Manager) sendResponseCached(p *Peer, req *envelope.Inner, key string, out *envelope.Inner, cached json.RawMessage,
-	now time.Time) {
+	sentOnce bool, now time.Time) {
 	if !envelope.ValidType(out.Type) {
 		out.Type = "error"
 	}
@@ -947,12 +947,13 @@ func (m *Manager) sendResponseCached(p *Peer, req *envelope.Inner, key string, o
 		}
 		m.st.Responses[key] = CachedResponse{Inner: j, Expires: now.Add(ResponseRetention)}
 	}
-	if keep != out {
-		// The answer holds what the vault must not keep (a pairing code,
-		// §6.7.2; a TURN credential, §10.10): sent once from memory after
-		// the batch's flush, never in the stored outbox, and its body
-		// wiped once sealed. A lost deposit is answered from the cache's
-		// copy on retransmission.
+	if keep != out && sentOnce {
+		// The answer holds what the vault must never keep (a pairing code,
+		// §6.7.2; CacheResponseAsSentOnce): sent once from memory after the
+		// batch's flush, never in the stored outbox, and its body wiped
+		// once sealed. A lost deposit is answered from the cache's copy on
+		// retransmission. (Other cached-copy answers, LEASH values and TURN
+		// credentials, keep their durable deposit with its retries.)
 		m.depositOnce(p, out)
 		return
 	}

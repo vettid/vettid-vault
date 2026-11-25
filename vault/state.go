@@ -99,11 +99,15 @@ type State struct {
 	// Held are requests held for an app's approval (§6.8), by approval id.
 	Held map[string]*HeldRequest `json:"held,omitempty"`
 	// PairCodeIssued are the times of the code pairings made in the last
-	// 24 hours (0.94.0 §6.7.2's issuance limit), PairCodeSeen the relay
-	// nonces of the epochs seen in the last hours (an epoch seen again
-	// must come with the same nonce).
+	// 24 hours (0.94.0 §6.7.2's issuance limit).
 	PairCodeIssued []time.Time `json:"pair_code_issued,omitempty"`
-	PairCodeSeen   []SeenSalt  `json:"pair_code_seen,omitempty"`
+	// PairCodeSeen are the relay nonces of the epochs seen in the last
+	// hours (an epoch seen again must come with the same nonce).
+	PairCodeSeen []SeenSalt `json:"pair_code_seen,omitempty"`
+	// PairCodeAttempts are the times of the code pairing requests that
+	// reached a derivation in the last hour, whatever their outcome (the
+	// attempt cap).
+	PairCodeAttempts []time.Time `json:"pair_code_attempts,omitempty"`
 	// Transfer is the direct transfer to a new phone in progress (§6.7.1),
 	// at most one.
 	Transfer *Transfer `json:"transfer,omitempty"`

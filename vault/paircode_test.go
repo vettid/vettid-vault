@@ -36,6 +36,7 @@ type pcRelay struct {
 	clock        func() time.Time
 	salts        func(now time.Time) []paircode.Salt
 	saltErr      error
+	saltCalls    int
 	putErrs      []error
 	deleteErr    error // when set, every DeletePairCode fails (after it is recorded)
 	puts         []pcPut
@@ -50,6 +51,9 @@ type pcPut struct {
 func (r *pcRelay) OffersPairCodes() bool { return r.offers }
 
 func (r *pcRelay) PairCodeSalts(context.Context) ([]paircode.Salt, error) {
+	r.mu.Lock()
+	r.saltCalls++
+	r.mu.Unlock()
 	if r.saltErr != nil {
 		return nil, r.saltErr
 	}
@@ -1179,4 +1183,198 @@ func TestPairCodeNoRoomIsBusyAtOnce(t *testing.T) {
 	if time.Since(start) > 2*time.Second {
 		t.Fatal("waited on no room")
 	}
+}
+
+// The attempt cap: every request that reaches a derivation counts,
+// whatever its outcome; the 11th in an hour is refused with limit before
+// anything is cancelled or derived; an hour later it is open again.
+func TestPairCodeAttemptCap(t *testing.T) {
+	if PairCodeAttemptsPerHour != 10 {
+		t.Fatalf("the chosen cap is 10 an hour, not %d", PairCodeAttemptsPerHour)
+	}
+	d, pr := newPCFixture(t)
+	unavailable := &relayclient.Error{Status: 503, Code: "unavailable"}
+	for i := range PairCodeAttemptsPerHour {
+		pr.putErrs = append(pr.putErrs, unavailable)
+		if _, code := d.pcCreate(t, `{"role":"desktop","form":"code"}`); code != "claim_unavailable" {
+			t.Fatalf("attempt %d: %q", i, code)
+		}
+	}
+	if len(d.m.st.PairCodeIssued) != 0 || len(d.m.st.PairCodeAttempts) != PairCodeAttemptsPerHour {
+		t.Fatalf("%d issued, %d attempts", len(d.m.st.PairCodeIssued), len(d.m.st.PairCodeAttempts))
+	}
+	puts, salts := len(pr.puts), pr.saltCalls
+	if _, code := d.pcCreate(t, `{"role":"desktop","form":"code"}`); code != "limit" || len(pr.puts) != puts || pr.saltCalls != salts {
+		t.Fatalf("the 11th: %q, %d PUTs, %d salt listings", code, len(pr.puts)-puts, pr.saltCalls-salts)
+	}
+	// A refusal before any derivation does not count.
+	pr.saltErr = unavailable
+	d.m.st.PairCodeAttempts = d.m.st.PairCodeAttempts[:PairCodeAttemptsPerHour-1]
+	if _, code := d.pcCreate(t, `{"role":"desktop","form":"code"}`); code != "claim_unavailable" || len(d.m.st.PairCodeAttempts) != PairCodeAttemptsPerHour-1 {
+		t.Fatalf("a salts refusal counted: %q, %d", code, len(d.m.st.PairCodeAttempts))
+	}
+	pr.saltErr = nil
+	// An hour later the stamps are gone.
+	for i := range d.m.st.PairCodeAttempts {
+		d.m.st.PairCodeAttempts[i] = d.m.now().Add(-time.Hour)
+	}
+	if _, code := d.pcCreate(t, `{"role":"desktop","form":"code"}`); code != "" || len(d.m.st.PairCodeAttempts) != 1 {
+		t.Fatalf("after an hour: %q, %d attempts", code, len(d.m.st.PairCodeAttempts))
+	}
+	// A refusal at the cap leaves the live code.
+	a := d.m.st.Invites
+	live := ""
+	for id, inv := range a {
+		if inv.Code {
+			live = id
+		}
+	}
+	for range PairCodeAttemptsPerHour {
+		d.m.st.PairCodeAttempts = append(d.m.st.PairCodeAttempts, d.m.now())
+	}
+	if _, code := d.pcCreate(t, `{"role":"desktop","form":"code"}`); code != "limit" || d.m.st.Invites[live] == nil {
+		t.Fatalf("%q; the live code cancelled by a capped request", code)
+	}
+}
+
+// The cap counts a request once its first permit is granted, once per
+// request whatever follows; busy before any derivation does not count;
+// the stamps are in the stored state.
+func TestPairCodeAttemptCounting(t *testing.T) {
+	taken := &relayclient.Error{Status: 409, Code: "code_taken"}
+	bad := &relayclient.Error{Status: 400, Code: "bad_request"}
+	t.Run("a code taken, then made: once", func(t *testing.T) {
+		d, pr := newPCFixture(t)
+		pr.putErrs = []error{taken}
+		if _, code := d.pcCreate(t, `{"role":"desktop","form":"code"}`); code != "" || len(d.m.st.PairCodeAttempts) != 1 || len(pr.puts) != 2 {
+			t.Fatalf("%q, %d attempts", code, len(d.m.st.PairCodeAttempts))
+		}
+	})
+	t.Run("busy before any derivation: not counted", func(t *testing.T) {
+		d, _ := newPCFixture(t)
+		pairCodePermitWait = 50 * time.Millisecond
+		defer func() { pairCodePermitWait = PairCodePermitWait }()
+		d.m.opt.CodePermit = func(context.Context) (func(), bool) { return nil, false }
+		if _, code := d.pcCreate(t, `{"role":"desktop","form":"code"}`); code != "busy" || len(d.m.st.PairCodeAttempts) != 0 {
+			t.Fatalf("%q, %d attempts", code, len(d.m.st.PairCodeAttempts))
+		}
+	})
+	t.Run("busy after a derivation: counted", func(t *testing.T) {
+		d, pr := newPCFixture(t)
+		pairCodePermitWait = 50 * time.Millisecond
+		defer func() { pairCodePermitWait = PairCodePermitWait }()
+		// Near the hour, two salts: the first refused at the PUT after the
+		// derivations ran, the other salt's tag refused its permit.
+		pr.salts = func(now time.Time) []paircode.Salt {
+			e := paircode.Epoch(now)
+			return []paircode.Salt{pcSalt(e-1, 1), pcSalt(e, 2)}
+		}
+		at := time.Unix((paircode.Epoch(d.m.now())+1)*paircode.Hour+60, 0)
+		d.m.now = func() time.Time { return at }
+		pr.clock = d.m.now
+		pr.putErrs = []error{bad}
+		n := 0
+		d.m.opt.CodePermit = func(context.Context) (func(), bool) {
+			n++
+			if n <= 2 {
+				return func() {}, true // x's, then the first tag's
+			}
+			return nil, false // the other salt's tag
+		}
+		if _, code := d.pcCreate(t, `{"role":"desktop","form":"code"}`); code != "busy" || len(d.m.st.PairCodeAttempts) != 1 {
+			t.Fatalf("%q, %d attempts", code, len(d.m.st.PairCodeAttempts))
+		}
+	})
+	t.Run("busy at the tag's permit after x: counted", func(t *testing.T) {
+		d, _ := newPCFixture(t)
+		pairCodePermitWait = 50 * time.Millisecond
+		defer func() { pairCodePermitWait = PairCodePermitWait }()
+		n := 0
+		d.m.opt.CodePermit = func(context.Context) (func(), bool) {
+			n++
+			if n == 1 {
+				return func() {}, true // x's
+			}
+			return nil, false // the tag's, under its own permit
+		}
+		if _, code := d.pcCreate(t, `{"role":"desktop","form":"code"}`); code != "busy" || len(d.m.st.PairCodeAttempts) != 1 {
+			t.Fatalf("%q, %d attempts", code, len(d.m.st.PairCodeAttempts))
+		}
+	})
+	t.Run("the stamp is the vault's time", func(t *testing.T) {
+		d, _ := newPCFixture(t) // its clock is ahead of the wall clock
+		if _, code := d.pcCreate(t, `{"role":"desktop","form":"code"}`); code != "" || len(d.m.st.PairCodeAttempts) != 1 ||
+			!d.m.st.PairCodeAttempts[0].Equal(d.m.now()) {
+			t.Fatalf("%q, stamps %v, the vault's time %v", code, d.m.st.PairCodeAttempts, d.m.now())
+		}
+	})
+	t.Run("a failed request retransmitted: once", func(t *testing.T) {
+		d, pr := newPCFixture(t)
+		pr.putErrs = []error{bad}
+		first, second := d.retransmit(t, "device.pair.create", `{"role":"desktop","form":"code"}`)
+		// The second is answered from the cache: no PUT, no stamp.
+		if !bytes.Equal(first, second) || len(pr.puts) != 1 || len(d.m.st.PairCodeAttempts) != 1 {
+			t.Fatalf("%s / %s, %d PUTs, %d attempts", first, second, len(pr.puts), len(d.m.st.PairCodeAttempts))
+		}
+	})
+	t.Run("both salts' permits granted: once", func(t *testing.T) {
+		d, pr := newPCFixture(t)
+		// Near the hour, two salts: x and the first tag each under a
+		// permit, the first PUT refused, the other's tag under a third
+		// permit, its PUT made.
+		pr.salts = func(now time.Time) []paircode.Salt {
+			e := paircode.Epoch(now)
+			return []paircode.Salt{pcSalt(e-1, 1), pcSalt(e, 2)}
+		}
+		at := time.Unix((paircode.Epoch(d.m.now())+1)*paircode.Hour+60, 0)
+		d.m.now = func() time.Time { return at }
+		pr.clock = d.m.now
+		pr.putErrs = []error{bad}
+		n := 0
+		d.m.opt.CodePermit = func(context.Context) (func(), bool) { n++; return func() {}, true }
+		if _, code := d.pcCreate(t, `{"role":"desktop","form":"code"}`); code != "" || n != 3 || len(pr.puts) != 2 ||
+			len(d.m.st.PairCodeAttempts) != 1 {
+			t.Fatalf("%q, %d permits, %d PUTs, %d attempts", code, n, len(pr.puts), len(d.m.st.PairCodeAttempts))
+		}
+	})
+	t.Run("the window's edges", func(t *testing.T) {
+		d, _ := newPCFixture(t)
+		now := d.m.now()
+		for _, c := range []struct {
+			name  string
+			at    time.Time
+			limit bool
+		}{
+			{"a stamp just inside the hour counts", now.Add(-time.Hour + time.Second), true},
+			{"a stamp an hour old does not", now.Add(-time.Hour), false},
+			{"a stamp in the future (the clock set back) counts", now.Add(2 * time.Hour), true},
+		} {
+			d.m.st.PairCodeAttempts = nil
+			for range PairCodeAttemptsPerHour - 1 {
+				d.m.st.PairCodeAttempts = append(d.m.st.PairCodeAttempts, now)
+			}
+			d.m.st.PairCodeAttempts = append(d.m.st.PairCodeAttempts, c.at)
+			if got := !d.m.pairCodeAttemptable(now); got != c.limit {
+				t.Fatalf("%s: at the cap %v", c.name, got)
+			}
+		}
+	})
+	t.Run("salts refused at the PUT: counted", func(t *testing.T) {
+		d, pr := newPCFixture(t)
+		pr.putErrs = []error{bad}
+		if _, code := d.pcCreate(t, `{"role":"desktop","form":"code"}`); code != "claim_unavailable" || len(d.m.st.PairCodeAttempts) != 1 {
+			t.Fatalf("%q, %d attempts", code, len(d.m.st.PairCodeAttempts))
+		}
+		// Stored: a lock and an unlock keep them.
+		if err := d.m.Lock(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		m, _, err := d.unlock(testPIN, 0, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(m.st.PairCodeAttempts) != 1 {
+			t.Fatalf("%d attempts after a lock and an unlock", len(m.st.PairCodeAttempts))
+		}
+	})
 }

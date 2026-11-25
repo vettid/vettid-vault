@@ -47,10 +47,14 @@ const (
 // derivation permit before it answers busy (chosen; not in the spec: the
 // capacity measure may tune it). Unlocks go first: the supervisor gives
 // no permit while an unlock is in flight.
-const PairCodePermitWait = 5 * time.Second
+const PairCodePermitWait = 5 * time.Second // in all, for a request's derivations together (0.94.1)
 
-// pairCodePermitWait is PairCodePermitWait (tests shorten it).
-var pairCodePermitWait = PairCodePermitWait
+// pairCodePermitWait is PairCodePermitWait (tests shorten it), and pcNow
+// the clock the wait is measured by (tests replace it).
+var (
+	pairCodePermitWait = PairCodePermitWait
+	pcNow              = time.Now
+)
 
 // pairCodeTokenTTL is the open token's lifetime: with its 60 s backdate
 // (tokenBackdate), its exp, the bundle's, is the creation plus 600 s.
@@ -71,16 +75,22 @@ type SeenSalt struct {
 
 // codePermit takes the permit for a code pairing's two derivations,
 // waiting up to PairCodePermitWait.
-func (m *Manager) codePermit(ctx context.Context) (func(), bool) {
-	if m.opt.CodePermit == nil {
+func (m *Manager) codePermit(ctx context.Context, deadline time.Time) (func(), bool) {
+	// Fail closed: without a code permit of its own the vault takes the
+	// heavy-derivation permit (the recovery wrap's); only with neither
+	// (development, tests) are the derivations unadmitted.
+	take := m.opt.CodePermit
+	if take == nil {
+		take = m.opt.HeavyPermit
+	}
+	if take == nil {
 		return func() {}, true
 	}
-	end := time.Now().Add(pairCodePermitWait)
 	for {
-		if rel, ok := m.opt.CodePermit(ctx); ok {
+		if rel, ok := take(ctx); ok {
 			return rel, true
 		}
-		if time.Now().After(end) {
+		if !pcNow().Before(deadline) {
 			return nil, false
 		}
 		select {
@@ -138,11 +148,13 @@ func (m *Manager) queueDeleteInviteClaim(inv *Invite, now time.Time) {
 	if inv.ClaimID == "" {
 		return
 	}
-	op := OpDeleteClaim
+	e := &OutboxEntry{ID: m.newID(now), Op: OpDeleteClaim, Value: inv.ClaimID, Created: now}
 	if inv.Code {
-		op = OpDeletePairCode
+		// A code claim lives at most the pairing's 10 minutes at the relay:
+		// its deletion is retried until then (0.94.1).
+		e.Op, e.NotAfter = OpDeletePairCode, inv.Exp
 	}
-	m.queue(&OutboxEntry{ID: m.newID(now), Op: op, Value: inv.ClaimID, Created: now})
+	m.queue(e)
 }
 
 // noteSeenSalts records the checked list's nonces and drops those older
@@ -221,7 +233,7 @@ func (m *Manager) createCodePairing(ctx context.Context, role, by string, now ti
 	// 2. The salts, checked; the entry current by the vault's clock.
 	listed, err := pc.PairCodeSalts(ctx)
 	if err != nil {
-		return nil, nil, errPairRelay
+		return nil, nil, errClaim // (0.94.1) not retried: the app falls back to the link
 	}
 	checked, err := paircode.CheckSalts(r, listed, now, m.seenSalts())
 	var refused *paircode.RefusedError
@@ -255,8 +267,10 @@ func (m *Manager) createCodePairing(ctx context.Context, role, by string, now ti
 	}
 	defer suite.Wipe(bj) // it holds the open token
 
+	// (0.94.1) One wait for room per request, for all its derivations.
+	deadline := pcNow().Add(pairCodePermitWait)
 	for try := 0; try <= pairCodeRetries; try++ {
-		code, claimID, refusedFirst, err := m.putCodeClaim(ctx, pc, purpose, r, order, bj)
+		code, claimID, refusedFirst, err := m.putCodeClaim(ctx, pc, purpose, r, order, bj, deadline)
 		if refusedFirst && len(order) > 1 {
 			order = order[1:] // the relay refused that salt: later codes go to the other at once
 		}
@@ -271,7 +285,9 @@ func (m *Manager) createCodePairing(ctx context.Context, role, by string, now ti
 			quoted := make([]byte, 0, paircode.Length+2)
 			quoted = append(append(append(quoted, '"'), code...), '"')
 			suite.Wipe(code)
-			out := strictjson.NewBuilder().String("pairing_id", id).Raw("code", quoted).
+			// Sized up front, so that no grown-out copy of the code is left
+			// behind; the answer itself is wiped once sealed (depositOnce).
+			out := strictjson.NewBuilder().Grow(256+len(id)+len(r)).String("pairing_id", id).Raw("code", quoted).
 				String("exp", exp.Format(time.RFC3339)).String("r", r).Bytes()
 			suite.Wipe(quoted)
 			kept := strictjson.NewBuilder().String("pairing_id", id).
@@ -282,14 +298,16 @@ func (m *Manager) createCodePairing(ctx context.Context, role, by string, now ti
 		case errors.Is(err, errSaltsRefusedAtPut):
 			m.denyUnusedToken(jti, exp, now)
 			return nil, nil, m.saltsRefused("put_refused", now)
+		case claimID != "":
+			// (0.94.1) A failed PUT (a 429, a 5xx, no answer: a lost 201
+			// may hide in it) is not retried. The claim is deleted, retried
+			// until the pairing's 10 minutes end, the token denylisted, and
+			// the app falls back to the link.
+			m.denyUnusedToken(jti, exp, now)
+			m.queue(&OutboxEntry{ID: m.newID(now), Op: OpDeletePairCode, Value: claimID, Created: now, NotAfter: exp})
+			return nil, nil, errClaim
 		default:
 			m.denyUnusedToken(jti, exp, now)
-			if claimID != "" {
-				// The PUT's outcome is not known (no answer, a 5xx): the
-				// relay may hold the claim. Deleted (idempotent), so its
-				// bundle does not stay redeemable for 10 minutes.
-				m.queue(&OutboxEntry{ID: m.newID(now), Op: OpDeletePairCode, Value: claimID, Created: now})
-			}
 			return nil, nil, err
 		}
 	}
@@ -319,7 +337,7 @@ var (
 // error whose outcome at the relay is not known, the claim id is
 // returned too, for its deletion.
 func (m *Manager) putCodeClaim(ctx context.Context, pc PairCodeRelay, purpose, r string, order []paircode.Salt,
-	bundle []byte) (_ []byte, unknownClaim string, refusedFirst bool, err error) {
+	bundle []byte, deadline time.Time) (_ []byte, unknownClaim string, refusedFirst bool, err error) {
 	code, err := paircode.NewCode()
 	if err != nil {
 		return nil, "", false, errUnavailable
@@ -338,7 +356,7 @@ func (m *Manager) putCodeClaim(ctx context.Context, pc PairCodeRelay, purpose, r
 		return nil, "", false, errUnavailable
 	}
 	var blob, tag []byte
-	if err := m.underPermit(ctx, func() error {
+	if err := m.underPermit(ctx, deadline, func() error {
 		// x, then the tag: one derivation at a time.
 		x, err := paircode.X(purpose, r, code, sc)
 		if err != nil {
@@ -366,7 +384,7 @@ func (m *Manager) putCodeClaim(ctx context.Context, pc PairCodeRelay, purpose, r
 			break // at most 2 PUTs for the salt
 		}
 		if i > 0 {
-			if err := m.underPermit(ctx, func() error {
+			if err := m.underPermit(ctx, deadline, func() error {
 				var err error
 				if tag, err = paircode.Tag(purpose, r, code, e.SR); err != nil {
 					return errUnavailable
@@ -396,9 +414,9 @@ func (m *Manager) putCodeClaim(ctx context.Context, pc PairCodeRelay, purpose, r
 }
 
 // underPermit runs one code pairing's derivations under the heavy
-// permit, waiting up to PairCodePermitWait for it (busy without).
-func (m *Manager) underPermit(ctx context.Context, f func() error) error {
-	rel, ok := m.codePermit(ctx)
+// permit, waiting for it until the request's deadline (busy without).
+func (m *Manager) underPermit(ctx context.Context, deadline time.Time, f func() error) error {
+	rel, ok := m.codePermit(ctx, deadline)
 	if !ok {
 		return errPairBusy
 	}

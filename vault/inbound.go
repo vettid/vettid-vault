@@ -947,7 +947,32 @@ func (m *Manager) sendResponseCached(p *Peer, req *envelope.Inner, key string, o
 		}
 		m.st.Responses[key] = CachedResponse{Inner: j, Expires: now.Add(ResponseRetention)}
 	}
+	if keep != out {
+		// The answer holds what the vault must not keep (a pairing code,
+		// §6.7.2; a TURN credential, §10.10): sent once from memory after
+		// the batch's flush, never in the stored outbox, and its body
+		// wiped once sealed. A lost deposit is answered from the cache's
+		// copy on retransmission.
+		m.depositOnce(p, out)
+		return
+	}
 	m.sealAndQueue(p, out)
+}
+
+// depositOnce seals out for p and deposits it from memory only (as a
+// volatile answer is), then wipes its body.
+func (m *Manager) depositOnce(p *Peer, out *envelope.Inner) {
+	defer suite.Wipe(out.Body)
+	kr := m.sessions[p.ID]
+	if kr == nil || kr.Current() == nil || p.RelayConflict != nil || p.Fork != nil {
+		return
+	}
+	raw, err := m.sealFor(p, kr.Current(), out)
+	if err != nil {
+		return
+	}
+	m.volatile = append(m.volatile, &OutboxEntry{ID: out.ID, Op: OpDeposit, PeerID: p.ID, RelayURL: p.Relay.URL,
+		Mailbox: p.Relay.Mailbox, Payload: raw, BestEffort: true, Created: m.now()})
 }
 
 // fits reports whether in, sealed in session mode, stays within §5.5's
@@ -974,6 +999,16 @@ func (m *Manager) resendCached(p *Peer, raw []byte) {
 	in.Features = m.featuresFor(p)
 	if !m.fits(in) {
 		in = tooLarge(in) // cached by a release before §8.1's rule
+	}
+	// A duplicate of a request whose answer is still waiting in memory
+	// (sent once, depositOnce: a pairing code) goes behind it, in memory
+	// too, so the device gets the answer with the code first (0.94.1
+	// §6.7.2 step 6).
+	for _, v := range m.volatile {
+		if v.ID == in.ID && v.PeerID == p.ID {
+			m.depositOnce(p, in)
+			return
+		}
 	}
 	m.sealAndQueue(p, in)
 }

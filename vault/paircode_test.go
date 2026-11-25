@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -35,6 +36,7 @@ type pcRelay struct {
 	salts        func(now time.Time) []paircode.Salt
 	saltErr      error
 	putErrs      []error
+	deleteErr    error // when set, every DeletePairCode fails (after it is recorded)
 	puts         []pcPut
 	deletes      []string
 }
@@ -70,7 +72,7 @@ func (r *pcRelay) DeletePairCode(_ context.Context, claimID string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.deletes = append(r.deletes, claimID)
-	return nil
+	return r.deleteErr
 }
 
 const pcR = "https://relay.example.org"
@@ -379,9 +381,9 @@ func TestPairCodeTaken(t *testing.T) {
 	if _, code := d.pcCreate(t, `{"role":"desktop","form":"code"}`); code != "relay_error" || len(pr.puts) != 4 {
 		t.Fatalf("%q, %d PUTs", code, len(pr.puts))
 	}
-	// Another relay error: relay_error at once.
+	// (0.94.1) A failed PUT (here a 5xx): not retried, claim_unavailable.
 	pr.puts, pr.putErrs = nil, []error{&relayclient.Error{Status: 503, Code: "unavailable"}}
-	if _, code := d.pcCreate(t, `{"role":"desktop","form":"code"}`); code != "relay_error" || len(pr.puts) != 1 {
+	if _, code := d.pcCreate(t, `{"role":"desktop","form":"code"}`); code != "claim_unavailable" || len(pr.puts) != 1 {
 		t.Fatalf("%q, %d PUTs", code, len(pr.puts))
 	}
 }
@@ -613,14 +615,30 @@ func TestPairCodeFailuresDenyTheToken(t *testing.T) {
 func TestPairCodeUnknownPutDeletesTheClaim(t *testing.T) {
 	d, pr := newPCFixture(t)
 	pr.putErrs = []error{&relayclient.Error{Status: 503, Code: "unavailable"}}
-	if _, code := d.pcCreate(t, `{"role":"desktop","form":"code"}`); code != "relay_error" {
+	pr.deleteErr = &relayclient.Error{Status: 503, Code: "unavailable"} // the deletion stays queued for its retries
+	if _, code := d.pcCreate(t, `{"role":"desktop","form":"code"}`); code != "claim_unavailable" {
 		t.Fatalf("%q", code)
 	}
 	if len(pr.puts) != 1 || !slices.Contains(pr.deletes, pr.puts[0].claimID) {
 		t.Fatalf("the claim is not deleted (%d PUTs, deletes %d)", len(pr.puts), len(pr.deletes))
 	}
+	// Retried until the pairing's 10 minutes end (0.94.1).
+	found := false
+	for _, e := range d.m.st.Outbox {
+		if e.Op == OpDeletePairCode && e.Value == pr.puts[0].claimID {
+			found = true
+			want := d.m.now().UTC().Truncate(time.Second).Add(paircode.TTL)
+			if e.NotAfter.IsZero() || e.NotAfter.After(want) {
+				t.Fatalf("its retries end at %v, want by %v", e.NotAfter, want)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("the deletion is not in the outbox")
+	}
 	// A code_taken (deleted by the relay) and a refused salt (never
 	// stored) delete nothing.
+	pr.deleteErr = nil
 	for _, e := range []error{&relayclient.Error{Status: 409, Code: "code_taken"}, &relayclient.Error{Status: 400, Code: "bad_request"}} {
 		pr.puts, pr.deletes, pr.putErrs = nil, nil, []error{e, e, e, e}
 		_, _ = d.pcCreate(t, `{"role":"desktop","form":"code"}`)
@@ -736,5 +754,321 @@ func TestPairCodeTokenLimit(t *testing.T) {
 	d.m.limits.OpenTokenMaxLifetimeSeconds = 600
 	if _, code := d.pcCreate(t, `{"role":"desktop","form":"code"}`); code != "claim_unavailable" || len(pr.puts) != 0 {
 		t.Fatalf("%q", code)
+	}
+}
+
+// The answer with the code is never in saved state: no stored outbox
+// deposit opens, with the state's own session keys, to an inner that holds
+// the code; the device got it once, from memory.
+func TestPairCodeNotInTheStoredOutbox(t *testing.T) {
+	d, _ := newPCFixture(t)
+	// Deposits to the device fail, so whatever was queued stays stored.
+	d.relay.failMailbox = map[string]error{d.devPeer.Relay.Mailbox: errors.New("relay down")}
+	d.sendAs(d.self(), "device.pair.create", `{"role":"desktop","form":"code"}`)
+	var a pcAnswer
+	for _, inv := range d.m.st.Invites {
+		if inv.Code {
+			a.PairingID = inv.ID
+		}
+	}
+	if a.PairingID == "" {
+		t.Fatal("no code pairing made")
+	}
+	kr := d.m.sessions[d.devPeer.ID]
+	if kr == nil || kr.Current() == nil {
+		t.Fatal("no session")
+	}
+	opened := 0
+	for _, e := range d.m.st.Outbox {
+		if e.Op != OpDeposit || len(e.Payload) == 0 {
+			continue
+		}
+		env, err := envelope.Parse(e.Payload)
+		if err != nil {
+			continue
+		}
+		in, err := kr.Current().OpenSent(env)
+		if err != nil {
+			continue
+		}
+		opened++
+		var b map[string]json.RawMessage
+		if json.Unmarshal(in.Body, &b) == nil && b["code"] != nil {
+			t.Fatal("a stored deposit holds the answer with the code")
+		}
+	}
+	_ = opened
+}
+
+// Fail closed: without a code permit the heavy-derivation permit admits
+// the derivations; refused, the answer is busy.
+func TestPairCodeFallsBackToTheHeavyPermit(t *testing.T) {
+	d, pr := newPCFixture(t)
+	pairCodePermitWait = 50 * time.Millisecond
+	defer func() { pairCodePermitWait = PairCodePermitWait }()
+	d.m.opt.CodePermit = nil
+	asked := 0
+	d.m.opt.HeavyPermit = func(context.Context) (func(), bool) { asked++; return nil, false }
+	if _, code := d.pcCreate(t, `{"role":"desktop","form":"code"}`); code != "busy" || asked == 0 || len(pr.puts) != 0 {
+		t.Fatalf("%q, asked %d", code, asked)
+	}
+	d.m.opt.HeavyPermit = func(context.Context) (func(), bool) { asked++; return func() {}, true }
+	if _, code := d.pcCreate(t, `{"role":"desktop","form":"code"}`); code != "" {
+		t.Fatalf("%q", code)
+	}
+}
+
+// One wait for room per request (0.94.1): the other salt's permit waits
+// only for what is left of it.
+func TestPairCodeOneDeadlinePerRequest(t *testing.T) {
+	d, pr := newPCFixture(t)
+	var fake time.Time
+	pcNow = func() time.Time { return fake }
+	defer func() { pcNow = time.Now }()
+	fake = time.Unix(1_000_000, 0)
+	pr.salts = func(now time.Time) []paircode.Salt {
+		e := paircode.Epoch(now)
+		return []paircode.Salt{pcSalt(e-1, 1), pcSalt(e, 2)}
+	}
+	at := time.Unix((paircode.Epoch(d.m.now())+1)*paircode.Hour+60, 0)
+	d.m.now = func() time.Time { return at }
+	pr.clock = d.m.now
+	pr.putErrs = []error{&relayclient.Error{Status: 400, Code: "bad_request"}}
+	calls := 0
+	d.m.opt.CodePermit = func(context.Context) (func(), bool) {
+		calls++
+		if calls == 1 {
+			fake = fake.Add(4 * time.Second) // the first took 4 of the 5 s
+			return func() {}, true
+		}
+		fake = fake.Add(time.Second / 4)
+		return nil, false
+	}
+	if _, code := d.pcCreate(t, `{"role":"desktop","form":"code"}`); code != "busy" {
+		t.Fatalf("%q", code)
+	}
+	// 1 s was left: 4 refused asks of 250 ms, then busy (a 5 s wait of its
+	// own would ask 20 times).
+	if calls > 7 {
+		t.Fatalf("the other salt's permit was asked %d times: a wait of its own", calls-1)
+	}
+}
+
+// A limit refusal leaves the live code as it was.
+func TestPairCodeLimitKeepsTheLiveCode(t *testing.T) {
+	d, _ := newPCFixture(t)
+	a, code := d.pcCreate(t, `{"role":"desktop","form":"code"}`)
+	if code != "" {
+		t.Fatal(code)
+	}
+	now := d.m.now()
+	for range PairCodesPerHour {
+		d.m.st.PairCodeIssued = append(d.m.st.PairCodeIssued, now)
+	}
+	if _, code := d.pcCreate(t, `{"role":"desktop","form":"code"}`); code != "limit" {
+		t.Fatalf("%q", code)
+	}
+	if d.m.st.Invites[a.PairingID] == nil {
+		t.Fatal("a refusal cancelled the live code")
+	}
+}
+
+// The windows' edges: an hour and a day, exactly.
+func TestPairCodeLimitEdges(t *testing.T) {
+	d, _ := newPCFixture(t)
+	now := d.m.now()
+	stamps := func(age time.Duration, n int) {
+		d.m.st.PairCodeIssued = nil
+		for range n {
+			d.m.st.PairCodeIssued = append(d.m.st.PairCodeIssued, now.Add(-age))
+		}
+	}
+	stamps(time.Hour-time.Second, PairCodesPerHour)
+	if d.m.pairCodeIssuable(now) {
+		t.Fatal("5 within the hour")
+	}
+	stamps(time.Hour, PairCodesPerHour)
+	if !d.m.pairCodeIssuable(now) {
+		t.Fatal("an hour old counts in the hour")
+	}
+	stamps(24*time.Hour-time.Second, PairCodesPerDay)
+	if d.m.pairCodeIssuable(now) {
+		t.Fatal("20 within the day")
+	}
+	stamps(24*time.Hour, PairCodesPerDay)
+	if !d.m.pairCodeIssuable(now) || len(d.m.st.PairCodeIssued) != 0 {
+		t.Fatal("a day old is dropped")
+	}
+}
+
+// An agent pairing counts for the limit as a desktop's does.
+func TestPairCodeAgentCounts(t *testing.T) {
+	d, _ := newPCFixture(t)
+	d.m.addFeature(&namedFeature{name: featureLeash})
+	if _, code := d.pcCreate(t, `{"role":"agent","form":"code"}`); code != "" || len(d.m.st.PairCodeIssued) != 1 {
+		t.Fatalf("%q, %d stamps", code, len(d.m.st.PairCodeIssued))
+	}
+}
+
+// The previous hour's nonce is held to across the hour: seen at minute 1
+// of hour N+1, listed again with another nonce at minute 5, refused.
+func TestPairCodePreviousEpochAcrossTheHour(t *testing.T) {
+	d, pr := newPCFixture(t)
+	n := paircode.Epoch(d.m.now()) + 1
+	at := time.Unix((n+1)*paircode.Hour+60, 0)
+	d.m.now = func() time.Time { return at }
+	pr.clock = d.m.now
+	pr.salts = func(time.Time) []paircode.Salt { return []paircode.Salt{pcSalt(n, 0x61), pcSalt(n+1, 0x62)} }
+	if _, code := d.pcCreate(t, `{"role":"desktop","form":"code"}`); code != "" {
+		t.Fatal(code)
+	}
+	// A request at minute 3 whose list (allowed) leaves the previous hour
+	// out: what was seen of it is kept.
+	at = at.Add(2 * time.Minute)
+	pr.salts = func(time.Time) []paircode.Salt { return []paircode.Salt{pcSalt(n+1, 0x62)} }
+	if _, code := d.pcCreate(t, `{"role":"desktop","form":"code"}`); code != "" {
+		t.Fatal(code)
+	}
+	at = at.Add(2 * time.Minute)
+	pr.salts = func(time.Time) []paircode.Salt { return []paircode.Salt{pcSalt(n, 0x6f), pcSalt(n+1, 0x62)} }
+	if _, code := d.pcCreate(t, `{"role":"desktop","form":"code"}`); code != "claim_unavailable" {
+		t.Fatalf("%q", code)
+	}
+	if last := d.m.st.Audit[len(d.m.st.Audit)-1]; last.Ref != paircode.ReasonChanged {
+		t.Fatalf("audit %+v", last)
+	}
+}
+
+// (0.94.1) A salts read that fails answers claim_unavailable, with nothing
+// minted or sent.
+func TestPairCodeSaltsReadFails(t *testing.T) {
+	d, pr := newPCFixture(t)
+	pr.saltErr = &relayclient.Error{Status: 503, Code: "unavailable"}
+	issued := len(d.m.st.Issued)
+	if _, code := d.pcCreate(t, `{"role":"desktop","form":"code"}`); code != "claim_unavailable" || len(pr.puts) != 0 || len(d.m.st.Issued) != issued {
+		t.Fatalf("%q", code)
+	}
+}
+
+// busy after the token was minted denylists it too.
+func TestPairCodeBusyDeniesTheToken(t *testing.T) {
+	d, _ := newPCFixture(t)
+	pairCodePermitWait = 50 * time.Millisecond
+	defer func() { pairCodePermitWait = PairCodePermitWait }()
+	d.m.opt.CodePermit = func(context.Context) (func(), bool) { return nil, false }
+	before := d.deniedOpenTokens()
+	if _, code := d.pcCreate(t, `{"role":"desktop","form":"code"}`); code != "busy" || d.deniedOpenTokens() != before+1 {
+		t.Fatalf("%q", code)
+	}
+}
+
+// device.pair.reject of an invite that is not an unopened desktop or agent
+// pairing (a connection's, a transfer's, an app's, an opened one) is
+// not_found, and the invite stays.
+func TestPairRejectLeavesOtherInvites(t *testing.T) {
+	d, _ := newPCFixture(t)
+	exp := d.m.now().Add(time.Hour)
+	for id, inv := range map[string]*Invite{
+		"inv-connection": {Kind: KindConnection, Exp: exp, OpenJTI: "j-c", ClaimID: "abcdefghijklmnopqrstuvwxya"},
+		"inv-transfer":   {Kind: KindApp, Transfer: true, Exp: exp, OpenJTI: "j-t"},
+		"inv-app":        {Kind: KindApp, Exp: exp, OpenJTI: "j-a"},
+		"inv-opened":     {Kind: KindDesktop, Used: true, Exp: exp, OpenJTI: "j-o", Code: true},
+	} {
+		inv.ID = id
+		d.m.st.Invites[id] = inv
+		if c := d.errorCode(t, "device.pair.reject", `{"pairing_id":"`+id+`"}`); c != "not_found" {
+			t.Errorf("%s: %q", id, c)
+		}
+		if d.m.st.Invites[id] == nil {
+			t.Errorf("%s: dropped", id)
+		}
+	}
+}
+
+// A code invite's claim is deleted by the code claim route at hs.init and
+// when the vault is deleted; a mailbox deletion settles those deletes.
+func TestPairCodeClaimDeletedElsewhere(t *testing.T) {
+	t.Run("hs.init", func(t *testing.T) {
+		d, _ := newPCFixture(t)
+		a, code := d.pcCreate(t, `{"role":"desktop","form":"code"}`)
+		if code != "" {
+			t.Fatal(code)
+		}
+		inv := *d.m.st.Invites[a.PairingID]
+		n := newNewcomer(t, 0x50)
+		n.hsInit(t, d.m, handshake.PurposeDesktop, a.PairingID, "p1")
+		if !d.m.st.Invites[a.PairingID].Used {
+			t.Fatal("hs.init did not open the pairing")
+		}
+		if !slices.Contains(d.outboxOps(OpDeletePairCode), inv.ClaimID) && !slices.Contains(d.m.relay.(*pcRelay).deletes, inv.ClaimID) {
+			t.Fatal("the claim is not deleted at hs.init")
+		}
+		if slices.Contains(d.outboxOps(OpDeleteClaim), inv.ClaimID) {
+			t.Fatal("deleted by the claim route")
+		}
+	})
+	t.Run("vault deleted", func(t *testing.T) {
+		d, _ := newPCFixture(t)
+		a, code := d.pcCreate(t, `{"role":"desktop","form":"code"}`)
+		if code != "" {
+			t.Fatal(code)
+		}
+		inv := *d.m.st.Invites[a.PairingID]
+		d.m.mu.Lock()
+		d.m.beginDelete("app", d.m.now())
+		var e *OutboxEntry
+		for _, x := range d.m.st.Outbox {
+			if x.Op == OpDeletePairCode && x.Value == inv.ClaimID {
+				e = x
+			}
+		}
+		d.m.mu.Unlock()
+		if e == nil || !e.NotAfter.Equal(inv.Exp) {
+			t.Fatalf("the claim's deletion: %+v", e)
+		}
+		// The mailbox deletion settles it (once the deletion is recorded:
+		// the host's mark, NoHostMark here).
+		d.m.mu.Lock()
+		d.m.markOK = true
+		d.m.deleteMailbox(context.Background())
+		d.m.mu.Unlock()
+		if !e.Done {
+			t.Fatal("not settled by the mailbox deletion")
+		}
+	})
+}
+
+// (0.94.1 step 6 e) A duplicate of a request still running is answered
+// only once the first completes, from the cache: in one batch, the first
+// answer has the code and the second none.
+func TestPairCodeDuplicateInOneBatch(t *testing.T) {
+	d, pr := newPCFixture(t)
+	id, _ := envelope.NewULID(testNow())
+	var msgs []Message
+	for n := range 2 {
+		raw, err := d.ep.Seal(&envelope.Inner{ID: id, Type: "device.pair.create", TS: testNow(), Body: []byte(`{"role":"desktop","form":"code"}`),
+			Features: []string{handshake.CapConfirm}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		msgs = append(msgs, Message{MsgID: fmt.Sprintf("dup%d", n), Sender: relayauth.EncodeKey(d.devPeer.Relay.PK), Payload: raw})
+	}
+	_ = d.m.ProcessBatch(context.Background(), &fakeCollector{}, msgs)
+	var bodies []map[string]string
+	for _, x := range d.appInbox() {
+		if x.Re == id {
+			var b map[string]string
+			_ = json.Unmarshal(x.Body, &b)
+			bodies = append(bodies, b)
+		}
+	}
+	if len(pr.puts) != 1 || len(bodies) != 2 || bodies[0]["code"] == "" || bodies[1]["code"] != "" || bodies[1]["pairing_id"] != bodies[0]["pairing_id"] {
+		t.Fatalf("%d PUTs, %d answers: %v", len(pr.puts), len(bodies), func() []string {
+			var k []string
+			for _, b := range bodies {
+				k = append(k, b["pairing_id"]+"/"+fmt.Sprint(len(b["code"])))
+			}
+			return k
+		}())
 	}
 }

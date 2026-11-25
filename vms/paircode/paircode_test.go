@@ -2,13 +2,17 @@ package paircode
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
+	"strings"
 	"testing"
 	"time"
+	"unicode"
 
 	"github.com/vettid/vettid-vault/vms/altchan"
 	"github.com/vettid/vettid-vault/vms/suite"
@@ -443,5 +447,58 @@ func TestAppendSymbols(t *testing.T) {
 	// Stops at 8 symbols, across calls.
 	if got := appendSymbols(appendSymbols(nil, r[:4]), r[4:]); string(got) != want {
 		t.Fatalf("%q across calls, want %q", got, want)
+	}
+}
+
+// Removed is exactly Unicode 15.0's Zs and Pd and the nine others: checked
+// against Go's tables while they are 15.0 (the set stays 15.0's after).
+func TestRemovedIsUnicode15(t *testing.T) {
+	// Pinned whatever Go's tables are: the 53 code points, by their
+	// sorted U+XXXX list's SHA-256 (a Unicode 16 Pd such as U+10D6E added
+	// to the table fails here).
+	var list []string
+	for _, c := range RemovedSet() {
+		list = append(list, fmt.Sprintf("U+%04X", c))
+	}
+	sum := sha256.Sum256([]byte(strings.Join(list, "\n")))
+	if len(list) != 17+26+10 || hex.EncodeToString(sum[:]) != "20979577d629735273cc3bc2a81cea1016e5bacc25bdd5494fe2209f02bc1b7d" {
+		t.Fatalf("the removed set changed: %d entries, digest %x", len(list), sum)
+	}
+	if unicode.Version != "15.0.0" {
+		t.Skipf("Go's tables are Unicode %s; the set stays 15.0's (pinned above)", unicode.Version)
+	}
+	others := map[rune]bool{0x09: true, 0x0A: true, 0x0D: true, 0x2212: true, 0x00AD: true, 0x200B: true, 0x200E: true,
+		0x200F: true, 0x2060: true, 0xFEFF: true}
+	for c := rune(0); c <= unicode.MaxRune; c++ {
+		want := unicode.Is(unicode.Zs, c) || unicode.Is(unicode.Pd, c) || others[c]
+		if IsRemoved(c) != want {
+			t.Errorf("U+%04X: removed %v, want %v", c, IsRemoved(c), want)
+		}
+	}
+}
+
+func TestNormalizeRemovesTheSet(t *testing.T) {
+	for _, in := range []string{
+		"ABCD\tEFGH", "ABCD\nEFGH", "ABCD\r\nEFGH", "ABCD\u00a0EFGH", "ABCD\u3000EFGH", "ABCD\u2010EFGH",
+		"ABCD\u2014EFGH", "ABCD\u2212EFGH", "ABCD\u00adEFGH", "ABCD\u200bEFGH", "ABCD\u200eEFGH", "ABCD\u200fEFGH",
+		"ABCD\u2060EFGH", "\ufeffABCD-EFGH", "ABCD\U00010eadEFGH", "abcd efgh\n",
+	} {
+		if got, err := Normalize(in); err != nil || string(got) != "ABCDEFGH" {
+			t.Errorf("%q: %q %v", in, got, err)
+		}
+	}
+	// Not removed: a non-ASCII character other than the set is refused
+	// when 8 code points remain, and is no code otherwise.
+	if _, err := Normalize("ABCD\u00b7EFG"); !errors.Is(err, ErrSymbol) {
+		t.Errorf("a middle dot in 8: %v", err)
+	}
+	if _, err := Normalize("ABCD\u00b7EFGH"); !errors.Is(err, ErrCode) {
+		t.Errorf("a middle dot in 9: %v", err)
+	}
+	if _, err := Normalize("ABCD_EFGH"); !errors.Is(err, ErrCode) {
+		t.Errorf("an underscore is not removed: %v", err)
+	}
+	if _, err := Normalize("ABCD\xffEFG"); !errors.Is(err, ErrCode) {
+		t.Errorf("not UTF-8: %v", err)
 	}
 }

@@ -16,7 +16,7 @@ import (
 	"github.com/vettid/vettid-vault/vms/paircode"
 )
 
-// The short pairing code (pair-code.json, 0.94.0 §6.7.2).
+// The short pairing code (pair-code.json, 0.94.1 §6.7.2).
 const (
 	PairCode        = "K7QM4XPZ"
 	PairCodeClaimID = "q4f7m2xk5n3p6r7t2v4w6y7z3a" // canonical: 128 bits, the last character's low bits zero
@@ -26,8 +26,8 @@ const (
 	PairCodeOther   = "K7QM4XP2" // another code, for a blob that must not open
 )
 
-// genPairCode builds pair-code.json (VAULT-MESSAGING 0.94.0 §6.7.2,
-// RELAY-PROTOCOL 0.14.0 §6.9.1): for a fixed code, relay, epoch, relay
+// genPairCode builds pair-code.json (VAULT-MESSAGING 0.94.1 §6.7.2,
+// RELAY-PROTOCOL 0.14.1 §6.9.1): for a fixed code, relay, epoch, relay
 // nonce, s_c and bundle nonce, the lookup salt and its id, pw with its
 // 0x00 bytes, tag, x, k_w, the associated data and the blob of an agent
 // bundle (the vault of keys.json), the desktop purpose's tag for the same
@@ -177,6 +177,14 @@ func genPairCode(vault *principal) (obj, error) {
 		{"k7qm-4xpl", "", "bad_symbol"}, {"k7qm-4xpo", "", "bad_symbol"}, {"K7QM-4XPÉ", "", "bad_symbol"},
 		{"K7QM-4XP\u017f", "", "bad_symbol"}, {"K7QM-4XP\u00df", "", "bad_symbol"}, {"K7QM-4XP\u212a", "", "bad_symbol"},
 		{"K7QM-4XP", "", "not_a_code"}, {"K7QM-4XPZ2", "", "not_a_code"}, {"https://relay.vettid.org", "", "not_a_code"},
+		// (0.94.1) The removed set, one case per class, and each invisible.
+		{"K7QM\t4XPZ", PairCode, ""}, {"K7QM\r\n4XPZ\n", PairCode, ""}, {"K7QM\u00a04XPZ", PairCode, ""},
+		{"K7QM\u30004XPZ", PairCode, ""}, {"K7QM\u20104XPZ", PairCode, ""}, {"K7QM\u20144XPZ", PairCode, ""},
+		{"K7QM\U00010ead4XPZ", PairCode, ""}, {"K7QM\u22124XPZ", PairCode, ""}, {"K7QM\u00ad4XPZ", PairCode, ""},
+		{"K7QM\u200b4XPZ", PairCode, ""}, {"K7QM\u200e4XPZ", PairCode, ""}, {"K7QM\u200f4XPZ", PairCode, ""},
+		{"K7QM\u20604XPZ", PairCode, ""}, {"\ufeffK7QM-4XPZ", PairCode, ""},
+		// Not removed: a non-ASCII character outside the set.
+		{"K7QM\u00b74XP", "", "bad_symbol"}, {"K7QM\u00b74XPZ", "", "not_a_code"}, {"K7QM_4XPZ", "", "not_a_code"},
 	} {
 		got, err := paircode.Normalize(c.in)
 		want := map[string]error{"": nil, "bad_symbol": paircode.ErrSymbol, "not_a_code": paircode.ErrCode}[c.err]
@@ -285,9 +293,10 @@ func genPairCode(vault *principal) (obj, error) {
 		return nil, err
 	}
 	return obj{
-		{"description", "VAULT-MESSAGING 0.94.0 §6.7.2 short pairing codes, RELAY-PROTOCOL 0.14.0 §6.9.1. " +
+		{"description", "VAULT-MESSAGING 0.94.1 §6.7.2 short pairing codes, RELAY-PROTOCOL 0.14.1 §6.9.1. " +
 			"Argon2id v0x13 t=3 m=262144 KiB p=1 32 bytes; pw is passed as bytes with its length (it holds 0x00 bytes). " +
-			"The blob seals the agent bundle of the vault of keys.json under k_w with aad; each not_open case changes one input, and the blob must not open."},
+			"The blob seals the agent bundle of the vault of keys.json under k_w with aad; each not_open case changes one input, and the blob must not open. " +
+			"removed is every code point the input rule removes, U+XXXX, ascending."},
 		{"argon2id", obj{{"version", 19}, {"t", paircode.ArgonTime}, {"m_kib", paircode.ArgonMemoryKiB}, {"p", paircode.ArgonThreads}, {"len", paircode.KeySize}}},
 		{"code", PairCode},
 		{"display", paircode.Display([]byte(PairCode))},
@@ -321,6 +330,7 @@ func genPairCode(vault *principal) (obj, error) {
 			{"tag_b64", base64.StdEncoding.EncodeToString(tagP)}}},
 		{"for_put", forPut},
 		{"normalize", norm},
+		{"removed", removedList()},
 		{"relay_forms", relays},
 		{"salt_lists", saltCases},
 	}, nil
@@ -346,4 +356,15 @@ func asciiJSON(s string) json.RawMessage {
 	}
 	b.WriteByte('"')
 	return json.RawMessage(b.String())
+}
+
+// removedList is every code point the input rule removes (0.94.1 §6.7.2),
+// as U+XXXX, in order.
+func removedList() []string {
+	cps := paircode.RemovedSet()
+	out := make([]string, len(cps))
+	for i, c := range cps {
+		out[i] = fmt.Sprintf("U+%04X", c)
+	}
+	return out
 }

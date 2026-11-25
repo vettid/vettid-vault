@@ -55,6 +55,8 @@ type Host struct {
 	IK        ed25519.PublicKey
 	// Identity is the fake vault's identity key (IK is its public half).
 	Identity ed25519.PrivateKey
+	// VouchErr, when set, is VouchCallShare's answer (a failure to sign).
+	VouchErr error
 	// Introductions' invitations (§10.15).
 	IntroInvites  []IntroInvite
 	AcceptedLinks []string
@@ -427,8 +429,11 @@ func (h *Host) SignICEConfig(config []byte) ([]byte, error) {
 }
 
 func (h *Host) VouchCallShare(deviceIK ed25519.PublicKey, m []byte) ([]byte, error) {
+	if h.VouchErr != nil {
+		return nil, h.VouchErr
+	}
 	if len(deviceIK) != ed25519.PublicKeySize || !callwire.ValidShareMessage(m) {
-		return nil, errors.New("not a share")
+		return nil, vault.NewError("bad_request", "") // as the vault answers (vault/host.go)
 	}
 	if v := callwire.VouchingParty(m); v != nil && !v.Equal(h.Identity.Public().(ed25519.PublicKey)) {
 		return nil, vault.NewError("bad_request", "") // (0.88.16) form 2 names another vault on this side

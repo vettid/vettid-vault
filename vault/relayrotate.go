@@ -148,11 +148,20 @@ func (m *Manager) claimRelay(mailbox string) Relay {
 	}
 	now := m.now()
 	for i := range m.st.Relay.Old {
-		if o := &m.st.Relay.Old[i]; o.Mailbox == mailbox && o.Collect.Stopped.IsZero() && !oldStopDue(o, now) {
+		if m.st.Relay.Old[i].Mailbox == mailbox && m.oldInGrace(i, now) {
 			return m.oldRelayClient(i)
 		}
 	}
 	return nil
+}
+
+// oldInGrace reports whether the old key i still acts for its mailbox: its
+// collects have not ended (RK14 step 1) and its stop is not due. A
+// revocation or claim deletion goes to an old mailbox only then (revoke,
+// claimRelay). m.mu is held.
+func (m *Manager) oldInGrace(i int, now time.Time) bool {
+	o := &m.st.Relay.Old[i]
+	return o.Collect.Stopped.IsZero() && !oldStopDue(o, now)
 }
 
 // oldMailboxGone reports whether err is an old mailbox's mailbox_unknown:
@@ -363,10 +372,7 @@ func (m *Manager) revoke(ctx context.Context, kind, value string) error {
 		return m.relay.Revoke(ctx, kind, value)
 	}
 	now := m.now()
-	inGrace := func(i int) bool {
-		o := &m.st.Relay.Old[i]
-		return o.Collect.Stopped.IsZero() && !oldStopDue(o, now)
-	}
+	inGrace := func(i int) bool { return m.oldInGrace(i, now) }
 	rels := []Relay{m.relay}
 	switch kind {
 	case "jti":

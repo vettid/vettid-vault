@@ -188,6 +188,10 @@ func TestWithdrawalWithoutSessionIsSessionRequired(t *testing.T) {
 			}
 		}
 	}
+	// Nothing was withdrawn or blocked.
+	if rq, _ := b.m.connRequest(cid, ReqOut); rq == nil || len(b.m.st.Blocks) != 0 {
+		t.Fatal("a session-less withdrawal changed the request or the blocks")
+	}
 	rid := a.sendAs(deskA, "block.add", `{"pending_id":"x"}`)
 	if code := errCode(find(a.inbox(a.self(), deskA)["desk1"], reply(rid))); code != "forbidden" {
 		t.Errorf("block of a pending request without a session: %q", code)

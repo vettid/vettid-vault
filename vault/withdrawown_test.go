@@ -51,6 +51,14 @@ func TestOwnOutgoingRequestWithdrawnByRemoveOrBlock(t *testing.T) {
 		a, b, pid, cid := requested(t)
 		desk, _ := accessed(t, b)
 		b.inbox(b.self(), desk)
+		rq, _ := b.m.connRequest(cid, ReqOut)
+		if rq == nil || rq.Peer == nil {
+			t.Fatal("no outgoing request")
+		}
+		const name = "Alice" // the name the request holds of the inviter
+		b.m.mu.Lock()
+		rq.Peer.Name = name
+		b.m.mu.Unlock()
 		r, _ := b.request(t, typ, `{"connection_id":"`+cid+`"}`)
 		if r.Status != envelope.StatusOK {
 			t.Fatalf("%s: %+v %s", typ, r, r.Body)
@@ -78,6 +86,11 @@ func TestOwnOutgoingRequestWithdrawnByRemoveOrBlock(t *testing.T) {
 		case "block.add":
 			if bodyStr(t, r, "block_id") == "" || !inviterBlocked(b, a) || !b.hasActivity("connection.blocked") {
 				t.Fatal("block.add: the inviter's identity not blocked")
+			}
+			for _, bl := range b.m.st.Blocks {
+				if bl.Name != name {
+					t.Fatalf("block.add: the block's name %q, not the request's", bl.Name)
+				}
 			}
 			// The block applies as any other: a new invitation from A is refused.
 			_, link := a.linkFor(t, time.Hour)
@@ -130,25 +143,91 @@ func TestOwnWaitingRequestWithdrawnByRemoveOrBlock(t *testing.T) {
 	}
 }
 
-// block.add of the own outgoing request when the inviter's identity is
-// already blocked: exists, and the request is left as it was. Of an id
-// that is neither a connection nor a request: not_found.
-func TestOwnOutgoingRequestBlockExists(t *testing.T) {
-	a, b, _, cid := requested(t)
-	b.m.mu.Lock()
-	b.m.st.Blocks["pre"] = &Block{ID: "pre", IK: append([]byte(nil), a.m.keys.ik.Public().(ed25519.PublicKey)...)}
-	b.m.mu.Unlock()
-	if r, _ := b.request(t, "block.add", `{"connection_id":"`+cid+`"}`); errCode(r) != "exists" {
-		t.Fatalf("block of an already blocked inviter: %+v", r)
-	}
-	if rq, _ := b.m.connRequest(cid, ReqOut); rq == nil || len(b.m.st.Blocks) != 1 {
-		t.Fatal("an exists answer changed the request or the blocks")
-	}
+// Of an id that is neither a connection nor a request: not_found.
+func TestOwnOutgoingRequestUnknownID(t *testing.T) {
+	_, b, _, _ := requested(t)
 	for _, typ := range []string{"block.add", "connection.remove"} {
 		if r, _ := b.request(t, typ, `{"connection_id":"nope"}`); errCode(r) != "not_found" {
 			t.Fatalf("%s of nothing: %+v", typ, r)
 		}
 	}
+}
+
+// A block.add of the own outgoing request that is refused (the inviter's
+// identity already blocked: exists; the block limit, judged first) changes
+// nothing, in both states: the request, its handshake and live initiator,
+// its tokens, a queued hs.init, the blocks and the audit stay as they were,
+// and nothing reaches the inviter.
+func TestOwnOutgoingRequestBlockRefusedChangesNothing(t *testing.T) {
+	for _, state := range []string{"sas_known", "waiting"} {
+		for _, refusal := range []string{"exists", "limit"} {
+			name := state + "/" + refusal
+			var a, b *devFixture
+			var cid string
+			if state == "sas_known" {
+				a, b, _, cid = requested(t)
+			} else {
+				a, b = newVaultPair(t)
+				sinkOf(b)
+				_, link := a.linkFor(t, time.Hour)
+				b.relay.mu.Lock() // the hs.init stays queued
+				b.relay.failMailbox = map[string]error{a.m.st.Relay.Mailbox: &relayclient.Error{Status: 503, Code: "unavailable"}}
+				b.relay.mu.Unlock()
+				r, _ := b.request(t, "connection.invite.accept", `{"link":"`+link+`"}`)
+				cid = bodyStr(t, r, "connection_id")
+			}
+			b.m.mu.Lock()
+			if refusal == "exists" {
+				b.m.st.Blocks["pre"] = &Block{ID: "pre", IK: append([]byte(nil), a.m.keys.ik.Public().(ed25519.PublicKey)...)}
+			} else {
+				for i := range MaxBlocks {
+					id := "full" + strconv.Itoa(i)
+					b.m.st.Blocks[id] = &Block{ID: id, IK: []byte{byte(i), byte(i >> 8)}}
+				}
+			}
+			b.m.mu.Unlock()
+			before, _ := outTo(t, b, a)
+			was := ownRequestState(b, cid)
+			if was.request == was.waiting { // sas_known: a request; waiting: none, waiting
+				t.Fatalf("%s: not the state under test: %+v", name, was)
+			}
+			if r, _ := b.request(t, "block.add", `{"connection_id":"`+cid+`"}`); errCode(r) != refusal {
+				t.Fatalf("%s: %+v %s", name, r, r.Body)
+			}
+			if now := ownRequestState(b, cid); now != was {
+				t.Fatalf("%s: a refused block changed\n%+v\nto\n%+v", name, was, now)
+			}
+			if deps, _ := outTo(t, b, a); len(deps) != len(before) {
+				t.Fatalf("%s: %d deposits to the inviter", name, len(deps)-len(before))
+			}
+		}
+	}
+}
+
+// What a refused withdrawal must leave as it was.
+type ownRequest struct {
+	request, waiting, handshake, initiator, initQueued bool
+	denied, blocks, audit                              int
+}
+
+func ownRequestState(d *devFixture, cid string) ownRequest {
+	rq, waiting := d.m.connRequest(cid, ReqOut)
+	d.m.mu.Lock()
+	defer d.m.mu.Unlock()
+	o := ownRequest{request: rq != nil, waiting: waiting, blocks: len(d.m.st.Blocks), audit: len(sinkOf(d).got)}
+	if oid := d.m.waitingOutgoing(cid); oid != "" {
+		o.handshake = d.m.st.Outgoing[oid] != nil
+		o.initiator = d.m.outgoing[oid] != nil
+		for _, e := range d.m.st.Outbox {
+			o.initQueued = o.initQueued || e.ID == d.m.st.Outgoing[oid].InitOutbox && !e.Done
+		}
+	}
+	for _, it := range d.m.st.Issued {
+		if it.Denied {
+			o.denied++
+		}
+	}
+	return o
 }
 
 // A waiting request withdrawn (or declined) before its hs.init reached the
@@ -190,27 +269,80 @@ func TestWithdrawnWaitingRequestSendsNoHsInit(t *testing.T) {
 		b.relay.mu.Lock()
 		b.relay.failMailbox = nil
 		b.relay.mu.Unlock()
+		readyNow(b) // past the failed try's backoff, so a leftover entry would go out
 		if deps, _ := outTo(t, b, a); len(deps) != len(before) {
 			t.Fatalf("%s: the hs.init went to the inviter after the request ended", typ)
 		}
 	}
 }
 
-// At the block limit, block.add of the own outgoing request is refused
-// first, and the request is left as it was.
-func TestOwnOutgoingRequestBlockAtTheLimit(t *testing.T) {
-	_, b, _, cid := requested(t)
-	b.m.mu.Lock()
-	for i := range MaxBlocks {
-		id := "full" + strconv.Itoa(i)
-		b.m.st.Blocks[id] = &Block{ID: id, IK: []byte{byte(i), byte(i >> 8)}}
+// readyNow makes every outbox entry due now (past a failed try's backoff).
+func readyNow(d *devFixture) {
+	d.m.mu.Lock()
+	defer d.m.mu.Unlock()
+	for _, e := range d.m.st.Outbox {
+		e.NotBefore = time.Time{}
 	}
-	b.m.mu.Unlock()
-	if r, _ := b.request(t, "block.add", `{"connection_id":"`+cid+`"}`); errCode(r) != "limit" {
-		t.Fatalf("block at the limit: %+v %s", r, r.Body)
+}
+
+// A waiting request withdrawn after its hs.init was delivered: the
+// inviter's hs.resp then finds no record and is dropped, and nothing is sent
+// back (no hs.fin), so the inviter never shows the request.
+func TestWithdrawnWaitingRequestDropsTheLateHsResp(t *testing.T) {
+	for _, typ := range []string{"connection.remove", "block.add"} {
+		a, b := newVaultPair(t)
+		sinkOf(a)
+		sinkOf(b)
+		_, link := a.linkFor(t, time.Hour)
+		r, _ := b.request(t, "connection.invite.accept", `{"link":"`+link+`"}`)
+		cid := bodyStr(t, r, "connection_id")
+		pump(t, b, a) // the hs.init reaches A, whose hs.resp is queued
+		if r, _ := b.request(t, typ, `{"connection_id":"`+cid+`"}`); r.Status != envelope.StatusOK {
+			t.Fatalf("%s: %+v %s", typ, r, r.Body)
+		}
+		before, _ := outTo(t, b, a)
+		pump(t, a, b) // the hs.resp reaches B
+		if deps, _ := outTo(t, b, a); len(deps) != len(before) {
+			t.Fatalf("%s: B answered the late hs.resp", typ)
+		}
+		if rq, waiting := b.m.connRequest(cid, ReqOut); rq != nil || waiting || len(b.m.st.Connections) != 0 {
+			t.Fatalf("%s: the late hs.resp brought the request back", typ)
+		}
+		if event(a.appInbox(), "connection.request.pending") != nil || len(a.m.st.Requests) != 0 {
+			t.Fatalf("%s: the inviter shows the request", typ)
+		}
 	}
-	if rq, _ := b.m.connRequest(cid, ReqOut); rq == nil {
-		t.Fatal("a refused block withdrew the request")
+}
+
+// block.add of an outgoing request the member already approved: the
+// standing and reconnect tokens its connection.approved carried are denied
+// too, and the inviter's approval after it activates nothing.
+func TestBlockOfAnApprovedOutgoingRequest(t *testing.T) {
+	a, b, pid, cid := requested(t)
+	if r, _ := b.request(t, "connection.approve", `{"connection_id":"`+cid+`"}`); r.Status != envelope.StatusOK {
+		t.Fatalf("B approve: %+v", r)
+	}
+	pump(t, b, a) // A: peer_approved
+	a.appInbox()
+	var standing bool
+	for _, it := range b.m.st.Issued {
+		standing = standing || it.Kind == TokStanding
+	}
+	if !standing {
+		t.Fatal("the approval issued no standing token")
+	}
+	if r, _ := b.request(t, "block.add", `{"connection_id":"`+cid+`"}`); r.Status != envelope.StatusOK {
+		t.Fatalf("block: %+v %s", r, r.Body)
+	}
+	requestTokensDenied(t, b)                                      // the request, standing and reconnect tokens
+	a.request(t, "connection.approve", `{"pending_id":"`+pid+`"}`) // crossing the decline
+	pump(t, b, a)
+	pump(t, a, b)
+	if len(b.m.st.Connections) != 0 || b.m.sessions[cid] != nil {
+		t.Fatalf("the blocked request activated: %d connections, session %v", len(b.m.st.Connections), b.m.sessions[cid] != nil)
+	}
+	if !inviterBlocked(b, a) {
+		t.Fatal("the inviter's identity not blocked")
 	}
 }
 

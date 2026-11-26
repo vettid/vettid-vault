@@ -1789,9 +1789,11 @@ func (m *Manager) dropOutgoing(id string) {
 	if i := m.outgoing[id]; i != nil {
 		i.Abort()
 	}
-	// Its hs.init, if not yet deposited, is not sent: no record would take
-	// the hs.resp it brings (a withdrawn or expired request would reach the
-	// inviter, one the member may have just blocked).
+	// Its hs.init is not sent if it has not been deposited yet. Once the
+	// record is gone, nothing would take the hs.resp it brings back, and a
+	// withdrawn or expired request's hs.init would still reach the inviter,
+	// whom the member may just have blocked. This covers every outgoing
+	// handshake dropped here: a request, a reconnect and a rekey.
 	if og := m.st.Outgoing[id]; og != nil && og.InitOutbox != "" {
 		m.dropOutboxEntry(og.InitOutbox)
 		m.dirty = true

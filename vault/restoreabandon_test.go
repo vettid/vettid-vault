@@ -112,12 +112,15 @@ func TestRotatedReconnectAbandonedAtUnlock(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer m.Crash()
-	m.mu.Lock()
 	// 0.86.0 (S5): the rotation's own write abandoned the reconnect begun
 	// under the old ik (and started one under the new ik), so the restore
-	// finds nothing to clean up.
-	checkAbandonedAt(t, m, ogID, initOutbox, issued, false)
-	m.mu.Unlock()
+	// finds nothing to clean up. Unlocked by a defer, so a failed check
+	// ends the test instead of hanging the deferred Crash on m.mu.
+	func() {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		checkAbandonedAt(t, m, ogID, initOutbox, issued, false)
+	}()
 	// A reconnect's cleanup tells the devices nothing: the connection
 	// stays (only a new connection's devices hear that it failed).
 	d.m = m

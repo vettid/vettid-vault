@@ -29,6 +29,12 @@ func TestCapacityCodeFlags(t *testing.T) {
 			t.Errorf("%s accepted", name)
 		}
 	}
+	if capacityModes(true, 0, 20) == nil || capacityModes(false, 50, 0) == nil || capacityModes(false, 50, 20) == nil {
+		t.Error("-capacity-codes without -capacity, or -capacity without -selftest, accepted")
+	}
+	if capacityModes(true, 50, 20) != nil || capacityModes(true, 50, 0) != nil || capacityModes(false, 0, 0) != nil {
+		t.Error("a valid combination refused")
+	}
 	c, _ = capacityRequest(50, 1024, 0, "1", 8, time.Minute, time.Minute, 90*time.Minute)
 	if withCodes(c, 20, 2, 4, 0) == nil || withCodes(c, 20, 2, 4, 31*time.Minute) == nil {
 		t.Error("a code time outside 1s to 30m accepted")

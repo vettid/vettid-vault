@@ -3,6 +3,7 @@ package supervisor
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -109,6 +110,15 @@ func (e *fakeEnclave) env() capEnv {
 func (p *fakeProc) call(_ context.Context, op string, _ int) (*selftest.CapacityStats, error) {
 	p.e.mu.Lock()
 	defer p.e.mu.Unlock()
+	if op == "code" && !p.e.grantDuringOpen {
+		// As the permit does, a code waits for an opening to end, for a
+		// while (here 200 ms of real time), before it is busy.
+		for t0 := time.Now(); p.e.opening > 0 && time.Since(t0) < 200*time.Millisecond; {
+			p.e.mu.Unlock()
+			time.Sleep(time.Millisecond)
+			p.e.mu.Lock()
+		}
+	}
 	if !p.alive {
 		return nil, errors.New("gone")
 	}
@@ -306,7 +316,7 @@ func TestCapacityCodes(t *testing.T) {
 	if k == nil {
 		t.Fatal("no code report")
 	}
-	if k.Requests != 6 || k.Done+k.Busy != 6 || k.Failed != 0 || e.codes != 6 {
+	if k.Requests != 6 || k.Done == 0 || k.Done+k.Busy != 6 || k.Failed != 0 || e.codes != 6 {
 		t.Fatalf("codes %+v (asked %d)", k, e.codes)
 	}
 	// Two before the codes (the comparison) and up to two during them, each
@@ -398,7 +408,7 @@ func TestCapacityCodesUnlocksNeedRoom(t *testing.T) {
 	// Each unlock is marked as an opening before its room is judged.
 	// Each unlock is marked as an opening before its room is judged: the
 	// comparison's 3, and as many as were tried while the codes ran.
-	if k.Unlocks != 0 || e.spawned != spawned || e.opens != 3+k.UnlocksSkipped || k.UnlockBeforeMs.N != 0 {
+	if k.Unlocks != 0 || e.spawned != spawned || e.opens != 3+k.UnlocksSkipped || k.UnlockBeforeMs.N != 0 || e.opening != 0 {
 		t.Fatalf("unlocks %d skipped %d spawned %d opens %d", k.Unlocks, k.UnlocksSkipped, e.spawned-spawned, e.opens)
 	}
 }
@@ -467,5 +477,238 @@ func TestCapacityCodesTimeBound(t *testing.T) {
 	}
 	if k.CutShort != 2 || k.Failed != 0 || k.Done != 0 {
 		t.Fatalf("%+v", k)
+	}
+}
+
+// The capacity run readies the self-test's permit: the run's floor when it
+// is higher, and a record of the code permits given. Without a permit,
+// nothing is recorded and the floor is left alone.
+func TestCapacityPermit(t *testing.T) {
+	s := &Supervisor{cfg: Config{MemoryReserve: 300 << 20, MemAvailable: func() uint64 { return 64 << 30 }}, now: time.Now}
+	s.heavy = s.selftestPermit()
+	grants := s.capacityPermit(selftest.CapacityRequest{FloorMiB: 2000}, 4096<<20)
+	if s.heavy.floor() != 2000<<20 {
+		t.Fatalf("floor %d", s.heavy.floor())
+	}
+	if s.heavy.tryCode("c1") != permitGiven || len(grants()) != 1 {
+		t.Fatalf("grants %v", grants())
+	}
+	bare := &Supervisor{now: time.Now}
+	if g := bare.capacityPermit(selftest.CapacityRequest{FloorMiB: 2000}, 4096<<20); len(g()) != 0 || bare.capFloor.Load() != 0 {
+		t.Fatal("recorded without a permit")
+	}
+}
+
+func TestSpansOverlapping(t *testing.T) {
+	sp := func(f, to int64) openSpan { return openSpan{f, to} }
+	for name, c := range map[string]struct {
+		a, b []openSpan
+		want int
+	}{
+		"none":             {nil, []openSpan{sp(0, 10)}, 0},
+		"no derivations":   {[]openSpan{sp(0, 10)}, nil, 0},
+		"inside":           {[]openSpan{sp(0, 10)}, []openSpan{sp(2, 3)}, 1},
+		"around":           {[]openSpan{sp(2, 3)}, []openSpan{sp(0, 10)}, 1},
+		"straddles start":  {[]openSpan{sp(5, 10)}, []openSpan{sp(0, 6)}, 1},
+		"straddles end":    {[]openSpan{sp(5, 10)}, []openSpan{sp(9, 20)}, 1},
+		"touches before":   {[]openSpan{sp(5, 10)}, []openSpan{sp(0, 5)}, 0},
+		"touches after":    {[]openSpan{sp(5, 10)}, []openSpan{sp(10, 15)}, 0},
+		"counted once":     {[]openSpan{sp(0, 10)}, []openSpan{sp(1, 2), sp(3, 4)}, 1},
+		"each of a counts": {[]openSpan{sp(0, 10), sp(20, 30), sp(40, 50)}, []openSpan{sp(5, 25)}, 2},
+	} {
+		if got := spansOverlapping(c.a, c.b); got != c.want {
+			t.Errorf("%s: %d, want %d", name, got, c.want)
+		}
+	}
+}
+
+// funcProc is a held vault whose code request is code.
+type funcProc struct {
+	code func(context.Context) *selftest.CapacityStats
+}
+
+func (p funcProc) call(ctx context.Context, op string, _ int) (*selftest.CapacityStats, error) {
+	if op != "code" {
+		return &selftest.CapacityStats{}, nil
+	}
+	return p.code(ctx), nil
+}
+func (funcProc) stop() bool { return true }
+
+func done() *selftest.CapacityStats {
+	return &selftest.CapacityStats{Code: "done", XMicros: 1000, TagMicros: 1000}
+}
+
+// The sampler catches a dip that lasts only while a derivation runs: no
+// sample at a request's end or around an unlock sees it.
+func TestCapacityCodesSamplesMemory(t *testing.T) {
+	e := newFakeEnclave(4096, 300)
+	env := e.env()
+	var mu sync.Mutex
+	dip := false
+	seen := make(chan struct{}, 1)
+	avail := env.available
+	env.available = func() uint64 {
+		mu.Lock()
+		defer mu.Unlock()
+		if dip {
+			select {
+			case seen <- struct{}{}:
+			default:
+			}
+			return 1 * fakeMiB
+		}
+		return avail()
+	}
+	held := []heldVault{{p: funcProc{func(context.Context) *selftest.CapacityStats {
+		mu.Lock()
+		dip = true
+		mu.Unlock()
+		select {
+		case <-seen:
+		case <-time.After(2 * time.Second):
+		}
+		mu.Lock()
+		dip = false
+		mu.Unlock()
+		return done()
+	}}}}
+	// No unlocks: their own samples could land in the dip and hide a sampler that never samples.
+	k := runCodes(context.Background(), env, selftest.CapacityRequest{Codes: 1, CodeConcurrency: 1, CodeUnlocks: 0, CodeSeconds: 60},
+		held, 0, func(int) bool { return true }, func(*selftest.CapacityStats) {})
+	if k.MinAvailable != 1*fakeMiB || k.Done != 1 {
+		t.Fatalf("min available %d, %+v", k.MinAvailable, k)
+	}
+}
+
+// Once the codes are done no unlock is started: at most the one already
+// past its check.
+func TestCapacityCodesUnlocksStopWithTheCodes(t *testing.T) {
+	e := newFakeEnclave(8192, 300)
+	env := e.env()
+	const unlocks = 16
+	spawned := func() int { e.mu.Lock(); defer e.mu.Unlock(); return e.spawned }
+	// The phase's unlocks take real time, so the codes can end among them.
+	spawn := env.spawn
+	env.spawn = func() (capProc, error) {
+		if spawned() >= unlocks {
+			time.Sleep(10 * time.Millisecond)
+		}
+		return spawn()
+	}
+	var atDone int
+	held := []heldVault{{p: funcProc{func(context.Context) *selftest.CapacityStats {
+		// The code ends once two unlocks of the phase have started.
+		for t0 := time.Now(); spawned() < unlocks+2 && time.Since(t0) < 2*time.Second; {
+			time.Sleep(time.Millisecond)
+		}
+		atDone = spawned()
+		return done()
+	}}}}
+	k := runCodes(context.Background(), env, selftest.CapacityRequest{Codes: 1, CodeConcurrency: 1, CodeUnlocks: unlocks, CodeSeconds: 60},
+		held, 0, func(int) bool { return true }, func(*selftest.CapacityStats) {})
+	if atDone < unlocks+2 || spawned() > atDone+1 || k.Unlocks >= unlocks {
+		t.Fatalf("spawned %d at the codes' end, %d in all; %d unlocks during", atDone, spawned(), k.Unlocks)
+	}
+}
+
+// The headroom is what is free at the phase's start less the floor and one
+// code derivation's need.
+func TestCapacityCodesHeadroom(t *testing.T) {
+	e := newFakeEnclave(4096, 300)
+	env := e.env()
+	held := []heldVault{{p: funcProc{func(context.Context) *selftest.CapacityStats { return done() }}}}
+	start := int64(env.available())
+	k := runCodes(context.Background(), env, selftest.CapacityRequest{Codes: 1, CodeConcurrency: 1, CodeUnlocks: 1, CodeSeconds: 60},
+		held, 100*fakeMiB, func(int) bool { return true }, func(*selftest.CapacityStats) {})
+	if want := start - 100*fakeMiB - int64(codeNeed()); k.HeadroomBytes != want {
+		t.Fatalf("headroom %d, want %d", k.HeadroomBytes, want)
+	}
+}
+
+// Without room for one derivation above the floor the report says so.
+func TestCapacityCodesNoHeadroomNoted(t *testing.T) {
+	e := newFakeEnclave(1024, 100)
+	r := runCapacity(context.Background(), e.env(), selftest.CapacityRequest{MaxVaults: 30, Codes: 1, CodeConcurrency: 1, CodeUnlocks: 1})
+	if r.Codes == nil || r.Codes.HeadroomBytes >= 0 || !noted(r, "short of one code derivation above the floor") {
+		t.Fatalf("held %d, codes %+v, notes %q", r.Held, r.Codes, r.Notes)
+	}
+}
+
+// With no vault held the phase doesn't run, and the report says why.
+func TestCapacityCodesNoVaultHeld(t *testing.T) {
+	e := newFakeEnclave(4096, 300)
+	e.failSpawnAt = 1
+	r := runCapacity(context.Background(), e.env(), selftest.CapacityRequest{MaxVaults: 3, Codes: 2, CodeConcurrency: 1, CodeUnlocks: 1})
+	if r.Held != 0 || r.Codes != nil || !noted(r, "code phase skipped: no vault held") {
+		t.Fatalf("held %d, codes %+v, notes %q", r.Held, r.Codes, r.Notes)
+	}
+}
+
+func noted(r *selftest.CapacityReport, s string) bool {
+	for _, n := range r.Notes {
+		if strings.Contains(n, s) {
+			return true
+		}
+	}
+	return false
+}
+
+// At most CodeConcurrency requests at a time, never more than the vaults
+// held, and never two on one vault.
+func TestCapacityCodesOnePerVault(t *testing.T) {
+	e := newFakeEnclave(4096, 300)
+	var mu sync.Mutex
+	inUse, most := 0, 0
+	perVault := map[int]int{}
+	worst := 0
+	proc := func(v int, d time.Duration) capProc {
+		return funcProc{func(context.Context) *selftest.CapacityStats {
+			mu.Lock()
+			inUse++
+			perVault[v]++
+			most, worst = max(most, inUse), max(worst, perVault[v])
+			mu.Unlock()
+			time.Sleep(d)
+			mu.Lock()
+			inUse--
+			perVault[v]--
+			mu.Unlock()
+			return done()
+		}}
+	}
+	// One slow vault and one fast: a request can never be handed to the
+	// slow one while it works.
+	held := []heldVault{{p: proc(0, 30*time.Millisecond)}, {p: proc(1, time.Millisecond)}}
+	k := runCodes(context.Background(), e.env(), selftest.CapacityRequest{Codes: 12, CodeConcurrency: 4, CodeUnlocks: 1, CodeSeconds: 60},
+		held, 0, func(int) bool { return true }, func(*selftest.CapacityStats) {})
+	if k.Done != 12 || most > 2 || worst > 1 {
+		t.Fatalf("done %d, %d at a time, %d on one vault", k.Done, most, worst)
+	}
+	// More vaults than CodeConcurrency: CodeConcurrency at a time, no more.
+	most, worst = 0, 0
+	held = []heldVault{{p: proc(0, 20*time.Millisecond)}, {p: proc(1, 20*time.Millisecond)}, {p: proc(2, 20*time.Millisecond)},
+		{p: proc(3, 20*time.Millisecond)}}
+	k = runCodes(context.Background(), e.env(), selftest.CapacityRequest{Codes: 8, CodeConcurrency: 2, CodeUnlocks: 1, CodeSeconds: 60},
+		held, 0, func(int) bool { return true }, func(*selftest.CapacityStats) {})
+	if k.Done != 8 || most != 2 || worst > 1 {
+		t.Fatalf("done %d, %d at a time (want 2), %d on one vault", k.Done, most, worst)
+	}
+}
+
+// An unlock during a derivation is counted as overlapping: here every
+// derivation spans the whole phase.
+func TestCapacityCodesUnlocksOverlapping(t *testing.T) {
+	e := newFakeEnclave(4096, 300)
+	env := e.env()
+	at := env.now().Add(-time.Hour).UnixMilli()
+	slow := funcProc{func(context.Context) *selftest.CapacityStats {
+		time.Sleep(50 * time.Millisecond) // the phase's unlocks run meanwhile
+		return &selftest.CapacityStats{Code: "done", XMicros: int64(10 * time.Hour / time.Microsecond), TagMicros: 1000, GrantedAtsMs: []int64{at, at}}
+	}}
+	k := runCodes(context.Background(), env, selftest.CapacityRequest{Codes: 1, CodeConcurrency: 1, CodeUnlocks: 2, CodeSeconds: 60},
+		[]heldVault{{p: slow}}, 0, func(int) bool { return true }, func(*selftest.CapacityStats) {})
+	if k.Unlocks == 0 || k.UnlocksOverlapping != k.Unlocks {
+		t.Fatalf("%d unlocks during, %d overlapping", k.Unlocks, k.UnlocksOverlapping)
 	}
 }

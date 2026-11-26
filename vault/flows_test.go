@@ -564,9 +564,10 @@ func TestApprovalRoles(t *testing.T) {
 	}
 	d.devPeer.Kind = KindDesktop
 	d.devPeer.Access = &AccessSession{ID: "s1", Expires: time.Now().Add(time.Hour)} // §6.8
+	// (0.95.0) Nor may a desktop decline one: forbidden before anything is looked up.
 	_ = d.send("connection.decline", []byte(`{"pending_id":"x"}`))
-	if rs := d.responses(t); len(rs) != 1 || rs[0].Error == nil || rs[0].Error.Code != "not_found" {
-		t.Fatalf("desktop may decide connections: %+v", rs)
+	if rs := d.responses(t); len(rs) != 1 || rs[0].Error == nil || rs[0].Error.Code != "forbidden" {
+		t.Fatalf("desktop decline: %+v", rs)
 	}
 }
 

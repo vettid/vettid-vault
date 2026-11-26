@@ -1414,3 +1414,12 @@ The member vault's side. The service vault's side is vettid/service-vault. `svcF
 | 10.19.5 | The other-proposal evidence needs the service's `proposal_sig` and the same id; a status whose `proposal_id` is not its proposal's keeps no record | `vote.TestV2OtherProposalNeedsTheServicesSignatureAndTheID`, `vote.TestV2IntakeStatusTiesTheIDToTheProposal` |
 | 10.19.5 | At most 4,096 requests' times are kept, the oldest first deposit going first | `vault.TestDepositTimesBoundedByRequests` |
 | 10.19.9 | An evicted record's `vote.evidence` marks its v1 refusals in `unverifiable_v1`; a released record's its refusals and status answers | `vote.TestV2CompactEvidenceMarksV1` |
+
+## Declines are the app's alone (§6.4 "Who approves", §6.8, §10.4, §10.15; VAULT-MESSAGING 0.95.0)
+
+| § | Must | Test |
+|---|---|---|
+| 6.4, 10.4, 10.15 | A desktop's or agent's `connection.decline` (incoming or own outgoing), `intro.decline`, `block.add{pending_id}`, and `block.add{connection_id}` or `connection.remove` naming an outgoing request not yet a connection (waiting included) are answered `forbidden` at once, never held, never put to an agent's policy, changing nothing; the app's decline is as before | `vault.TestDeclinesAreAppOnly`, `vault.TestWaitingWithdrawalIsAppOnly`, `vault.TestOnlyPhoneCreatesOrAcceptsConnections`, `vault.TestApprovalRoles`, `intro.TestAuthorization`, `intro.TestDecline` |
+| 6.8 | The withdrawal forms depend on the vault's state, so a sender without an access session gets the same answer for an outgoing request and an unknown id (a desktop's `session_required`); the block of a pending request is `forbidden` either way; an unknown id is not app-only (a desktop's remove is held, as any step-up request) | `vault.TestWithdrawalWithoutSessionIsSessionRequired`, `vault.TestUnknownIDIsNotAppOnly` |
+| 6.8 | A request of these forms held before the release is never run, even when an app approves it (a desktop's withdrawal; an agent's block of a pending request its policy referred) | `vault.TestHeldWithdrawalNotRun`, `vault.TestHeldBlockOfPendingRequestNotRun` |
+| 6.4, 10.4 | On an active connection, `connection.remove` stays a desktop step-up type and a desktop's `block.add{connection_id}` runs; an agent's is `forbidden` | `vault.TestActiveConnectionRemoveUnchanged`, `vault.TestActiveConnectionBlockUnchanged` |

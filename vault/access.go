@@ -497,6 +497,11 @@ func (m *Manager) runHeld(ctx context.Context, h *HeldRequest, now time.Time) st
 		// connection.invite.create from before the owner decision of
 		// 2026-10-13, for instance): never run it for a desktop.
 		code = "forbidden"
+	case (p.Kind == KindDesktop || p.Kind == KindAgent) && m.appOnlyCore(in.Type, in.Body):
+		// (0.95.0) A form that declines a connection request or withdraws
+		// the member's own, held before it became the app's alone (an
+		// agent's block.add{pending_id} its policy referred): never run.
+		code = "forbidden"
 	case !m.hasAccess(p, now):
 		code = "session_required"
 	case !m.credentialReady():

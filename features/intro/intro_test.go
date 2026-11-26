@@ -131,13 +131,14 @@ func TestAuthorization(t *testing.T) {
 	}
 	// Only the phone creates or accepts connections (owner decision
 	// 2026-10-13): intro.create and intro.accept are app-only, never
-	// held; a desktop may still decline, cancel and list.
-	for _, typ := range []string{"intro.create", "intro.accept"} {
+	// held, and (0.95.0) so is intro.decline; a desktop may still cancel
+	// and list.
+	for _, typ := range []string{"intro.create", "intro.accept", "intro.decline"} {
 		if specs[typ].Allows(vault.KindDesktop) || !specs[typ].Allows(vault.KindApp) || specs[typ].DesktopApproval {
 			t.Errorf("%s must be app-only", typ)
 		}
 	}
-	for _, typ := range []string{"intro.decline", "intro.cancel", "intro.list"} {
+	for _, typ := range []string{"intro.cancel", "intro.list"} {
 		if !specs[typ].Allows(vault.KindDesktop) || specs[typ].DesktopApproval {
 			t.Errorf("%s must stay open to desktops", typ)
 		}
@@ -147,6 +148,7 @@ func TestAuthorization(t *testing.T) {
 		{"connection:" + bA, "intro.cancel"}, {vault.KindAgent, "intro.create"}, {vault.KindAgent, "intro.list"},
 		{vault.KindApp, "intro.offer"}, {vault.KindApp, "intro.answer"}, {vault.KindDesktop, "intro.link"},
 		{vault.KindDesktop, "intro.create"}, {vault.KindDesktop, "intro.accept"}, {vault.KindAgent, "intro.accept"},
+		{vault.KindDesktop, "intro.decline"}, {vault.KindAgent, "intro.decline"},
 	} {
 		if r := b.call(c.kind, c.typ, `{}`); r.Code != "forbidden" {
 			t.Errorf("%s %s: %q", c.kind, c.typ, r.Code)
@@ -239,7 +241,7 @@ func TestDecline(t *testing.T) {
 	id := start(t, a, b, c)
 	a.ok(t, vault.KindApp, "intro.accept", `{"intro_id":"`+id+`"}`)
 	deliver(t, a, aB, b, bA)
-	c.ok(t, vault.KindDesktop, "intro.decline", `{"intro_id":"`+id+`"}`) // a desktop may decline
+	c.ok(t, vault.KindApp, "intro.decline", `{"intro_id":"`+id+`"}`) // (0.95.0) the app's alone
 	deliver(t, c, cB, b, bC)
 	if ev := b.h.SentOfType("intro.event"); !strings.Contains(string(ev[len(ev)-2].Body), "declined") {
 		t.Fatalf("B's events: %+v", ev)

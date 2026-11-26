@@ -38,6 +38,8 @@ type rotWorld struct {
 	blobs       map[string]map[string][]byte
 	blobDeletes []string
 	revokes     []string
+	claimDels   []string         // "mailbox:claim|code:id" per claim deletion (relayrot_claims_test.go)
+	claimErr    map[string]error // a mailbox's answer to claim deletions (nil: deleted)
 	wsAsked     map[string]bool
 	blobInfo    map[string]BlobEntry // "mailbox/id": sender, created_at
 	// queue are the messages waiting in each mailbox, given once each

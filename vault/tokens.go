@@ -73,10 +73,8 @@ func (m *Manager) mint(p *Peer, kind string, ttl time.Duration, quota *relayauth
 	}
 	// relayclient backdates iat by 60 s (RELAY-PROTOCOL §5.2); exp = iat + ttl.
 	exp := now.UTC().Truncate(time.Second).Add(-tokenBackdate).Add(ttl)
-	it := IssuedToken{JTI: jti, Kind: kind, Sub: relayauth.EncodeKey(p.Relay.PK), PeerID: p.ID, Exp: exp}
-	if m.relayRotation() {
-		it.Iss = m.st.Relay.Mailbox
-	}
+	// The issuing mailbox, with relay key rotation off too (issuingMailbox).
+	it := IssuedToken{JTI: jti, Kind: kind, Sub: relayauth.EncodeKey(p.Relay.PK), PeerID: p.ID, Exp: exp, Iss: m.issuingMailbox()}
 	return tok, append(acc, it), nil
 }
 

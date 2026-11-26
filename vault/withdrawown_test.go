@@ -166,6 +166,12 @@ func TestWithdrawnWaitingRequestSendsNoHsInit(t *testing.T) {
 		r, _ := b.request(t, "connection.invite.accept", `{"link":"`+link+`"}`)
 		cid := bodyStr(t, r, "connection_id")
 		before, _ := outTo(t, b, a)
+		b.m.mu.Lock()
+		initID := b.m.st.Outgoing[b.m.waitingOutgoing(cid)].InitOutbox
+		b.m.mu.Unlock()
+		if initID == "" || !outboxPending(b, initID) {
+			t.Fatalf("%s: no hs.init waiting in the outbox", typ)
+		}
 		if typ == "expiry" {
 			b.m.mu.Lock()
 			b.m.expireRequests(b.m.now().Add(OutgoingRequestTTL + time.Minute))
@@ -175,6 +181,11 @@ func TestWithdrawnWaitingRequestSendsNoHsInit(t *testing.T) {
 		}
 		if rq, waiting := b.m.connRequest(cid, ReqOut); rq != nil || waiting {
 			t.Fatalf("%s: the request is left", typ)
+		}
+		// The drain's backoff after the failed try would hide a leftover entry
+		// below, so the entry itself is looked at.
+		if outboxPending(b, initID) {
+			t.Fatalf("%s: the hs.init is still in the outbox", typ)
 		}
 		b.relay.mu.Lock()
 		b.relay.failMailbox = nil
@@ -201,4 +212,16 @@ func TestOwnOutgoingRequestBlockAtTheLimit(t *testing.T) {
 	if rq, _ := b.m.connRequest(cid, ReqOut); rq == nil {
 		t.Fatal("a refused block withdrew the request")
 	}
+}
+
+// Whether the outbox holds entry id, not done.
+func outboxPending(f *devFixture, id string) bool {
+	f.m.mu.Lock()
+	defer f.m.mu.Unlock()
+	for _, e := range f.m.st.Outbox {
+		if e.ID == id && !e.Done {
+			return true
+		}
+	}
+	return false
 }

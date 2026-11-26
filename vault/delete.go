@@ -192,6 +192,10 @@ const (
 	deleteRetryCap   = 15 * time.Second
 	markDeletingFor  = 2 * time.Minute
 	eraseRetryFor    = 60 * time.Second
+	// othersDeleteFor bounds step 2's best-effort deletions of a pending
+	// key's and the old mailboxes, together, so a stalled one leaves the
+	// drain its time.
+	othersDeleteFor = 10 * time.Second
 )
 
 // DeleteRetry overrides a deletion's retry schedules (tests); a zero field
@@ -199,12 +203,14 @@ const (
 type DeleteRetry struct {
 	First, Cap  time.Duration
 	Mark, Erase time.Duration
+	Others      time.Duration // othersDeleteFor
 }
 
 func (m *Manager) deleteRetry() DeleteRetry {
-	r := DeleteRetry{First: deleteRetryFirst, Cap: deleteRetryCap, Mark: markDeletingFor, Erase: eraseRetryFor}
+	r := DeleteRetry{First: deleteRetryFirst, Cap: deleteRetryCap, Mark: markDeletingFor, Erase: eraseRetryFor, Others: othersDeleteFor}
 	if o := m.opt.DeleteRetry; o != nil {
-		for _, f := range []struct{ to, from *time.Duration }{{&r.First, &o.First}, {&r.Cap, &o.Cap}, {&r.Mark, &o.Mark}, {&r.Erase, &o.Erase}} {
+		for _, f := range []struct{ to, from *time.Duration }{{&r.First, &o.First}, {&r.Cap, &o.Cap}, {&r.Mark, &o.Mark}, {&r.Erase, &o.Erase},
+			{&r.Others, &o.Others}} {
 			if *f.from != 0 {
 				*f.to = *f.from
 			}
@@ -410,12 +416,23 @@ func (m *Manager) finishMarked(ctx context.Context) {
 	}
 }
 
-// deleteMailbox deletes the vault's relay mailbox (step 2), once: the relay
-// key exists only until step 3, and after a crash the convergence path
-// (an unlock or recovery that finds the marker) has no key to sign with,
-// so the mailbox then stays, as on a relay before 0.5.0. The request is
-// idempotent at the relay. On success every queued revocation and claim
-// deletion is done: they concerned this mailbox, which no longer exists.
+// deleteMailbox deletes the vault's relay mailbox (step 2), once; the
+// request is idempotent at the relay, so a convergence run (finishMarked)
+// may repeat it. The relay deletes with it every mailbox rotated into it
+// that is still in its grace (RELAY-PROTOCOL §6.10). After a relay key
+// rotation the vault also deletes the others itself, best effort, within
+// othersDeleteFor in all so the drain's notices keep their time: a pending
+// key's mailbox first, with the client's retries (if its rotate landed
+// and the second write did not, it is the live successor, which no
+// cascade reaches), then each old one with its own key, one attempt each
+// (against a relay that does not cascade; one past the vault's stop may
+// still be at the relay until its grace ends, holding its open tokens and
+// claims). A queued revocation or claim deletion is done once every
+// mailbox it would go to (outboxMailboxes) is deleted: they concerned
+// those mailboxes, which no longer exist. One for an old mailbox whose
+// deletion failed or was cut off stays queued, as all do when the current
+// one's fails; one for an old mailbox past the vault's stop is done
+// whatever its deletion's answer, since the drain sends nothing for it.
 func (m *Manager) deleteMailbox(ctx context.Context) {
 	if m.holdForMark() {
 		return
@@ -423,19 +440,94 @@ func (m *Manager) deleteMailbox(ctx context.Context) {
 	if err := m.relay.DeleteMailbox(ctx); err != nil {
 		return // the revocations and claim deletions remain the fallback
 	}
-	if m.relayRotation() && m.keys != nil && m.keys.pendingRelay != nil {
-		// A pending key's mailbox, which a rotate may have made (§3.4);
-		// best effort: a mailbox never made answers not_found.
-		if r := m.pendingRelayClient(); r != nil {
-			_ = r.DeleteMailbox(ctx)
+	now := m.now()
+	gone := map[string]bool{m.st.Relay.Mailbox: true}
+	if m.relayRotation() && m.keys != nil {
+		octx, cancel := context.WithTimeout(ctx, m.deleteRetry().Others)
+		defer cancel()
+		if m.keys.pendingRelay != nil {
+			// A mailbox never made answers 204 too.
+			if r := m.pendingRelayClient(); r != nil {
+				_ = r.DeleteMailbox(octx)
+			}
+		}
+		once := withOneAttempt(octx)
+		for i := range m.st.Relay.Old {
+			if octx.Err() != nil {
+				break // cut off: the rest stay queued
+			}
+			if i >= len(m.keys.oldRelay) {
+				continue
+			}
+			r := m.oldRelayClient(i)
+			if r == nil {
+				continue
+			}
+			// Our relay answers 204 for a mailbox already gone;
+			// mailbox_unknown is tolerated from one that does not.
+			if err := r.DeleteMailbox(once); err == nil || RelayCode(err) == CodeMailboxUnknown {
+				gone[m.st.Relay.Old[i].Mailbox] = true
+			}
 		}
 	}
 	for _, e := range m.st.Outbox {
-		if e.Op == OpRevoke || e.Op == OpDeleteClaim || e.Op == OpDeletePairCode {
+		if e.Op != OpRevoke && e.Op != OpDeleteClaim && e.Op != OpDeletePairCode {
+			continue
+		}
+		done := true
+		for _, mb := range m.outboxMailboxes(e, now) {
+			done = done && gone[mb]
+		}
+		if done {
 			e.Done = true
 		}
 	}
 	m.dirty = true
+}
+
+// outboxMailboxes are the vault's own mailboxes a queued revocation or
+// claim deletion goes to, as the drain routes it (revoke, claimRelay): a
+// claim's to the mailbox that put it, a token's jti to the one that issued
+// it, a sender's key to the current one and every old one in its grace;
+// an old mailbox only while in its grace (none at all when that one's
+// grace is over: the entry sends nothing). m.mu is held.
+func (m *Manager) outboxMailboxes(e *OutboxEntry, now time.Time) []string {
+	cur := m.st.Relay.Mailbox
+	if !m.relayRotation() {
+		return []string{cur}
+	}
+	old := func(mb string) []string {
+		if mb == "" || mb == cur {
+			return []string{cur}
+		}
+		for i := range m.st.Relay.Old {
+			if m.st.Relay.Old[i].Mailbox == mb && m.oldInGrace(i, now) {
+				return []string{mb}
+			}
+		}
+		return nil
+	}
+	switch {
+	case e.Op == OpDeleteClaim || e.Op == OpDeletePairCode:
+		return old(e.ByMailbox)
+	case e.Kind == "jti":
+		out := []string{cur}
+		for _, t := range m.st.Issued {
+			if t.JTI == e.Value && t.Iss != "" && t.Iss != cur {
+				out = old(t.Iss)
+			}
+		}
+		return out
+	case e.Kind == "sub":
+		out := []string{cur}
+		for i := range m.st.Relay.Old {
+			if m.oldInGrace(i, now) {
+				out = append(out, m.st.Relay.Old[i].Mailbox)
+			}
+		}
+		return out
+	}
+	return []string{cur}
 }
 
 // UserIndexHash is the store key component of a member's index object

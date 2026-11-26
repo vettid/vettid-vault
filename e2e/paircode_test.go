@@ -54,12 +54,16 @@ func TestPairCodeRealRelay(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the relay's salts fail the vault's checks: %v", err)
 	}
+	// The salt a PUT goes under, as the vault picks it: in an hour's first
+	// minutes the relay also lists the previous hour's, which it refuses
+	// for a PUT (the list's first entry is not the one).
+	putSalt := paircode.ForPut(salts, time.Now())[0]
 	put := func(code []byte, bundle string) (claimID string) {
 		t.Helper()
 		claimID, _ = paircode.NewClaimID()
 		sc := make([]byte, paircode.SaltSize)
 		_, _ = rand.Read(sc)
-		tag, err := paircode.Tag(paircode.PurposeDesktop, pcRelayName, code, salts[0].SR)
+		tag, err := paircode.Tag(paircode.PurposeDesktop, pcRelayName, code, putSalt.SR)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -69,7 +73,7 @@ func TestPairCodeRealRelay(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if exp, err := cr.PutPairCode(ctx, claimID, salts[0].SaltID, tag, sc, blob); err != nil || time.Until(exp) <= 0 {
+		if exp, err := cr.PutPairCode(ctx, claimID, putSalt.SaltID, tag, sc, blob); err != nil || time.Until(exp) <= 0 {
 			t.Fatalf("PUT: %v, expires %v", err, exp)
 		}
 		return claimID
@@ -131,7 +135,7 @@ func TestPairCodeRealRelay(t *testing.T) {
 	// The relay's refusals as the vault reads them (§6.7.2's retry rule):
 	// a salt it does not list is bad_request; another mailbox's claim
 	// with the same tag is code_taken, and both claims are gone.
-	tag3, _ := paircode.Tag(paircode.PurposeDesktop, pcRelayName, code2, salts[0].SR)
+	tag3, _ := paircode.Tag(paircode.PurposeDesktop, pcRelayName, code2, putSalt.SR)
 	id3, _ := paircode.NewClaimID()
 	if _, err := cr.PutPairCode(ctx, id3, "00000000", tag3, make([]byte, paircode.SaltSize), []byte("x")); vault.RelayCode(err) != "bad_request" {
 		t.Fatalf("an unlisted salt: %v (%q)", err, vault.RelayCode(err))
@@ -143,9 +147,9 @@ func TestPairCodeRealRelay(t *testing.T) {
 	if _, err := other.Register(ctx); err != nil {
 		t.Fatal(err)
 	}
-	tag4, _ := paircode.Tag(paircode.PurposeDesktop, pcRelayName, code4, salts[0].SR)
+	tag4, _ := paircode.Tag(paircode.PurposeDesktop, pcRelayName, code4, putSalt.SR)
 	id4, _ := paircode.NewClaimID()
-	if _, err := other.PutPairCode(ctx, id4, salts[0].SaltID, tag4, make([]byte, paircode.SaltSize), []byte("x")); vault.RelayCode(err) != "code_taken" {
+	if _, err := other.PutPairCode(ctx, id4, putSalt.SaltID, tag4, make([]byte, paircode.SaltSize), []byte("x")); vault.RelayCode(err) != "code_taken" {
 		t.Fatalf("the same tag from another mailbox: %v (%q)", err, vault.RelayCode(err))
 	}
 	if status, raw := redeem(code4); status != http.StatusNotFound {

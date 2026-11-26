@@ -351,8 +351,7 @@ func (m *Manager) abandonOutgoing(id string, now time.Time) {
 	for _, t := range og.Issued {
 		m.revokeIssued(t, og.PeerID, now)
 	}
-	m.dropOutboxEntry(og.InitOutbox)
-	m.dropOutgoing(id)
+	m.dropOutgoing(id) // its hs.init too, if not yet deposited
 	m.dirty = true
 }
 

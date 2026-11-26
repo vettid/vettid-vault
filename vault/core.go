@@ -547,7 +547,15 @@ func (m *Manager) hConnRemove(_ context.Context, s *Session, in *envelope.Inner)
 	}
 	p, ok := m.st.Connections[id]
 	if !ok {
-		return nil, errNotFound
+		// §6.4 "Who approves", §10.4: the member's outgoing request, not yet
+		// a connection, is withdrawn exactly as connection.decline does (the
+		// app's alone: appOnlyWithdrawal).
+		r, ok := m.withdrawOutgoing(id, s.now)
+		if !ok {
+			return nil, errNotFound
+		}
+		m.requestDeclined(r, s)
+		return nil, nil
 	}
 	m.removeConnection(p, "out", s.now)
 	return nil, nil

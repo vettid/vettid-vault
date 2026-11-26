@@ -559,8 +559,15 @@ func (r *ClientRelay) DeleteClaim(ctx context.Context, claimID string) error {
 	return guardedErr(r, ctx, func(c context.Context) error { return r.client(r.base).DeleteClaim(c, claimID) })
 }
 
+// DeleteMailbox makes one attempt for a ctx from withOneAttempt (the
+// deletion's old and pending mailboxes, best effort).
 func (r *ClientRelay) DeleteMailbox(ctx context.Context) error {
-	return guardedErr(r, ctx, func(c context.Context) error { return r.client(r.base).DeleteMailbox(c) })
+	return guardedErr(r, ctx, func(c context.Context) error {
+		if c.Value(oneAttemptKey{}) != nil {
+			return r.once().DeleteMailbox(c)
+		}
+		return r.client(r.base).DeleteMailbox(c)
+	})
 }
 
 func (r *ClientRelay) MintToken(sub ed25519.PublicKey, ttl time.Duration, jti string, quota *relayauth.Quota, ownerDevice bool) (string, error) {

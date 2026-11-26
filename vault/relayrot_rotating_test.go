@@ -40,6 +40,8 @@ type rotWorld struct {
 	revokes     []string
 	claimDels   []string         // "mailbox:claim|code:id" per claim deletion (relayrot_claims_test.go)
 	claimErr    map[string]error // a mailbox's answer to claim deletions (nil: deleted)
+	deleteErr   map[string]error // a mailbox's answer to its deletion (nil: deleted, then in deleted)
+	deletedOnce []string         // the mailboxes asked to be deleted with one attempt (withOneAttempt)
 	wsAsked     map[string]bool
 	blobInfo    map[string]BlobEntry // "mailbox/id": sender, created_at
 	// queue are the messages waiting in each mailbox, given once each
@@ -243,9 +245,15 @@ func (r *rotRelay) MintToken(sub ed25519.PublicKey, ttl time.Duration, jti strin
 	return c.MintToken(relayauth.EncodeKey(sub), r.base, relayclient.TokenOptions{TTL: ttl, JTI: jti, Quota: q, OwnerDevice: ownerDevice})
 }
 
-func (r *rotRelay) DeleteMailbox(context.Context) error {
+func (r *rotRelay) DeleteMailbox(ctx context.Context) error {
 	r.w.mu.Lock()
 	defer r.w.mu.Unlock()
+	if ctx.Value(oneAttemptKey{}) != nil {
+		r.w.deletedOnce = append(r.w.deletedOnce, mailboxOf(r.key))
+	}
+	if err := r.w.deleteErr[mailboxOf(r.key)]; err != nil {
+		return err
+	}
 	r.w.deleted = append(r.w.deleted, mailboxOf(r.key))
 	return nil
 }

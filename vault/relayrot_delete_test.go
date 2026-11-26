@@ -192,9 +192,10 @@ func TestRelayRotDeleteDeletesAStoppedOldMailbox(t *testing.T) {
 	}
 }
 
-// The old and pending mailboxes' deletions make one attempt each, so a
-// relay that answers 5xx for one does not take step 2's time from the
-// drain's notices.
+// The old mailboxes' deletions make one attempt each, so a relay that
+// answers 5xx for one does not take step 2's time from the drain's
+// notices; any other deletion (the current and the pending mailbox) keeps
+// the client's retries.
 func TestDeleteMailboxOneAttempt(t *testing.T) {
 	var n atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -211,13 +212,22 @@ func TestDeleteMailboxOneAttempt(t *testing.T) {
 	if got := n.Load(); got != 1 {
 		t.Fatalf("%d attempts, want 1", got)
 	}
+	n.Store(0)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := r.DeleteMailbox(ctx); err == nil {
+		t.Fatal("a 503 answered as deleted")
+	}
+	if got := n.Load(); got < 2 {
+		t.Fatalf("%d attempts with the client's retries", got)
+	}
 }
 
 // Two rotations, two old mailboxes: each is deleted, and one whose
 // deletion fails does not stop the next.
 func TestRelayRotDeleteTwoOldMailboxes(t *testing.T) {
 	for _, fail := range []bool{false, true} {
-		fx, old1, _, _, _ := deletionAfterRotation(t)
+		fx, old1, _, before, _ := deletionAfterRotation(t)
 		if err := fx.credRotate(); err != nil {
 			t.Fatal(err)
 		}
@@ -229,9 +239,21 @@ func TestRelayRotDeleteTwoOldMailboxes(t *testing.T) {
 			fx.w.mu.Unlock()
 			want = cur + "," + old2
 		}
+		fx.claimEntries(old2, "o2")
+		r, c := fx.sentMark()
 		fx.deleteVault()
 		if got := fx.deletedMailboxes(); got != want {
 			t.Fatalf("fail %v: deleted %q, want %q", fail, got, want)
+		}
+		// Only the failed mailbox's claim deletion goes out in the drain;
+		// the deleted old2's do not. (A sender key's revocation, routed to
+		// both, goes to both while old1's keeps it queued.)
+		sent := strings.Join(fx.sentSince(r, c), ",")
+		if got := strings.Contains(sent, old1+":claim:"+before.ClaimID); got != fail {
+			t.Fatalf("fail %v: old1's claim deletion sent %v: %s", fail, got, sent)
+		}
+		if strings.Contains(sent, ":o2-") {
+			t.Fatalf("fail %v: the deleted old2's claim deletions were sent: %s", fail, sent)
 		}
 	}
 }

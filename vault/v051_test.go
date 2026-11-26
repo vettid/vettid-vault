@@ -196,7 +196,7 @@ func TestDeleteRetryDefaults(t *testing.T) {
 		t.Fatalf("%+v", r)
 	}
 	m.opt.DeleteRetry = &DeleteRetry{Mark: time.Second}
-	if r := m.deleteRetry(); r.Mark != time.Second || r.First != time.Second || r.Erase != 60*time.Second {
+	if r := m.deleteRetry(); r.Mark != time.Second || r.First != time.Second || r.Erase != 60*time.Second || r.Others != 10*time.Second {
 		t.Fatalf("%+v", r)
 	}
 }

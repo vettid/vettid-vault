@@ -574,8 +574,8 @@ func (m *Manager) hConnApprove(_ context.Context, s *Session, in *envelope.Inner
 // send (0.95.0, §6.4 "Who approves", §10.4 Block list): block.add of a
 // pending request (a decline), and block.add or connection.remove naming the
 // member's outgoing request that is not yet a connection (which withdraws
-// it). On an active connection both are as before. A body that does not
-// read is left to the handler. m.mu is held.
+// it). On a connection both are step-up types for a desktop (0.96.0). A body
+// that does not read is left to the handler. m.mu is held.
 func (m *Manager) appOnlyCore(typ string, body []byte) bool {
 	return appOnlyPending(typ, body) || m.appOnlyWithdrawal(typ, body)
 }

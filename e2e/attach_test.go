@@ -193,7 +193,7 @@ func entryOf(t *testing.T, tv *testVault, msg string) vault.AttEntry {
 
 func waitEntry(t *testing.T, tv *testVault, msg string, pred func(vault.AttEntry) bool) vault.AttEntry {
 	t.Helper()
-	deadline := time.Now().Add(30 * time.Second)
+	deadline := time.Now().Add(entryWait)
 	for {
 		for _, e := range tv.manager().AttachEntries() {
 			if e.Msg == msg && pred(e) {

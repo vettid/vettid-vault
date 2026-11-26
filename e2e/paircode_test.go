@@ -132,6 +132,55 @@ func TestPairCodeRealRelay(t *testing.T) {
 		t.Fatalf("redeem after the delete: %d %s", status, raw)
 	}
 
+	// The relay deletes a claim by its signing mailbox: a DELETE signed by
+	// another mailbox's key (the vault's next key, after a relay key
+	// rotation) answers as done and leaves the claim, so the vault deletes
+	// with the key that put it (§3.4.1 S7's rule; vault
+	// TestRelayRotClaimsAreDeletedAtTheCreatingMailbox).
+	_, skNext, _ := ed25519.GenerateKey(rand.Reader)
+	next := vault.NewClientRelay(r.URL, skNext, http.DefaultClient, nil)
+	if _, err := next.Register(ctx); err != nil {
+		t.Fatal(err)
+	}
+	code5, _ := paircode.NewCode()
+	id5 := put(code5, `{"probe":5}`)
+	if err := next.DeletePairCode(ctx, id5); err != nil {
+		t.Fatalf("another mailbox's DELETE: %v", err)
+	}
+	if status, raw := redeem(code5); status != http.StatusOK {
+		t.Fatalf("a claim another mailbox deleted is gone: %d %s", status, raw)
+	}
+	code6, _ := paircode.NewCode()
+	id6 := put(code6, `{"probe":6}`)
+	if err := next.DeletePairCode(ctx, id6); err != nil {
+		t.Fatal(err)
+	}
+	if err := cr.DeletePairCode(ctx, id6); err != nil {
+		t.Fatal(err)
+	}
+	if status, raw := redeem(code6); status != http.StatusNotFound {
+		t.Fatalf("the creating mailbox's DELETE left the claim: %d %s", status, raw)
+	}
+
+	// A link claim the same way: another mailbox's DELETE leaves it, the
+	// creating mailbox's removes it.
+	linkID, _, err := cr.PutClaim(ctx, []byte("link-claim"), time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := next.DeleteClaim(ctx, linkID); err != nil && vault.RelayCode(err) != vault.CodeClaimUnknown {
+		t.Fatalf("another mailbox's link DELETE: %v", err)
+	}
+	if got, err := cr.GetClaim(ctx, r.URL, linkID); err != nil || string(got) != "link-claim" {
+		t.Fatalf("a link claim another mailbox deleted is gone: %q %v", got, err)
+	}
+	if err := cr.DeleteClaim(ctx, linkID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cr.GetClaim(ctx, r.URL, linkID); err == nil {
+		t.Fatal("the creating mailbox's link DELETE left the claim")
+	}
+
 	// The relay's refusals as the vault reads them (§6.7.2's retry rule):
 	// a salt it does not list is bad_request; another mailbox's claim
 	// with the same tag is code_taken, and both claims are gone.

@@ -2064,9 +2064,9 @@ func (m *Manager) createInvite(ctx context.Context, kind string, ttl time.Durati
 	if err != nil {
 		return nil, "", err
 	}
-	inv := &Invite{ID: id, Kind: kind, Remote: remote, Exp: exp, OpenJTI: jti, ClaimID: claimID, CreatedBy: by}
+	inv := &Invite{ID: id, Kind: kind, Remote: remote, Exp: exp, OpenJTI: jti, ClaimID: claimID, CreatedBy: by, Mailbox: m.issuingMailbox()}
 	m.st.Invites[id] = inv
-	m.st.Issued = append(m.st.Issued, IssuedToken{JTI: jti, Kind: TokOpen, Sub: "*", Exp: exp})
+	m.st.Issued = append(m.st.Issued, IssuedToken{JTI: jti, Kind: TokOpen, Sub: "*", Exp: exp, Iss: m.issuingMailbox()})
 	return inv, link, nil
 }
 

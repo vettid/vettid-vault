@@ -25,8 +25,12 @@ const (
 var tagRE = regexp.MustCompile(`^[a-z0-9_.-]{1,32}$`)
 
 // desktopApproval are the core types a desktop sends only with an app's
-// approval (§6.8 step-up).
-var desktopApproval = []string{"settings.set", "connection.remove", "block.remove"}
+// approval (§6.8 step-up). (0.96.0) block.add is one, like
+// connection.remove: held by type, a stale connection and an unknown id
+// included, unless its form is app-only (appOnlyCore: a pending_id, or an
+// id naming the member's outgoing request), which is refused at once and
+// again if one was held.
+var desktopApproval = []string{"settings.set", "connection.remove", "block.add", "block.remove"}
 
 func (m *Manager) registerConnections() {
 	r := func(t string, h HandlerFunc) {

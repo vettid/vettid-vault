@@ -43,6 +43,9 @@ type testVault struct {
 	// optional are the optional features the vault's image registers
 	// (0.26.0, §11.10.8); nil: all of them.
 	optional []string
+	// wrap, when set, changes the vault's feature list at every creation
+	// and unlock (a test-only vault playing a misbehaving member).
+	wrap func(*all.Set, []vault.Feature) []vault.Feature
 
 	mu       sync.Mutex
 	m        *vault.Manager
@@ -68,6 +71,13 @@ func newTestVault(t *testing.T, relayURL, name string, tweak func(*vault.Options
 // the named optional features (nil: all of them).
 func newTestVaultWith(t *testing.T, relayURL, name string, optional []string, tweak func(*vault.Options)) *testVault {
 	t.Helper()
+	return newTestVaultWrapped(t, relayURL, name, optional, tweak, nil)
+}
+
+// newTestVaultWrapped is newTestVaultWith whose feature list wrap changes.
+func newTestVaultWrapped(t *testing.T, relayURL, name string, optional []string, tweak func(*vault.Options),
+	wrap func(*all.Set, []vault.Feature) []vault.Feature) *testVault {
+	t.Helper()
 	ctx := ctxT(t, 60*time.Second)
 	st, err := store.NewDir(t.TempDir())
 	if err != nil {
@@ -77,7 +87,7 @@ func newTestVaultWith(t *testing.T, relayURL, name string, optional []string, tw
 	if err != nil {
 		t.Fatal(err)
 	}
-	tv := &testVault{t: t, name: name, relay: relayURL, store: st, sealer: sealer, optional: optional}
+	tv := &testVault{t: t, name: name, relay: relayURL, store: st, sealer: sealer, optional: optional, wrap: wrap}
 	tv.opts = vault.Options{Store: st, Sealer: sealer, PollWait: time.Second, Release: devenclave.Release, MarkDeleting: vault.NoHostMark, ConfirmAppKey: vault.NoHostAppKey,
 		Counter: countertest.NewLive()} // release R: changes of secret close a generation at the counter
 	if tweak != nil {
@@ -96,7 +106,7 @@ func newTestVaultWith(t *testing.T, relayURL, name string, optional []string, tw
 	tv.fs = tv.newSet()
 	tv.msg = tv.fs.Messaging
 	o := tv.opts
-	o.Features = tv.fs.List()
+	o.Features = tv.features(tv.fs)
 	m, err := devenclave.Create(ctx, vault.CreateParams{
 		Options: o, UserGUID: "user-" + name, PIN: pin, RelayURL: relayURL, Provisional: true,
 		// §11.5 (0.18.0): every vault holds the account's names.
@@ -182,7 +192,7 @@ func (tv *testVault) unlock(ctx context.Context, tweak func(*vault.Options)) (*v
 	tv.mu.Unlock()
 	f := fs.Messaging
 	o := tv.opts
-	o.Features = fs.List()
+	o.Features = tv.features(fs)
 	if tweak != nil {
 		tweak(&o)
 	}
@@ -326,6 +336,14 @@ func (tv *testVault) newSet() *all.Set {
 		return newSet()
 	}
 	return all.NewSet(all.DevOptionsWith(tv.optional))
+}
+
+// features is the vault's feature list: fs's, changed by wrap if set.
+func (tv *testVault) features(fs *all.Set) []vault.Feature {
+	if tv.wrap == nil {
+		return fs.List()
+	}
+	return tv.wrap(fs, fs.List())
 }
 
 // credPW is the credential password of the test vaults' first apps.

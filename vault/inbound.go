@@ -734,6 +734,17 @@ func (m *Manager) dispatch(ctx context.Context, p *Peer, in *envelope.Inner, ep 
 	}
 	s := &Session{m: m, peer: p, host: managerHost{m}, from: info(p), ctx: ctx, now: now, inner: in, relayAt: m.relayAt, epoch: ep}
 	allowed := te.allows(p.Kind) && !(p.Recovering && !recoveryAllowed[in.Type])
+	if (p.Kind == KindAgent || p.Kind == KindDesktop) &&
+		(appOnlyPending(in.Type, in.Body) || m.hasAccess(p, now) && m.appOnlyWithdrawal(in.Type, in.Body)) {
+		// (0.95.0, §6.4 "Who approves") A core form that declines a
+		// connection request or withdraws the member's own: the app's
+		// alone, refused at once, never held or delegated. The withdrawal
+		// forms depend on what the vault holds, so they are judged only
+		// for a sender with an access session: one without is answered
+		// session_required below whatever the id, and learns nothing of it.
+		m.respondError(p, in, rkey, "forbidden", "", now)
+		return disp(eph)
+	}
 	if (p.Kind == KindAgent || p.Kind == KindDesktop) && !te.spec.DesktopApproval {
 		if af, ok := te.handler.(AppOnlyForms); ok && af.AppOnly(in.Type, in.Body) {
 			// A form only the app may send, whatever the sender's grants

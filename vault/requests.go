@@ -570,6 +570,51 @@ func (m *Manager) hConnApprove(_ context.Context, s *Session, in *envelope.Inner
 	return nil, nil
 }
 
+// appOnlyCore reports whether a core request is in a form only the app may
+// send (0.95.0, §6.4 "Who approves", §10.4 Block list): block.add of a
+// pending request (a decline), and block.add or connection.remove naming the
+// member's outgoing request that is not yet a connection (which withdraws
+// it). On an active connection both are as before. A body that does not
+// read is left to the handler. m.mu is held.
+func (m *Manager) appOnlyCore(typ string, body []byte) bool {
+	return appOnlyPending(typ, body) || m.appOnlyWithdrawal(typ, body)
+}
+
+// appOnlyPending is the form of appOnlyCore that the body alone decides:
+// block.add of a pending request.
+func appOnlyPending(typ string, body []byte) bool {
+	if typ != "block.add" {
+		return false
+	}
+	o, err := strictjson.ParseObject(body)
+	if err != nil {
+		return false
+	}
+	_, hasPend := o["pending_id"]
+	return hasPend
+}
+
+// appOnlyWithdrawal is the form of appOnlyCore that depends on the vault's
+// state: block.add or connection.remove naming the member's outgoing
+// request that is not yet a connection. m.mu is held.
+func (m *Manager) appOnlyWithdrawal(typ string, body []byte) bool {
+	if typ != "block.add" && typ != "connection.remove" {
+		return false
+	}
+	o, err := strictjson.ParseObject(body)
+	if err != nil {
+		return false
+	}
+	cid, err := o.String("connection_id")
+	// A connection's request is gone before it is a connection (activation),
+	// so this is a guard, not a case that arises.
+	if err != nil || m.st.Connections[cid] != nil {
+		return false
+	}
+	r, waiting := m.connRequest(cid, ReqOut)
+	return r != nil || waiting
+}
+
 func (m *Manager) hConnDecline(_ context.Context, s *Session, in *envelope.Inner) (json.RawMessage, error) {
 	id, dir, err := requestRef(in)
 	if err != nil {

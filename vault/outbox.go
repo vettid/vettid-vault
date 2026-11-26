@@ -695,15 +695,22 @@ func (m *Manager) drainOutbox(ctx context.Context) {
 		case OpRevoke:
 			err = m.revoke(ctx, e.Kind, e.Value) // §3.4.1 S7: to the issuing mailbox
 		case OpDeleteClaim:
-			err = m.relay.DeleteClaim(ctx, e.Value)
-			if RelayCode(err) == CodeClaimUnknown {
-				err = nil
+			// Through the key of the mailbox that put the claim: the relay
+			// deletes a claim by the signing mailbox (§3.4.1 S7's rule).
+			if r := m.claimRelay(e.ByMailbox); r != nil {
+				err = r.DeleteClaim(ctx, e.Value)
+				if RelayCode(err) == CodeClaimUnknown || m.oldMailboxGone(e.ByMailbox, err) {
+					err = nil
+				}
 			}
 		case OpDeletePairCode:
 			// Idempotent at the relay; a relay without code claims has
 			// none to delete.
-			if pc, ok := m.relay.(PairCodeRelay); ok {
+			if pc, ok := m.claimRelay(e.ByMailbox).(PairCodeRelay); ok {
 				err = pc.DeletePairCode(ctx, e.Value)
+				if m.oldMailboxGone(e.ByMailbox, err) {
+					err = nil
+				}
 			}
 		}
 		m.dirty = true

@@ -191,7 +191,7 @@ func (m *Manager) queueDeleteInviteClaim(inv *Invite, now time.Time) {
 	if inv.ClaimID == "" {
 		return
 	}
-	e := &OutboxEntry{ID: m.newID(now), Op: OpDeleteClaim, Value: inv.ClaimID, Created: now}
+	e := &OutboxEntry{ID: m.newID(now), Op: OpDeleteClaim, Value: inv.ClaimID, Created: now, ByMailbox: inv.Mailbox}
 	if inv.Code {
 		// A code claim lives at most the pairing's 10 minutes at the relay:
 		// its deletion is retried until then (0.94.1).
@@ -332,8 +332,7 @@ func (m *Manager) createCodePairing(ctx context.Context, role, by string, now ti
 		}
 		switch {
 		case err == nil:
-			m.st.Invites[id] = &Invite{ID: id, Kind: role, Exp: exp, OpenJTI: jti, ClaimID: claimID, CreatedBy: by, Code: true}
-			m.st.Issued = append(m.st.Issued, IssuedToken{JTI: jti, Kind: TokOpen, Sub: "*", Exp: exp})
+			m.recordCodeInvite(id, role, by, jti, claimID, exp)
 			m.st.PairCodeIssued = append(m.st.PairCodeIssued, now)
 			// The code goes into the answer as bytes (8 alphabet
 			// characters need no escaping), never as a string, and the
@@ -360,7 +359,7 @@ func (m *Manager) createCodePairing(ctx context.Context, role, by string, now ti
 			// until the pairing's 10 minutes end, the token denylisted, and
 			// the app falls back to the link.
 			m.denyUnusedToken(jti, exp, now)
-			m.queue(&OutboxEntry{ID: m.newID(now), Op: OpDeletePairCode, Value: claimID, Created: now, NotAfter: exp.Add(time.Minute)})
+			m.queueDeleteCodeClaim(claimID, exp, now)
 			return nil, nil, errClaim
 		default:
 			m.denyUnusedToken(jti, exp, now)
@@ -371,10 +370,28 @@ func (m *Manager) createCodePairing(ctx context.Context, role, by string, now ti
 	return nil, nil, errPairRelay
 }
 
+// recordCodeInvite records a code pairing whose claim was put: the invite
+// and its open token, each under the mailbox whose key put the claim and
+// minted the token.
+func (m *Manager) recordCodeInvite(id, role, by, jti, claimID string, exp time.Time) {
+	m.st.Invites[id] = &Invite{ID: id, Kind: role, Exp: exp, OpenJTI: jti, ClaimID: claimID, CreatedBy: by, Code: true,
+		Mailbox: m.issuingMailbox()}
+	m.st.Issued = append(m.st.Issued, IssuedToken{JTI: jti, Kind: TokOpen, Sub: "*", Exp: exp, Iss: m.issuingMailbox()})
+}
+
+// queueDeleteCodeClaim queues the deletion of a code claim this vault
+// just tried to put (a failed PUT, which a lost 201 may hide), through the
+// mailbox whose key put it, retried until a minute past the claim's end at
+// the relay.
+func (m *Manager) queueDeleteCodeClaim(claimID string, exp, now time.Time) {
+	m.queue(&OutboxEntry{ID: m.newID(now), Op: OpDeletePairCode, Value: claimID, Created: now, NotAfter: exp.Add(time.Minute),
+		ByMailbox: m.issuingMailbox()})
+}
+
 // denyUnusedToken denylists the open token of a code pairing that was not
 // made: it was minted, and is never handed out.
 func (m *Manager) denyUnusedToken(jti string, exp time.Time, now time.Time) {
-	m.st.Issued = append(m.st.Issued, IssuedToken{JTI: jti, Kind: TokOpen, Sub: "*", Exp: exp})
+	m.st.Issued = append(m.st.Issued, IssuedToken{JTI: jti, Kind: TokOpen, Sub: "*", Exp: exp, Iss: m.issuingMailbox()})
 	m.denyJTI(jti, now)
 }
 

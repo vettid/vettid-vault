@@ -873,6 +873,12 @@ type Invite struct {
 	// Transfer marks the pairing of a direct transfer's new app (§6.7.1),
 	// the only app pairing a vault accepts after enrollment.
 	Transfer bool `json:"transfer,omitempty"`
+	// Mailbox is the vault mailbox whose key put the claim and minted the
+	// open token (only with Options.RelayKeyRotation): after a rotation,
+	// the claim's deletion goes through that mailbox's key (§3.4.1 S7, as
+	// a revocation to the issuing mailbox), so it is not a no-op at the
+	// relay.
+	Mailbox string `json:"mailbox,omitempty"`
 	// Code marks a code pairing (0.94.0 §6.7.2): ClaimID is a code claim
 	// (RELAY-PROTOCOL §6.9.1), deleted by its own route. The code itself
 	// is never stored.
@@ -1065,8 +1071,12 @@ type OutboxEntry struct {
 	PeerID   string `json:"peer_id,omitempty"`
 	RelayURL string `json:"relay_url,omitempty"`
 	Mailbox  string `json:"mailbox,omitempty"`
-	Token    string `json:"token,omitempty"`
-	Payload  []byte `json:"payload,omitempty"`
+	// ByMailbox is the vault mailbox whose key signs a claim's deletion
+	// (OpDeleteClaim, OpDeletePairCode): the one that put the claim; ""
+	// for the current one.
+	ByMailbox string `json:"by_mailbox,omitempty"`
+	Token     string `json:"token,omitempty"`
+	Payload   []byte `json:"payload,omitempty"`
 	// Type is the message's inner type, recorded at queue time (card GC
 	// #6875: the member's "not delivered" notice covers the member's own
 	// messages, not the vault's upkeep). Empty for an entry queued before.

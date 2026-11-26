@@ -131,6 +131,37 @@ func (m *Manager) relayRotation() bool { return m.opt.RelayKeyRotation }
 // later change, and until then the switch alone opens it.
 func (m *Manager) relayGateOpen() bool { return true }
 
+// issuingMailbox is the mailbox an open token or a claim made now is
+// recorded under (IssuedToken.Iss, Invite.Mailbox): the current one
+// (§3.4.1 S7). Recorded with relay key rotation off too, so one made
+// before the switch is turned on and ended after the first rotation still
+// goes to the mailbox that made it.
+func (m *Manager) issuingMailbox() string { return m.st.Relay.Mailbox }
+
+// claimRelay is the Relay that signs a claim's deletion for the mailbox
+// that put it: the current one for "" or the current mailbox, an old key's
+// while that mailbox is still collected (its grace), and nil once it is
+// not (its key is gone, and its claims with the mailbox). m.mu is held.
+func (m *Manager) claimRelay(mailbox string) Relay {
+	if mailbox == "" || mailbox == m.st.Relay.Mailbox || !m.relayRotation() {
+		return m.relay
+	}
+	now := m.now()
+	for i := range m.st.Relay.Old {
+		if o := &m.st.Relay.Old[i]; o.Mailbox == mailbox && o.Collect.Stopped.IsZero() && !oldStopDue(o, now) {
+			return m.oldRelayClient(i)
+		}
+	}
+	return nil
+}
+
+// oldMailboxGone reports whether err is an old mailbox's mailbox_unknown:
+// the mailbox and its claims are gone, so a deletion through its key is
+// done (as revoke treats it).
+func (m *Manager) oldMailboxGone(mailbox string, err error) bool {
+	return mailbox != "" && mailbox != m.st.Relay.Mailbox && RelayCode(err) == CodeMailboxUnknown
+}
+
 // pendingMailbox is the pending key's mailbox, "" for none.
 func (m *Manager) pendingMailbox() string {
 	if m.keys == nil || m.keys.pendingRelay == nil {

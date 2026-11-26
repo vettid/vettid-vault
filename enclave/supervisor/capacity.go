@@ -34,6 +34,7 @@ type capProc interface {
 type capEnv struct {
 	spawn     func() (capProc, error)
 	available func() uint64 // MemAvailable
+	free      func() uint64 // MemFree; nil: not read (tests)
 	total     func() uint64 // MemTotal
 	supRSS    func() uint64
 	supCPU    func() int64 // microseconds
@@ -303,8 +304,9 @@ func runCapacity(ctx context.Context, env capEnv, p selftest.CapacityRequest) *s
 // whatever is left.
 func runCodes(ctx context.Context, env capEnv, p selftest.CapacityRequest, held []heldVault, floor uint64,
 	room func(int) bool, notePeak func(*selftest.CapacityStats)) *selftest.CodeReport {
-	k := &selftest.CodeReport{MinAvailable: env.available()}
-	k.HeadroomBytes = int64(k.MinAvailable) - int64(floor) - int64(codeNeed())
+	k := &selftest.CodeReport{StartAvailable: env.available()}
+	k.MinAvailable = k.StartAvailable
+	k.HeadroomBytes = int64(k.StartAvailable) - int64(floor) - int64(codeNeed())
 	t0 := env.now()
 	ctx, cancel := context.WithTimeout(ctx, time.Duration(p.CodeSeconds)*time.Second)
 	defer cancel()
@@ -312,10 +314,26 @@ func runCodes(ctx context.Context, env capEnv, p selftest.CapacityRequest, held 
 	var xs, tags, waits, before, unlocks []float64
 	var opened, beforeSpans, derived []openSpan
 	var granted []int64
-	sample := func() {
+	if env.free != nil {
+		k.MinFree = env.free()
+	}
+	k.MaxAvailable = k.StartAvailable
+	// sample reads free memory; ticker marks the phase sampler's own
+	// readings (Samples), apart from those after each unlock and request.
+	sample := func(ticker bool) {
 		a := env.available()
+		var f uint64
+		if env.free != nil {
+			f = env.free()
+		}
 		mu.Lock()
-		k.MinAvailable = min(k.MinAvailable, a)
+		k.MinAvailable, k.MaxAvailable = min(k.MinAvailable, a), max(k.MaxAvailable, a)
+		if env.free != nil {
+			k.MinFree = min(k.MinFree, f)
+		}
+		if ticker {
+			k.Samples++
+		}
 		mu.Unlock()
 	}
 	// unlock runs one synthetic unlock, marked as an opening from before its
@@ -354,7 +372,7 @@ func runCodes(ctx context.Context, env capEnv, p selftest.CapacityRequest, held 
 			before = append(before, ms)
 			beforeSpans = append(beforeSpans, span)
 		}
-		sample()
+		sample(false)
 	}
 
 	codesDone := make(chan struct{})
@@ -364,7 +382,7 @@ func runCodes(ctx context.Context, env capEnv, p selftest.CapacityRequest, held 
 	go func() {
 		defer wg.Done()
 		for {
-			sample()
+			sample(true)
 			select {
 			case <-codesDone:
 				return
@@ -389,7 +407,7 @@ func runCodes(ctx context.Context, env capEnv, p selftest.CapacityRequest, held 
 				return
 			}
 			span, ms, ok := unlock()
-			sample()
+			sample(false)
 			mu.Lock()
 			if ok {
 				unlocks = append(unlocks, ms)
@@ -425,7 +443,7 @@ func runCodes(ctx context.Context, env capEnv, p selftest.CapacityRequest, held 
 					return // the phase is over: no request is counted that was not made
 				}
 				st, err := held[w].p.call(ctx, "code", 0)
-				sample()
+				sample(false)
 				mu.Lock()
 				k.Requests++
 				switch {
@@ -583,6 +601,7 @@ func (s *Supervisor) selftestCapacity(ctx context.Context, r *selftest.Report, p
 			return &capVProc{h: h, p: p}, nil
 		},
 		available: func() uint64 { return meminfo("MemAvailable") },
+		free:      func() uint64 { return meminfo("MemFree") },
 		total:     func() uint64 { return meminfo("MemTotal") },
 		supRSS:    func() uint64 { return selfStatus("VmRSS") },
 		supCPU:    selfCPUMicros,

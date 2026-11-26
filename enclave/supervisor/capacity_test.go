@@ -560,6 +560,7 @@ func TestCapacityCodesSamplesMemory(t *testing.T) {
 		}
 		return avail()
 	}
+	env.free = func() uint64 { return env.available() / 2 } // MemFree, read with it
 	held := []heldVault{{p: funcProc{func(context.Context) *selftest.CapacityStats {
 		mu.Lock()
 		dip = true
@@ -578,6 +579,15 @@ func TestCapacityCodesSamplesMemory(t *testing.T) {
 		held, 0, func(int) bool { return true }, func(*selftest.CapacityStats) {})
 	if k.MinAvailable != 1*fakeMiB || k.Done != 1 {
 		t.Fatalf("min available %d, %+v", k.MinAvailable, k)
+	}
+	// The start is reported too, the reading the headroom is based on.
+	if k.StartAvailable != avail() || k.HeadroomBytes != int64(k.StartAvailable)-int64(codeNeed()) {
+		t.Fatalf("start available %d, headroom %d (available now %d)", k.StartAvailable, k.HeadroomBytes, avail())
+	}
+	// The sampler's own readings are counted, the highest kept, and
+	// MemFree's lowest read with them.
+	if k.Samples == 0 || k.MaxAvailable != k.StartAvailable || k.MinFree != fakeMiB/2 {
+		t.Fatalf("samples %d, max available %d (start %d), min free %d", k.Samples, k.MaxAvailable, k.StartAvailable, k.MinFree)
 	}
 }
 

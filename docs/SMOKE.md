@@ -149,6 +149,17 @@ no key leaves a process; the report holds sizes, times and counts only.
      long a real unlock holds code derivations back; and its code
      requests come from held synthetic vaults, not from members' vaults
      with their own state and traffic.
+   - The dip: off hardware (`TestSelftestCapacityCodes`, real vault
+     processes) the minimum lies 250–720 MiB below the start. The
+     release 34 run on hardware (m7g, 5120 MiB enclave) reported no dip
+     at all: its minimum equalled the start to the byte, while a code
+     vault peaked at 270 MiB RSS, and the 8 unlocks during the phase
+     (64 MiB each) showed none either. Why is not known yet: the sample
+     count, the highest reading and MemFree, reported since, tell apart a
+     sampler that did not run, a reading that did not move and memory
+     returned during the phase. Until a hardware run shows the dip, read
+     the room for derivations from the floor model (1.2 × 256 MiB each
+     above the floor), not from `min_available_bytes`.
    - `-capacity-codes` without `-capacity` is refused.
 
 5. Teardown: every synthetic process ends; the available memory after
@@ -196,8 +207,12 @@ and `tag_ms` (per derivation, of the requests done), `permit_wait_ms`,
 first code), `unlocks` and `unlock_ms` (the unlocks during the phase),
 `unlocks_overlapping` (those that ran over a derivation),
 `unlocks_skipped` (not run: no room above the floor, or the process
-could not be started or did not answer), `min_available_bytes` (sampled
-every 200 ms), `code_vault_peak_rss_bytes` (of the held vaults that made
+could not be started or did not answer), `start_available_bytes` (at the
+phase's start, the base of the headroom), `min_available_bytes` and
+`max_available_bytes` (the lowest and highest of it and the readings
+during the phase: the derivations' dip is the start less the minimum),
+`min_free_bytes` (the lowest MemFree with them), `samples` (the phase
+sampler's own readings, every 200 ms), `code_vault_peak_rss_bytes` (of the held vaults that made
 the requests: the first `min(concurrency, held)`),
 `granted_during_unlock` (permits granted while any unlock was opening,
 the comparison's too: the rule allows none) and `duration_ms`. The

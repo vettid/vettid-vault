@@ -703,7 +703,7 @@ func TestSelftestCapacity(t *testing.T) {
 // gets its two derivations, and none is given while an unlock opens.
 func TestSelftestCapacityCodes(t *testing.T) {
 	_, rep := runSelftestE2E(t, &selftest.CapacityRequest{MaxVaults: 2, StateKiB: 256, UnlockConcurrency: []int{1}, UnlockSamples: 1,
-		SettleSeconds: 1, IdleSeconds: 1, StepEvery: 1, Codes: 3, CodeConcurrency: 1, CodeUnlocks: 2, CodeSeconds: 120})
+		SettleSeconds: 1, IdleSeconds: 1, StepEvery: 1, Codes: 6, CodeConcurrency: 1, CodeUnlocks: 2, CodeSeconds: 120})
 	c := rep.Capacity
 	if c == nil || c.Codes == nil {
 		t.Fatal("no code report")
@@ -713,7 +713,7 @@ func TestSelftestCapacityCodes(t *testing.T) {
 	}
 	k := c.Codes
 	// The supervisor's own record of the permits it gave: two per request.
-	if k.Done != 3 || k.Busy != 0 || k.NoRoom != 0 || k.Failed != 0 || k.XMs.N != 3 || k.TagMs.N != 3 || k.Overlap != 0 || !c.TornDown ||
+	if k.Done != 6 || k.Busy != 0 || k.NoRoom != 0 || k.Failed != 0 || k.XMs.N != 6 || k.TagMs.N != 6 || k.Overlap != 0 || !c.TornDown ||
 		k.Grants != 2*k.Done || k.UnlockBeforeMs.N != 2 || k.HeadroomBytes <= 0 {
 		t.Fatalf("codes %+v, torn down %v", k, c.TornDown)
 	}
@@ -723,6 +723,16 @@ func TestSelftestCapacityCodes(t *testing.T) {
 	}
 	if !ok["capacity.codes"] {
 		t.Fatalf("checks %+v", rep.Checks)
+	}
+	// With real vault processes the sampler sees the derivations: each
+	// touches 256 MiB, filled as it runs, so a 200 ms sample in one of the
+	// twelve lands well below the phase's start (250–720 MiB on a 32 GiB
+	// development machine, the test under -race). 128 MiB is more than a
+	// synthetic unlock (64 MiB Argon2id) takes, so the dip is the
+	// derivations'.
+	if k.StartAvailable == 0 || k.MinAvailable+128<<20 > k.StartAvailable || k.Samples == 0 || k.MinFree == 0 {
+		t.Fatalf("no dip during the derivations: available at start %d, min %d, %d samples, min free %d",
+			k.StartAvailable, k.MinAvailable, k.Samples, k.MinFree)
 	}
 }
 

@@ -225,10 +225,21 @@ type CodeReport struct {
 	UnlockMs       Millis `json:"unlock_ms"`
 	// UnlocksOverlapping is how many of the unlocks during the phase ran
 	// while a derivation was in progress.
-	UnlocksOverlapping int    `json:"unlocks_overlapping"`
-	UnlocksSkipped     int    `json:"unlocks_skipped"`
-	MinAvailable       uint64 `json:"min_available_bytes"`
-	CodeVaultPeakRSS   uint64 `json:"code_vault_peak_rss_bytes"`
+	UnlocksOverlapping int `json:"unlocks_overlapping"`
+	UnlocksSkipped     int `json:"unlocks_skipped"`
+	// StartAvailable is the available memory at the phase's start (the
+	// base of HeadroomBytes); MinAvailable the lowest of it and every
+	// sample after, so the derivations' dip is StartAvailable less
+	// MinAvailable.
+	StartAvailable uint64 `json:"start_available_bytes"`
+	MinAvailable   uint64 `json:"min_available_bytes"`
+	// MaxAvailable is the highest reading (memory returned during the
+	// phase can hide a dip); MinFree the lowest MemFree with it (0: not
+	// read); Samples the phase sampler's own readings, every 200 ms.
+	MaxAvailable     uint64 `json:"max_available_bytes"`
+	MinFree          uint64 `json:"min_free_bytes"`
+	Samples          int    `json:"samples"`
+	CodeVaultPeakRSS uint64 `json:"code_vault_peak_rss_bytes"`
 	// Overlap is how many code derivations were granted while an unlock
 	// was opening (the rule says none).
 	Overlap    int   `json:"granted_during_unlock"`
@@ -349,8 +360,9 @@ func (c *CapacityReport) Lines() []string {
 				k.Requests, k.Done, k.Busy, k.NoRoom, k.Failed, k.XMs.P50, k.XMs.P95, k.TagMs.P50, k.TagMs.P95, k.PermitWaitMs.P50, k.PermitWaitMs.Max),
 			fmt.Sprintf("CAPACITY codes: unlocks before p50 %.0fms p95 %.0fms; %d during (%d skipped, %d over a derivation) p50 %.0fms p95 %.0fms max %.0fms",
 				k.UnlockBeforeMs.P50, k.UnlockBeforeMs.P95, k.Unlocks, k.UnlocksSkipped, k.UnlocksOverlapping, k.UnlockMs.P50, k.UnlockMs.P95, k.UnlockMs.Max),
-			fmt.Sprintf("CAPACITY codes: %d cut short, %d permits given, granted during an unlock %d; headroom %+.1fMiB; min available %s; code vault peak %s; %ds",
-				k.CutShort, k.Grants, k.Overlap, float64(k.HeadroomBytes)/mib, m(k.MinAvailable), m(k.CodeVaultPeakRSS), k.DurationMs/1000),
+			fmt.Sprintf("CAPACITY codes: %d cut short, %d permits given, granted during an unlock %d; headroom %+.1fMiB; available at start %s, min %s, max %s (%d samples), min free %s; code vault peak %s; %ds",
+				k.CutShort, k.Grants, k.Overlap, float64(k.HeadroomBytes)/mib, m(k.StartAvailable), m(k.MinAvailable), m(k.MaxAvailable), k.Samples, m(k.MinFree),
+				m(k.CodeVaultPeakRSS), k.DurationMs/1000),
 		)
 	}
 	for _, n := range c.Notes {

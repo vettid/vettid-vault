@@ -1,6 +1,9 @@
 package vault
 
 import (
+	"bytes"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -84,8 +87,8 @@ func TestDeclinesAreAppOnly(t *testing.T) {
 	}
 }
 
-// On an active connection, block.add{connection_id} and connection.remove
-// are as before: a desktop's connection.remove is held for an app (step-up),
+// On an active connection a desktop's connection.remove is held for an app
+// (step-up), as (0.96.0) its block.add is (TestDesktopBlockOfAConnectionIsHeld),
 // and nothing is refused as app-only.
 func TestActiveConnectionRemoveUnchanged(t *testing.T) {
 	_, b := firstContact(t, connected)
@@ -262,20 +265,34 @@ func TestDesktopBlockOfAConnectionIsHeld(t *testing.T) {
 		if code := errCode(find(b.inbox(b.self(), ag)["agent1"], reply(id))); code != "forbidden" {
 			t.Fatalf("%+v: agent block of a connection: %q", tc, code)
 		}
+		ik := append([]byte(nil), b.m.st.Connections[cid].IK...)
 		id = b.sendAs(desk, "block.add", `{"connection_id":"`+cid+`"}`)
 		in := b.inbox(b.self(), desk)
 		ap := find(in["dev1"], ofType("approval.pending"))
 		if ap == nil || bodyStr(t, ap, "type") != "block.add" || find(in["desk1"], reply(id)) != nil {
 			t.Fatalf("%+v: a desktop's block was not held: %+v", tc, ap)
 		}
+		// The phone is shown the held body, which names the connection (ANDROID-PLAN 0.1.145).
+		if !strings.Contains(string(ap.Body), `"connection_id":"`+cid+`"`) {
+			t.Fatalf("%+v: approval.pending body %s", tc, ap.Body)
+		}
 		if b.m.st.Connections[cid] == nil || len(b.m.st.Blocks) != 0 {
 			t.Fatalf("%+v: the held block ran before the approval", tc)
 		}
 		b.sendAs(b.self(), "approval.decide", `{"approval_id":"`+bodyStr(t, ap, "approval_id")+`","approve":`+map[bool]string{true: "true", false: "false"}[tc.approve]+`}`)
-		r := find(b.inbox(b.self(), desk)["desk1"], reply(id))
+		in = b.inbox(b.self(), desk)
+		r := find(in["desk1"], reply(id))
 		if tc.approve {
 			if r == nil || r.Status != envelope.StatusOK || b.m.st.Connections[cid] != nil || len(b.m.st.Blocks) != 1 {
 				t.Fatalf("%+v: approved: %+v, blocks %d", tc, r, len(b.m.st.Blocks))
+			}
+			for _, bl := range b.m.st.Blocks {
+				if !bytes.Equal(bl.IK, ik) || bl.ConnectionID != cid {
+					t.Fatalf("%+v: the block is not the connection's identity: %+v", tc, bl)
+				}
+			}
+			if len(syncEvents(t, in["dev1"], "block.added")) != 1 {
+				t.Fatalf("%+v: the app was not told block.added", tc)
 			}
 			continue
 		}
@@ -308,9 +325,10 @@ func TestDesktopBlockUnknownHeldPendingRefused(t *testing.T) {
 	for body, want := range map[string]string{`{"connection_id":"01JZZZZZZZZZZZZZZZZZZZZZZZ"}`: "not_found", `{}`: "bad_request",
 		`{"connection_id":5}`: "bad_request"} {
 		id := b.sendAs(desk, "block.add", body)
-		ap := find(b.inbox(b.self(), desk)["dev1"], ofType("approval.pending"))
-		if ap == nil {
-			t.Fatalf("%s: not held", body)
+		in := b.inbox(b.self(), desk)
+		ap := find(in["dev1"], ofType("approval.pending"))
+		if ap == nil || find(in["desk1"], reply(id)) != nil {
+			t.Fatalf("%s: not held, or answered before the approval", body)
 		}
 		b.sendAs(b.self(), "approval.decide", `{"approval_id":"`+bodyStr(t, ap, "approval_id")+`","approve":true}`)
 		if code := errCode(find(b.inbox(b.self(), desk)["desk1"], reply(id))); code != want {
@@ -322,7 +340,9 @@ func TestDesktopBlockUnknownHeldPendingRefused(t *testing.T) {
 	for k := range b.m.st.Connections {
 		cid = k
 	}
-	for _, body := range []string{`{"pending_id":"x"}`, `{"connection_id":"` + cid + `","pending_id":"x"}`} {
+	// A pending_id of any value, with or without a connection_id (appOnlyPending reads the member, not its value).
+	for _, body := range []string{`{"pending_id":"x"}`, `{"connection_id":"` + cid + `","pending_id":"x"}`, `{"pending_id":null}`,
+		`{"pending_id":5}`, `{"pending_id":""}`, `{"connection_id":"` + cid + `","pending_id":null}`} {
 		id = b.sendAs(desk, "block.add", body)
 		in := b.inbox(b.self(), desk)
 		if code := errCode(find(in["desk1"], reply(id))); code != "forbidden" || find(in["dev1"], ofType("approval.pending")) != nil {
@@ -331,5 +351,45 @@ func TestDesktopBlockUnknownHeldPendingRefused(t *testing.T) {
 	}
 	if len(b.m.st.Blocks) != 0 || b.m.st.Connections[cid] == nil {
 		t.Fatal("a refused block changed something")
+	}
+}
+
+// (0.96.0) A desktop's held block of a connection answered by the handler on
+// approval: an identity already blocked is exists, a full block list limit,
+// and either way the connection is kept.
+func TestDesktopBlockHeldThenExistsOrLimit(t *testing.T) {
+	for _, code := range []string{"exists", "limit"} {
+		_, b := firstContact(t, connected)
+		desk, _ := accessed(t, b)
+		b.inbox(b.self(), desk)
+		var cid string
+		for id := range b.m.st.Connections {
+			cid = id
+		}
+		id := b.sendAs(desk, "block.add", `{"connection_id":"`+cid+`"}`)
+		ap := find(b.inbox(b.self(), desk)["dev1"], ofType("approval.pending"))
+		if ap == nil {
+			t.Fatalf("%s: not held", code)
+		}
+		// Meanwhile the list changes on the app.
+		b.m.mu.Lock()
+		switch code {
+		case "exists":
+			b.m.st.Blocks["b0"] = &Block{ID: "b0", IK: append([]byte(nil), b.m.st.Connections[cid].IK...)}
+		case "limit":
+			for i := range MaxBlocks {
+				bid := fmt.Sprintf("b%d", i)
+				b.m.st.Blocks[bid] = &Block{ID: bid, IK: bytes.Repeat([]byte{byte(i), byte(i >> 8)}, 16)}
+			}
+		}
+		n := len(b.m.st.Blocks)
+		b.m.mu.Unlock()
+		b.sendAs(b.self(), "approval.decide", `{"approval_id":"`+bodyStr(t, ap, "approval_id")+`","approve":true}`)
+		if got := errCode(find(b.inbox(b.self(), desk)["desk1"], reply(id))); got != code {
+			t.Fatalf("held block on approval: %q, want %q", got, code)
+		}
+		if b.m.st.Connections[cid] == nil || len(b.m.st.Blocks) != n {
+			t.Fatalf("%s: the connection or the blocks changed", code)
+		}
 	}
 }

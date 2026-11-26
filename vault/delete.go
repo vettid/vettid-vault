@@ -192,6 +192,10 @@ const (
 	deleteRetryCap   = 15 * time.Second
 	markDeletingFor  = 2 * time.Minute
 	eraseRetryFor    = 60 * time.Second
+	// othersDeleteFor bounds step 2's best-effort deletions of a pending
+	// key's and the old mailboxes, together, so a stalled one leaves the
+	// drain its time.
+	othersDeleteFor = 10 * time.Second
 )
 
 // DeleteRetry overrides a deletion's retry schedules (tests); a zero field
@@ -199,12 +203,14 @@ const (
 type DeleteRetry struct {
 	First, Cap  time.Duration
 	Mark, Erase time.Duration
+	Others      time.Duration // othersDeleteFor
 }
 
 func (m *Manager) deleteRetry() DeleteRetry {
-	r := DeleteRetry{First: deleteRetryFirst, Cap: deleteRetryCap, Mark: markDeletingFor, Erase: eraseRetryFor}
+	r := DeleteRetry{First: deleteRetryFirst, Cap: deleteRetryCap, Mark: markDeletingFor, Erase: eraseRetryFor, Others: othersDeleteFor}
 	if o := m.opt.DeleteRetry; o != nil {
-		for _, f := range []struct{ to, from *time.Duration }{{&r.First, &o.First}, {&r.Cap, &o.Cap}, {&r.Mark, &o.Mark}, {&r.Erase, &o.Erase}} {
+		for _, f := range []struct{ to, from *time.Duration }{{&r.First, &o.First}, {&r.Cap, &o.Cap}, {&r.Mark, &o.Mark}, {&r.Erase, &o.Erase},
+			{&r.Others, &o.Others}} {
 			if *f.from != 0 {
 				*f.to = *f.from
 			}
@@ -412,15 +418,21 @@ func (m *Manager) finishMarked(ctx context.Context) {
 
 // deleteMailbox deletes the vault's relay mailbox (step 2), once; the
 // request is idempotent at the relay, so a convergence run (finishMarked)
-// may repeat it. After a relay key rotation it also deletes, best effort
-// and with one attempt each (the drain's notices share step 2's time), a
-// pending key's mailbox and each old one with its own key: one past its
-// stop may still be at the relay until its grace ends, holding its open
-// tokens and claims. A queued revocation or claim deletion is done once
-// every mailbox it would go to (outboxMailboxes) is deleted: they
-// concerned those mailboxes, which no longer exist. One for an old
-// mailbox whose deletion failed stays queued, as all do when the current
-// one's fails.
+// may repeat it. The relay deletes with it every mailbox rotated into it
+// that is still in its grace (RELAY-PROTOCOL §6.10). After a relay key
+// rotation the vault also deletes the others itself, best effort, within
+// othersDeleteFor in all so the drain's notices keep their time: a pending
+// key's mailbox first, with the client's retries (if its rotate landed
+// and the second write did not, it is the live successor, which no
+// cascade reaches), then each old one with its own key, one attempt each
+// (against a relay that does not cascade; one past the vault's stop may
+// still be at the relay until its grace ends, holding its open tokens and
+// claims). A queued revocation or claim deletion is done once every
+// mailbox it would go to (outboxMailboxes) is deleted: they concerned
+// those mailboxes, which no longer exist. One for an old mailbox whose
+// deletion failed or was cut off stays queued, as all do when the current
+// one's fails; one for an old mailbox past the vault's stop is done
+// whatever its deletion's answer, since the drain sends nothing for it.
 func (m *Manager) deleteMailbox(ctx context.Context) {
 	if m.holdForMark() {
 		return
@@ -431,15 +443,19 @@ func (m *Manager) deleteMailbox(ctx context.Context) {
 	now := m.now()
 	gone := map[string]bool{m.st.Relay.Mailbox: true}
 	if m.relayRotation() && m.keys != nil {
-		once := withOneAttempt(ctx)
+		octx, cancel := context.WithTimeout(ctx, m.deleteRetry().Others)
+		defer cancel()
 		if m.keys.pendingRelay != nil {
-			// A pending key's mailbox, which a rotate may have made (§3.4);
-			// a mailbox never made answers not_found.
+			// A mailbox never made answers 204 too.
 			if r := m.pendingRelayClient(); r != nil {
-				_ = r.DeleteMailbox(once)
+				_ = r.DeleteMailbox(octx)
 			}
 		}
+		once := withOneAttempt(octx)
 		for i := range m.st.Relay.Old {
+			if octx.Err() != nil {
+				break // cut off: the rest stay queued
+			}
 			if i >= len(m.keys.oldRelay) {
 				continue
 			}
@@ -447,8 +463,8 @@ func (m *Manager) deleteMailbox(ctx context.Context) {
 			if r == nil {
 				continue
 			}
-			// mailbox_unknown: the relay's grace ended, and the mailbox
-			// went with its tokens and claims.
+			// Our relay answers 204 for a mailbox already gone;
+			// mailbox_unknown is tolerated from one that does not.
 			if err := r.DeleteMailbox(once); err == nil || RelayCode(err) == CodeMailboxUnknown {
 				gone[m.st.Relay.Old[i].Mailbox] = true
 			}

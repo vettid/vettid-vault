@@ -391,6 +391,13 @@ func TestRelayRotDeleteWithAKeyPending(t *testing.T) {
 	if len(fx.w.deleted) != 2 || fx.w.deleted[0] != cur || fx.w.deleted[1] != pmb {
 		t.Fatalf("deleted %v", fx.w.deleted)
 	}
+	// With the client's retries: it may be the live successor, which the
+	// current one's cascade does not reach.
+	for _, mb := range fx.w.deletedOnce {
+		if mb == pmb {
+			t.Fatal("the pending mailbox was deleted with one attempt")
+		}
+	}
 }
 
 // The attachment workers run without the vault's lock while the second

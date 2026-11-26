@@ -187,11 +187,12 @@ func TestMarkDeletingBound(t *testing.T) {
 	}
 }
 
-// The real schedules: from 1 s doubling to 15 s, 2 minutes for the mark
-// and 60 s for step 4.
+// The real schedules: from 1 s doubling to 15 s, 2 minutes for the mark,
+// 60 s for step 4 and 10 s for step 2's best-effort deletions.
 func TestDeleteRetryDefaults(t *testing.T) {
 	m := &Manager{}
-	if r := m.deleteRetry(); r != (DeleteRetry{First: time.Second, Cap: 15 * time.Second, Mark: 2 * time.Minute, Erase: 60 * time.Second}) {
+	if r := m.deleteRetry(); r != (DeleteRetry{First: time.Second, Cap: 15 * time.Second, Mark: 2 * time.Minute, Erase: 60 * time.Second,
+		Others: 10 * time.Second}) {
 		t.Fatalf("%+v", r)
 	}
 	m.opt.DeleteRetry = &DeleteRetry{Mark: time.Second}

@@ -42,6 +42,7 @@ type rotWorld struct {
 	claimErr    map[string]error // a mailbox's answer to claim deletions (nil: deleted)
 	deleteErr   map[string]error // a mailbox's answer to its deletion (nil: deleted, then in deleted)
 	deletedOnce []string         // the mailboxes asked to be deleted with one attempt (withOneAttempt)
+	deleteStall map[string]bool  // mailboxes whose deletion never answers (until its context ends)
 	wsAsked     map[string]bool
 	blobInfo    map[string]BlobEntry // "mailbox/id": sender, created_at
 	// queue are the messages waiting in each mailbox, given once each
@@ -250,6 +251,12 @@ func (r *rotRelay) DeleteMailbox(ctx context.Context) error {
 	defer r.w.mu.Unlock()
 	if ctx.Value(oneAttemptKey{}) != nil {
 		r.w.deletedOnce = append(r.w.deletedOnce, mailboxOf(r.key))
+	}
+	if r.w.deleteStall[mailboxOf(r.key)] {
+		r.w.mu.Unlock()
+		<-ctx.Done() // a relay that never answers
+		r.w.mu.Lock()
+		return ctx.Err()
 	}
 	if err := r.w.deleteErr[mailboxOf(r.key)]; err != nil {
 		return err

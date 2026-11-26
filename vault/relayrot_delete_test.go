@@ -68,6 +68,16 @@ func (fx *rotFx) deletedMailboxes() string {
 	return strings.Join(fx.w.deleted, ",")
 }
 
+func (fx *rotFx) deposits() int {
+	fx.w.mu.Lock()
+	defer fx.w.mu.Unlock()
+	return len(fx.w.signers)
+}
+
+func (fx *rotFx) deleteBudget(d time.Duration) {
+	fx.do(func(m *Manager) { m.opt.DeleteRetry = &DeleteRetry{Others: d} })
+}
+
 func (fx *rotFx) deleteVault() {
 	fx.t.Helper()
 	if err := fx.m.Delete(context.Background()); err != nil {
@@ -95,20 +105,21 @@ func TestRelayRotDeleteDeletesTheOldMailbox(t *testing.T) {
 	}
 }
 
-// An old mailbox already gone (mailbox_unknown, the relay's grace ended)
-// took its tokens and claims with it: as deleted.
+// An old mailbox already gone (the relay's cascade from the current one,
+// or its grace ended) took its tokens and claims with it: our relay
+// answers its DELETE 204 (RELAY-PROTOCOL §6.10), and mailbox_unknown, from
+// a relay that answers so, is taken the same way.
 func TestRelayRotDeleteOldMailboxAlreadyGone(t *testing.T) {
-	fx, old, cur, _, _ := deletionAfterRotation(t)
-	fx.w.mu.Lock()
-	fx.w.deleteErr = map[string]error{old: relayErr(404, CodeMailboxUnknown)}
-	fx.w.mu.Unlock()
-	r, c := fx.sentMark()
-	fx.deleteVault()
-	if got := fx.deletedMailboxes(); got != cur {
-		t.Fatalf("deleted %q, want %q", got, cur)
-	}
-	if got := fx.sentSince(r, c); len(got) != 0 {
-		t.Fatalf("sent for a mailbox that is gone: %v", got)
+	for _, answer := range []error{nil, relayErr(404, CodeMailboxUnknown)} {
+		fx, old, _, _, _ := deletionAfterRotation(t)
+		fx.w.mu.Lock()
+		fx.w.deleteErr = map[string]error{old: answer}
+		fx.w.mu.Unlock()
+		r, c := fx.sentMark()
+		fx.deleteVault()
+		if got := fx.sentSince(r, c); len(got) != 0 {
+			t.Fatalf("answer %v: sent for a mailbox that is gone: %v", answer, got)
+		}
 	}
 }
 
@@ -200,4 +211,78 @@ func TestDeleteMailboxOneAttempt(t *testing.T) {
 	if got := n.Load(); got != 1 {
 		t.Fatalf("%d attempts, want 1", got)
 	}
+}
+
+// Two rotations, two old mailboxes: each is deleted, and one whose
+// deletion fails does not stop the next.
+func TestRelayRotDeleteTwoOldMailboxes(t *testing.T) {
+	for _, fail := range []bool{false, true} {
+		fx, old1, _, _, _ := deletionAfterRotation(t)
+		if err := fx.credRotate(); err != nil {
+			t.Fatal(err)
+		}
+		old2, cur := fx.old(1).Mailbox, fx.mailbox()
+		want := cur + "," + old1 + "," + old2
+		if fail {
+			fx.w.mu.Lock()
+			fx.w.deleteErr = map[string]error{old1: relayErr(503, "")}
+			fx.w.mu.Unlock()
+			want = cur + "," + old2
+		}
+		fx.deleteVault()
+		if got := fx.deletedMailboxes(); got != want {
+			t.Fatalf("fail %v: deleted %q, want %q", fail, got, want)
+		}
+	}
+}
+
+// A stalled best-effort deletion is cut off at the bound: the deletion
+// ends, the drain's notices still go out, and the stalled mailbox's
+// entries (and any old mailbox not reached) stay queued for that drain.
+func TestRelayRotDeleteStalledDeletionIsCutOff(t *testing.T) {
+	t.Run("old", func(t *testing.T) {
+		fx, old, _, before, _ := deletionAfterRotation(t)
+		fx.deleteBudget(200 * time.Millisecond)
+		fx.w.mu.Lock()
+		fx.w.deleteStall = map[string]bool{old: true}
+		fx.w.mu.Unlock()
+		r, c := fx.sentMark()
+		n := fx.deposits()
+		start := time.Now()
+		fx.deleteVault()
+		if el := time.Since(start); el > 5*time.Second {
+			t.Fatalf("the deletion took %v", el)
+		}
+		if fx.deposits() == n {
+			t.Fatal("no notice was deposited after the cut-off")
+		}
+		sent := strings.Join(fx.sentSince(r, c), ",")
+		if !strings.Contains(sent, old+":claim:"+before.ClaimID) {
+			t.Fatalf("the stalled mailbox's claim deletion not sent: %s", sent)
+		}
+	})
+	t.Run("pending", func(t *testing.T) {
+		fx, old, _, before, _ := deletionAfterRotation(t)
+		fx.w.rotate = []error{relayErr(503, "")}
+		if err := fx.credRotate(); err != nil {
+			t.Fatal(err)
+		}
+		pmb := fx.pendingMailbox()
+		if pmb == "" {
+			t.Fatal("no key pending")
+		}
+		fx.deleteBudget(200 * time.Millisecond)
+		fx.w.mu.Lock()
+		fx.w.deleteStall = map[string]bool{pmb: true}
+		fx.w.mu.Unlock()
+		r, c := fx.sentMark()
+		fx.deleteVault()
+		if got := fx.deletedMailboxes(); strings.Contains(got, old) {
+			t.Fatalf("an old mailbox was asked after the bound: %q", got)
+		}
+		sent := strings.Join(fx.sentSince(r, c), ",")
+		if !strings.Contains(sent, old+":claim:"+before.ClaimID) {
+			t.Fatalf("the unreached old mailbox's claim deletion not sent: %s", sent)
+		}
+	})
 }

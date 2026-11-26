@@ -8,6 +8,7 @@ import (
 	"crypto/ed25519"
 	"encoding/json"
 	"errors"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -157,7 +158,8 @@ func reSignedRelay(t *testing.T, a, cA, cB, b *testVault, aToC, cToB string) {
 	}
 	suite.Wipe(kA)
 
-	// The same device code takes a call that isn't passed on: B ends C's
+	// The same test helpers (offerChecks, acceptForm2: this test's stand-in
+	// for a calling device, not an app's code) take a call that isn't passed on: B ends C's
 	// relayed call, C calls B with a key of its own, and the two derive one
 	// key.
 	if err := b.app.CallEnd(ctx, id, "hangup"); err != nil {
@@ -271,9 +273,25 @@ func answer2(ctx context.Context, t *testing.T, d *client.Device, dev ed25519.Pr
 var (
 	errShare   = errors.New("the share doesn't verify")
 	errConfirm = errors.New("confirm doesn't verify")
+	errOffered = errors.New("offered isn't what was sent, or the suite isn't in it")
 )
 
-// offerChecks is what a called device checks of a form 2 call.offer
+// sameSuites reports whether a JSON list of suite numbers is exactly want.
+func sameSuites(raw []json.RawMessage, want []int) bool {
+	if len(raw) != len(want) {
+		return false
+	}
+	for i, r := range raw {
+		var n int
+		if json.Unmarshal(r, &n) != nil || n != want[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// offerChecks is this test's stand-in for what a called device checks of a
+// form 2 call.offer
 // (§10.10 "What each party checks"): peer_ik is the connection's key
 // (peerIK), and both forms of the share are signed by the calling vault's
 // device and vouched by that vault, form 2 over the call as this side's
@@ -298,9 +316,11 @@ func offerChecks(ev *envelope.Inner, peerIK ed25519.PublicKey, id, media string,
 	return nil
 }
 
-// acceptForm2 is what the calling device does with a form 2 call.answer
-// (§10.10 "Key confirmation"): the share checked against the called
-// vault's key (p.Callee), k_call derived under p, and confirm checked
+// acceptForm2 is this test's stand-in for what a calling device does with
+// a form 2 call.answer (§10.10 "Key confirmation"; an app's own code is
+// tested in the app): offered as sent and the suite in it, the share
+// checked against the called vault's key (p.Callee), k_call derived under
+// p, and confirm checked
 // before any key is set from it. It returns k_call only when confirm
 // verifies, and wipes it otherwise.
 func acceptForm2(ev *envelope.Inner, sk *suite.PrivateKey, id string, offered []int, p callwire.Parties) ([]byte, error) {
@@ -316,6 +336,10 @@ func acceptForm2(ev *envelope.Inner, sk *suite.PrivateKey, id string, offered []
 	confirm, err6 := o.Base64("confirm", callwire.ConfirmSize)
 	if err := errors.Join(err1, err2, err3, err4, err5, err6); err != nil {
 		return nil, err
+	}
+	// The answer's offered list is the one sent, and the suite chosen is in it.
+	if raw, _, err := o.OptArray("offered"); err != nil || !sameSuites(raw, offered) || !slices.Contains(offered, int(chosen)) {
+		return nil, errOffered
 	}
 	if callwire.VerifyShare(p.Callee, devIK, callwire.AnswerMessage2(id, int(chosen), offered, p, enc), ds, vs) != nil {
 		return nil, errShare

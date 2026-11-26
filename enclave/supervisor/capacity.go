@@ -402,7 +402,8 @@ func runCodes(ctx context.Context, env capEnv, p selftest.CapacityRequest, held 
 		}
 	}()
 
-	// The codes, at most one per held vault at a time.
+	// The codes: each worker on a held vault of its own, so at most one
+	// request per vault at a time.
 	next := make(chan int)
 	go func() {
 		defer close(next)
@@ -415,15 +416,15 @@ func runCodes(ctx context.Context, env capEnv, p selftest.CapacityRequest, held 
 		}
 	}()
 	var codes sync.WaitGroup
-	for range min(p.CodeConcurrency, len(held)) {
+	for w := range min(p.CodeConcurrency, len(held)) {
 		codes.Add(1)
 		go func() {
 			defer codes.Done()
-			for i := range next {
+			for range next {
 				if ctx.Err() != nil {
 					return // the phase is over: no request is counted that was not made
 				}
-				st, err := held[i%len(held)].p.call(ctx, "code", 0)
+				st, err := held[w].p.call(ctx, "code", 0)
 				sample()
 				mu.Lock()
 				k.Requests++
@@ -507,6 +508,29 @@ func (s *Supervisor) selftestPermit() *heavyPermit {
 	return &heavyPermit{avail: avail, floor: func() uint64 { return max(s.cfg.MemoryReserve, s.capFloor.Load()) }, now: s.now}
 }
 
+// capacityPermit readies the permit runSelftest made (a self-test enclave
+// never runs start()) for the capacity run p on an enclave of total bytes:
+// it takes the run's floor when that is higher than the release's reserve,
+// and records the code permits it gives, which the result returns. Without
+// a permit, nothing is recorded.
+func (s *Supervisor) capacityPermit(p selftest.CapacityRequest, total uint64) func() []time.Time {
+	var mu sync.Mutex
+	var grants []time.Time
+	if s.heavy != nil {
+		s.capFloor.Store(capacityFloor(total, p.FloorMiB))
+		s.heavy.setCodeGranted(func(at time.Time) {
+			mu.Lock()
+			grants = append(grants, at)
+			mu.Unlock()
+		})
+	}
+	return func() []time.Time {
+		mu.Lock()
+		defer mu.Unlock()
+		return slices.Clone(grants)
+	}
+}
+
 // codesCheck is the code phase's informational check: some requests done,
 // and no code permit given while an unlock was opening.
 func codesCheck(k *selftest.CodeReport) (bool, string) {
@@ -547,21 +571,7 @@ func collect(ctx context.Context, held []heldVault) ([]*selftest.CapacityStats, 
 // selftestCapacity runs the capacity measurement with real vault
 // processes and adds it to the report.
 func (s *Supervisor) selftestCapacity(ctx context.Context, r *selftest.Report, p selftest.CapacityRequest) {
-	// The permit runSelftest made (a self-test enclave never runs start())
-	// takes the run's floor when it is higher than the release's reserve,
-	// and records the code permits it gives.
-	var grantsMu sync.Mutex
-	var grants []time.Time
-	if s.heavy != nil {
-		pp := p
-		pp.Defaults()
-		s.capFloor.Store(capacityFloor(meminfo("MemTotal"), pp.FloorMiB))
-		s.heavy.setCodeGranted(func(at time.Time) {
-			grantsMu.Lock()
-			grants = append(grants, at)
-			grantsMu.Unlock()
-		})
-	}
+	codeGrants := s.capacityPermit(p, meminfo("MemTotal"))
 	h := newProcHost(s, s.cfg.Proc)
 	var n atomic.Int64
 	env := capEnv{
@@ -590,12 +600,8 @@ func (s *Supervisor) selftestCapacity(ctx context.Context, r *selftest.Report, p
 		log: func(msg string, kv ...any) { s.log.Info(msg, kv...) },
 		// A synthetic unlock counts as a vault opening for the code permit,
 		// as a real one does (procHost.openingAny).
-		opening: func() func() { return h.markOpening("capacity-open-" + strconv.FormatInt(n.Add(1), 10)) },
-		codeGrants: func() []time.Time {
-			grantsMu.Lock()
-			defer grantsMu.Unlock()
-			return slices.Clone(grants)
-		},
+		opening:    func() func() { return h.markOpening("capacity-open-" + strconv.FormatInt(n.Add(1), 10)) },
+		codeGrants: codeGrants,
 	}
 	c := runCapacity(ctx, env, p)
 	r.Capacity = c

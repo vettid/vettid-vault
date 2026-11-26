@@ -186,13 +186,22 @@ steady available) / held), `projected_max_vaults` ((baseline − floor −
 one unlock's peak) / marginal), `idle_cpu_ms_per_vault_minute`,
 `supervisor_cpu_ms_per_minute_idle`, `torn_down`,
 `available_after_bytes`; with `-capacity-codes`, `codes`: `requests`,
-`done`, `busy`, `no_room`, `failed`, `x_ms` and `tag_ms` (per derivation,
-of the requests done), `permit_wait_ms`, `unlocks` and `unlock_ms` (the
-unlocks during the phase, against the empty enclave's in `unlock`),
-`unlocks_skipped`, `min_available_bytes`, `code_vault_peak_rss_bytes`,
-`granted_during_unlock` (permits granted while an unlock was opening: the
-rule allows none) and `duration_ms`. The parent also prints `CAPACITY …`
-lines.
+`done`, `busy`, `no_room`, `failed`, `cut_short` (in flight when the
+phase's time ran out, not counted as failed), `grants` (the code permits
+the supervisor gave: two per request done, one per request that got only
+its first), `headroom_bytes` (available at the phase's start less the
+floor and 1.2 × 256 MiB; negative: no room, and a note says so), `x_ms`
+and `tag_ms` (per derivation, of the requests done), `permit_wait_ms`,
+`unlock_before_ms` (the unlocks timed at the same held count before the
+first code), `unlocks` and `unlock_ms` (the unlocks during the phase),
+`unlocks_overlapping` (those that ran over a derivation),
+`unlocks_skipped` (not run: no room above the floor, or the process
+could not be started or did not answer), `min_available_bytes` (sampled
+every 200 ms), `code_vault_peak_rss_bytes` (of the held vaults that made
+the requests: the first `min(concurrency, held)`),
+`granted_during_unlock` (permits granted while any unlock was opening,
+the comparison's too: the rule allows none) and `duration_ms`. The
+parent also prints `CAPACITY …` lines.
 Checks: `capacity.measured` and `capacity.torn_down` (required),
 `capacity.unlock_latency` and, with `-capacity-codes`, `capacity.codes`
 (informational: some done and none granted during an unlock).

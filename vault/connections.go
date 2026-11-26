@@ -197,7 +197,7 @@ func (m *Manager) hBlockAdd(_ context.Context, s *Session, in *envelope.Inner) (
 	if hasConn {
 		p := m.st.Connections[cid]
 		if p == nil {
-			return nil, errNotFound
+			return m.blockOutgoing(s, b, cid)
 		}
 		b.IK, b.RelayPK, b.Name, b.ConnectionID = append([]byte(nil), p.IK...), append([]byte(nil), p.Relay.PK...), p.Name, p.ID
 		if m.blockedIdentity(b.IK, nil) {
@@ -218,11 +218,41 @@ func (m *Manager) hBlockAdd(_ context.Context, s *Session, in *envelope.Inner) (
 		m.declineRequest(r, s.now) // declined, connection.declined sent (§10.4, 0.10.5)
 		m.notifyDevices("sync.event", m.requestSync(r, requestStateDeclined), s.peer.ID, s.now)
 	}
+	return m.addBlock(s, b)
+}
+
+// addBlock stores b and tells the member's devices.
+func (m *Manager) addBlock(s *Session, b *Block) (json.RawMessage, error) {
 	m.st.Blocks[b.ID] = b
 	m.dirty = true
 	m.record(Activity{Kind: "connection.blocked", ConnectionID: b.ConnectionID, Ref: b.ID, Audit: true}, s.now)
 	s.SyncEvent("block.added", strictjson.NewBuilder().String("block_id", b.ID).Bytes())
 	return strictjson.NewBuilder().String("block_id", b.ID).Bytes(), nil
+}
+
+// blockOutgoing is block.add{connection_id} of the member's outgoing
+// request that is not yet a connection (§10.4 Block list, §6.4): it is
+// withdrawn as connection.decline does, and the inviter's identity as the
+// request holds it (its ik and relay key, from the invitation accepted) is
+// blocked, as the incoming case blocks hs.init's from.ik and
+// from.relay.pk. The app's alone (appOnlyWithdrawal).
+func (m *Manager) blockOutgoing(s *Session, b *Block, cid string) (json.RawMessage, error) {
+	inviter, hint := m.outgoingRequest(cid)
+	if inviter == nil {
+		return nil, errNotFound
+	}
+	b.IK = append([]byte(nil), inviter.IK...)
+	b.RelayPK = append([]byte(nil), inviter.Relay.PK...)
+	b.Name = inviter.Name
+	if b.Name == "" {
+		b.Name = hint
+	}
+	if m.blockedIdentity(b.IK, nil) {
+		return nil, NewError("exists", "")
+	}
+	r, _ := m.withdrawOutgoing(cid, s.now)
+	m.notifyDevices("sync.event", m.requestSync(r, requestStateDeclined), s.peer.ID, s.now)
+	return m.addBlock(s, b)
 }
 
 // removeConnection applies §7.4 "Connection removed" for p (dir "out": by

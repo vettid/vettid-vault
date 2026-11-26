@@ -620,28 +620,70 @@ func (m *Manager) hConnDecline(_ context.Context, s *Session, in *envelope.Inner
 	if err != nil {
 		return nil, err
 	}
+	if dir == ReqOut {
+		r, ok := m.withdrawOutgoing(id, s.now)
+		if !ok {
+			return nil, errNotFound
+		}
+		m.requestDeclined(r, s)
+		return nil, nil
+	}
 	r, waiting := m.connRequest(id, dir)
 	switch {
 	case r != nil:
 		m.declineRequest(r, s.now) // connection.declined first (§6.4, 0.10.5)
-	case waiting && dir == ReqOut:
-		oid := m.waitingOutgoing(id)
-		p := m.st.Outgoing[oid].New
-		m.dropOutgoing(oid)
-		m.denyPeerTokens(p, s.now)
-		r = &Request{ID: id, Dir: ReqOut}
 	case waiting:
 		m.dropAwaiting(id, "", s.now)
 		r = &Request{ID: id, Dir: ReqIn}
 	default:
 		return nil, errNotFound
 	}
-	// A decline in waiting (the accepter: no token to the inviter, no
-	// epoch) or of an hs.init without hs.fin (the inviter: never shown)
-	// sends nothing (§6.4, 0.10.5); the peer's request ends by expiry.
-	m.record(Activity{Kind: "connection.request.declined", Ref: id, Audit: true}, s.now)
-	m.notifyDevices("sync.event", m.requestSync(r, requestStateDeclined), s.peer.ID, s.now)
+	m.requestDeclined(r, s)
 	return nil, nil
+}
+
+// requestDeclined records a declined (or withdrawn) request and tells the
+// member's other devices.
+func (m *Manager) requestDeclined(r *Request, s *Session) {
+	m.record(Activity{Kind: "connection.request.declined", Ref: r.ID, Audit: true}, s.now)
+	m.notifyDevices("sync.event", m.requestSync(r, requestStateDeclined), s.peer.ID, s.now)
+}
+
+// outgoingRequest is the member's outgoing request id that is not yet a
+// connection, as the inviter's identity it holds (from the invitation the
+// member accepted) and its hint name; nil for none.
+func (m *Manager) outgoingRequest(id string) (inviter *Peer, hint string) {
+	if r, _ := m.connRequest(id, ReqOut); r != nil {
+		return r.Peer, r.Name
+	}
+	if oid := m.waitingOutgoing(id); oid != "" {
+		og := m.st.Outgoing[oid]
+		return og.New, og.Name
+	}
+	return nil, ""
+}
+
+// withdrawOutgoing withdraws the member's outgoing request id as
+// connection.decline does (§6.4, 0.10.5): one whose SAS is known is
+// declined (connection.declined sent); one waiting for its hs.resp is
+// dropped and its tokens denied, sending nothing (the inviter never showed
+// it; its request ends by expiry). It returns the request for the sync
+// event, false for no such request. connection.remove and block.add of it
+// (§10.4) withdraw it the same way.
+func (m *Manager) withdrawOutgoing(id string, now time.Time) (*Request, bool) {
+	r, waiting := m.connRequest(id, ReqOut)
+	switch {
+	case r != nil:
+		m.declineRequest(r, now)
+		return r, true
+	case waiting:
+		oid := m.waitingOutgoing(id)
+		p := m.st.Outgoing[oid].New
+		m.dropOutgoing(oid)
+		m.denyPeerTokens(p, now)
+		return &Request{ID: id, Dir: ReqOut}, true
+	}
+	return nil, false
 }
 
 // requestSync is the sync.event{kind: connection.request} body (§10.1).

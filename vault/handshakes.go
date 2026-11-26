@@ -1789,6 +1789,13 @@ func (m *Manager) dropOutgoing(id string) {
 	if i := m.outgoing[id]; i != nil {
 		i.Abort()
 	}
+	// Its hs.init, if not yet deposited, is not sent: no record would take
+	// the hs.resp it brings (a withdrawn or expired request would reach the
+	// inviter, one the member may have just blocked).
+	if og := m.st.Outgoing[id]; og != nil && og.InitOutbox != "" {
+		m.dropOutboxEntry(og.InitOutbox)
+		m.dirty = true
+	}
 	delete(m.outgoing, id)
 	m.forgetOutgoing(id)
 }

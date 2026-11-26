@@ -112,13 +112,13 @@ func (f *Feature) Types() []vault.TypeSpec {
 	return []vault.TypeSpec{
 		// Starting an introduction and accepting one open new connection
 		// paths: only the member's phone creates connections (owner
-		// decision 2026-10-13, §6.8), so both are app-only; a desktop
-		// may still decline or cancel.
+		// decision 2026-10-13, §6.8), so both are app-only; (0.95.0) so is
+		// declining one. A desktop may still cancel or list.
 		{Type: "intro.create", Request: true, From: apps},
 		{Type: "intro.cancel", Request: true, From: owners},
 		{Type: "intro.list", Request: true, From: owners},
 		{Type: "intro.accept", Request: true, From: apps},
-		{Type: "intro.decline", Request: true, From: owners},
+		{Type: "intro.decline", Request: true, From: apps},
 		{Type: "intro.offer", From: conns},
 		{Type: "intro.answer", From: conns},
 		{Type: "intro.connect", From: conns},

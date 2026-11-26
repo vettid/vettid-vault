@@ -11,8 +11,9 @@ import (
 // Only the member's phone creates or accepts connections (owner decision
 // 2026-10-13, §6.8): connection.invite.create, connection.invite.accept
 // and connection.approve from a desktop or an agent are refused with
-// forbidden at once, never held for an app, and change nothing; a desktop
-// may still decline an incoming request. The app's paths are unchanged.
+// forbidden at once, never held for an app, and change nothing; (0.95.0)
+// so is connection.decline (TestDeclinesAreAppOnly has its other forms).
+// The app's paths are unchanged.
 func TestOnlyPhoneCreatesOrAcceptsConnections(t *testing.T) {
 	d := newDevFixture(t)
 	app := d.self()
@@ -53,6 +54,7 @@ func TestOnlyPhoneCreatesOrAcceptsConnections(t *testing.T) {
 		"connection.invite.create": `{"ttl_seconds":600}`,
 		"connection.invite.accept": `{"link":"https://example.invalid/i#x"}`,
 		"connection.approve":       `{"pending_id":"` + pid + `"}`,
+		"connection.decline":       `{"pending_id":"` + pid2 + `"}`,
 	}
 	for _, td := range []*tdev{desk, ag} {
 		for typ, body := range bodies {
@@ -76,13 +78,15 @@ func TestOnlyPhoneCreatesOrAcceptsConnections(t *testing.T) {
 		t.Fatal("a refused invitation was created")
 	}
 
-	// A desktop may decline.
-	id := d.sendAs(desk, "connection.decline", `{"pending_id":"`+pid2+`"}`)
-	if r := find(d.inbox(app, desk)["desk1"], reply(id)); r == nil || r.Status != envelope.StatusOK || d.m.st.Requests[pid2] != nil {
-		t.Fatalf("desktop decline: %+v", r)
+	if d.m.st.Requests[pid2] == nil {
+		t.Fatal("a refused decline changed the request")
 	}
 
-	// The app approves, and creates an invitation.
+	// The app declines, approves, and creates an invitation.
+	id := d.sendAs(app, "connection.decline", `{"pending_id":"`+pid2+`"}`)
+	if r := find(d.inbox(app)["dev1"], reply(id)); r == nil || r.Status != envelope.StatusOK || d.m.st.Requests[pid2] != nil {
+		t.Fatalf("app decline: %+v", r)
+	}
 	id = d.sendAs(app, "connection.approve", `{"pending_id":"`+pid+`"}`)
 	if r := find(d.inbox(app, desk)["dev1"], reply(id)); r == nil || r.Status != envelope.StatusOK || !d.m.st.Requests[pid].Approved {
 		t.Fatalf("app approve: %+v", r)

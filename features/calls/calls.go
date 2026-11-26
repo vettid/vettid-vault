@@ -525,17 +525,24 @@ func answerMessage(callID string, f2 *form2, p callwire.Parties, enc []byte) []b
 }
 
 // vouch checks a share from one of our devices against its paired record
-// and signs it for the peer vault.
+// and signs it for the peer vault. A share refused (its device_sig not
+// verifying under the device's paired ik, or form 2 naming another vault
+// on this side) is audited drop.call_share (§10.10 "What each party
+// checks"); an internal failure to sign is not.
 func vouch(s *vault.Session, m, deviceSig []byte) (Vouched, error) {
 	dev := ed25519.PublicKey(s.From().IK)
+	refused := func(err error) (Vouched, error) {
+		s.Record(vault.Activity{Kind: "drop.call_share", DeviceID: s.From().ID, Audit: true})
+		return Vouched{}, err
+	}
 	if callwire.VerifyDeviceShare(dev, m, deviceSig) != nil {
-		return Vouched{}, vault.NewError("bad_request", "share signature")
+		return refused(vault.NewError("bad_request", "share signature"))
 	}
 	vs, err := s.VouchCallShare(dev, m)
 	if err != nil {
 		var he *vault.HandlerError
 		if errors.As(err, &he) && he.Code == "bad_request" {
-			return Vouched{}, err // a share the vault won't vouch for (form 2 naming another vault)
+			return refused(err) // a share the vault won't vouch for (form 2 naming another vault)
 		}
 		return Vouched{}, errInternal
 	}
@@ -1033,9 +1040,8 @@ func (f *Feature) answerFromDevice(s *vault.Session, body []byte) error {
 		s.Record(vault.Activity{Kind: "drop.call_share", DeviceID: s.From().ID, Audit: true})
 		return unavailable(s, a.CallID) // the connection is gone: nothing to name
 	}
-	v, err := vouch(s, answerMessage(c.ID, a.Form2, pp, a.Enc), a.EncSig)
+	v, err := vouch(s, answerMessage(c.ID, a.Form2, pp, a.Enc), a.EncSig) // a refusal is audited there
 	if err != nil {
-		s.Record(vault.Activity{Kind: "drop.call_share", DeviceID: s.From().ID, Audit: true})
 		return unavailable(s, a.CallID)
 	}
 	// The vault doesn't judge the choice or confirm: that is for the calling

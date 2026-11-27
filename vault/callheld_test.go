@@ -399,3 +399,31 @@ func TestCallHeldWiped(t *testing.T) {
 		t.Fatalf("held %d before zeroize, %d after", n, len(left))
 	}
 }
+
+// An offer whose marker another path ended (the device removed or suspended) is wiped at the next drain, while
+// its call still rings.
+func TestCallHeldOfferWipedWhenItsMarkerEnds(t *testing.T) {
+	d, _ := newCallHeld(t)
+	app := d.self()
+	d.relay.failMailbox = map[string]error{d.devPeer.Relay.Mailbox: errors.New("relay down")}
+	d.sendAs(app, "test.callring", `{}`)
+	d.m.mu.Lock()
+	ended := 0
+	for _, e := range d.m.st.Outbox {
+		if e.CallHeld && !e.Done {
+			e.Done = true
+			ended++
+		}
+	}
+	held := len(d.m.callMsgs)
+	d.m.mu.Unlock()
+	if ended != 1 || held != 1 {
+		t.Fatalf("markers %d, held %d: the check proves nothing", ended, held)
+	}
+	d.m.drainOutbox(context.Background())
+	d.m.mu.Lock()
+	defer d.m.mu.Unlock()
+	if len(d.m.callMsgs) != 0 {
+		t.Fatal("the offer is still held after its marker ended")
+	}
+}

@@ -104,8 +104,17 @@ func (m *Manager) dropCallMsgs() {
 // sweepCallMsgs drops the held messages that may no longer go, and ends
 // the markers whose message is gone, so that nothing waits behind them.
 func (m *Manager) sweepCallMsgs(now time.Time) {
+	pending := map[string]bool{}
+	for _, e := range m.st.Outbox {
+		if e.CallHeld && !e.Done {
+			pending[e.InnerID] = true
+		}
+	}
 	for id, cm := range m.callMsgs {
-		if !m.callMsgLive(cm, now) {
+		// An offer whose marker another path ended (the device removed or
+		// suspended, a terminal answer for its mailbox) goes too; an answer
+		// stays while its call lasts, for a retransmission.
+		if !m.callMsgLive(cm, now) || cm.offer && !pending[id] {
 			m.dropCallMsg(id)
 		}
 	}

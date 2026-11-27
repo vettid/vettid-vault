@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/vettid/vettid-relay/relayclient"
 	"github.com/vettid/vettid-vault/vms/envelope"
 )
 
@@ -20,6 +21,7 @@ type callHeldFeature struct {
 	calls int
 	ahead bool
 	held  map[string]string
+	last  []byte // the last answer test.callstart returned
 }
 
 func (f *callHeldFeature) Name() string { return "callheldstub" }
@@ -38,7 +40,8 @@ func (f *callHeldFeature) Handle(_ context.Context, s *Session, in *envelope.Inn
 	case "test.callstart":
 		f.held["c1"] = "lasts"
 		s.CacheResponseAsHeldForCall(json.RawMessage(`{"withheld":true}`), "c1")
-		return json.RawMessage(`{"turn":"SECRET-TURN-ANSWER"}`), nil
+		f.last = []byte(`{"turn":"SECRET-TURN-ANSWER"}`)
+		return f.last, nil
 	default:
 		f.held["c2"] = "rings"
 		s.NotifyDevicesWith("call.offer", json.RawMessage(`{"turn":"SECRET-TURN-OFFER"}`), "",
@@ -283,5 +286,116 @@ func TestCallHeldDroppedAtLock(t *testing.T) {
 	}
 	if find(got, ofType("call.offer")) != nil {
 		t.Fatal("the held offer was sent at the lock")
+	}
+}
+
+// A call.start answer the vault cannot hold (the device suspended on fork evidence) is lost, never queued durably:
+// no stored deposit and nothing in the state holds it, and a retransmission once the device is back gets the copy.
+func TestCallHeldAnswerNotHeldNeverStored(t *testing.T) {
+	d, f := newCallHeld(t)
+	app := d.self()
+	d.m.mu.Lock()
+	d.devPeer.Fork = &ForkSuspension{}
+	d.m.mu.Unlock()
+	id := d.sendAs(app, "test.callstart", `{}`)
+	if f.calls != 1 {
+		t.Fatalf("calls %d: the check proves nothing", f.calls)
+	}
+	d.m.mu.Lock()
+	held := len(d.m.callMsgs)
+	st, _ := json.Marshal(d.m.st)
+	for _, e := range d.m.st.Outbox {
+		if e.PeerID == d.devPeer.ID && !e.Done && e.Op == OpDeposit {
+			t.Fatalf("an entry was queued for the suspended device: %+v", e)
+		}
+	}
+	d.devPeer.Fork = nil
+	d.m.mu.Unlock()
+	if held != 0 || strings.Contains(string(st), "SECRET") {
+		t.Fatalf("held %d, or the state holds the credential", held)
+	}
+	d.inbox(app)
+	d.sendID(app, id, "test.callstart", `{}`)
+	retryNow(d.m)
+	again := find(d.inbox(app)["dev1"], reply(id))
+	if again == nil || string(again.Body) != `{"withheld":true}` || f.calls != 1 {
+		t.Fatalf("retransmission: %+v (calls %d)", again, f.calls)
+	}
+}
+
+// A terminal answer for the device's mailbox ends a held message's marker at once (no retry), and an offer is
+// wiped with it.
+func TestCallHeldTerminalAnswerEndsIt(t *testing.T) {
+	for _, code := range []string{CodeMailboxUnknown, CodeTokenRevoked} {
+		for _, typ := range []string{"test.callstart", "test.callring"} {
+			t.Run(code+"/"+typ, func(t *testing.T) {
+				d, _ := newCallHeld(t)
+				app := d.self()
+				tries := 0
+				d.relay.check = func(mailbox, _ string) error {
+					if mailbox != d.devPeer.Relay.Mailbox {
+						return nil
+					}
+					tries++
+					return &relayclient.Error{Status: 404, Code: code}
+				}
+				d.sendAs(app, typ, `{}`)
+				retryNow(d.m)
+				if tries == 0 {
+					t.Fatal("never tried: the check proves nothing")
+				}
+				first := tries
+				retryNow(d.m)
+				d.m.mu.Lock()
+				defer d.m.mu.Unlock()
+				for _, e := range d.m.st.Outbox {
+					if e.CallHeld && !e.Done {
+						t.Fatalf("the marker still waits after %s: %+v", code, e)
+					}
+				}
+				if tries != first {
+					t.Fatalf("tried again after %s: %d, then %d", code, first, tries)
+				}
+				if typ == "test.callring" && len(d.m.callMsgs) != 0 {
+					t.Fatal("the offer is still held after a terminal answer")
+				}
+			})
+		}
+	}
+}
+
+// The handler's bytes with the credential are wiped once copied into memory; a dropped message's body is wiped;
+// zeroize drops them all.
+func TestCallHeldWiped(t *testing.T) {
+	d, f := newCallHeld(t)
+	app := d.self()
+	d.relay.failMailbox = map[string]error{d.devPeer.Relay.Mailbox: errors.New("relay down")}
+	d.sendAs(app, "test.callstart", `{}`)
+	d.m.mu.Lock()
+	var body []byte
+	for _, cm := range d.m.callMsgs {
+		body = cm.inner.Body
+	}
+	d.m.mu.Unlock()
+	if !bytes.Contains(body, []byte("SECRET")) {
+		t.Fatal("nothing held: the check proves nothing")
+	}
+	if !bytes.Equal(f.last, make([]byte, len(f.last))) || len(f.last) == 0 {
+		t.Fatalf("the handler's answer was not wiped: %q", f.last)
+	}
+	delete(f.held, "c1")
+	d.m.drainOutbox(context.Background())
+	if !bytes.Equal(body, make([]byte, len(body))) {
+		t.Fatal("the dropped message's body was not wiped")
+	}
+	f.held["c1"] = "lasts"
+	d.sendAs(app, "test.callring", `{}`)
+	d.m.mu.Lock()
+	n := len(d.m.callMsgs)
+	d.m.zeroize()
+	left := d.m.callMsgs
+	d.m.mu.Unlock()
+	if n == 0 || left != nil {
+		t.Fatalf("held %d before zeroize, %d after", n, len(left))
 	}
 }

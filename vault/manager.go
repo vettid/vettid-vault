@@ -1130,7 +1130,8 @@ func (m *Manager) persist(ctx context.Context, create bool) error {
 }
 
 // dropVolatile discards the memory-only answers sealed since the last
-// drain (§8.2: lost, the requester retransmits). After a state write that
+// drain, and those kept behind a held call message ((0.97.0) §10.10
+// "Order") (§8.2: lost, the requester retransmits). After a state write that
 // failed they would tell what was not stored: the outbox's entries wait
 // for the next write that stores them (queue), these are never written.
 func (m *Manager) dropVolatile() {

@@ -4,6 +4,11 @@ import (
 	"context"
 	"crypto/subtle"
 	"errors"
+	"fmt"
+	"path"
+	"runtime"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -85,13 +90,59 @@ func (h *LocalHost) start(id string, m *vault.Manager, openedAt time.Time) {
 // without a flush.
 var ErrPanic = errors.New("enclave: vault run loop panicked")
 
+// PanicError is ErrPanic with what may be logged of the panic: the
+// value's type, a runtime error's own text (it carries no vault data:
+// indexes, lengths, a nil dereference) and the frames of this module where
+// it happened, as function names and lines. Never the value of another
+// panic, which could hold vault data.
+type PanicError struct {
+	Type    string   // the panic value's type, e.g. runtime.boundsError
+	Runtime string   // a runtime.Error's text; "" for any other value
+	Frames  []string // "function file:line", innermost first, at most maxPanicFrames
+}
+
+func (e *PanicError) Error() string { return ErrPanic.Error() + ": " + e.Type }
+
+func (e *PanicError) Unwrap() error { return ErrPanic }
+
+// maxPanicFrames bounds the frames a PanicError keeps.
+const maxPanicFrames = 8
+
+// modulePrefix selects the frames of this module.
+const modulePrefix = "github.com/vettid/vettid-vault/"
+
+// panicError describes r, the value recovered in a deferred call.
+func panicError(r any) *PanicError {
+	e := &PanicError{Type: fmt.Sprintf("%T", r)}
+	if re, ok := r.(runtime.Error); ok {
+		e.Runtime = re.Error()
+	}
+	pcs := make([]uintptr, 64)
+	n := runtime.Callers(3, pcs) // past runtime.Callers, panicError and the deferred function
+	frames := runtime.CallersFrames(pcs[:n])
+	for {
+		f, more := frames.Next()
+		if strings.HasPrefix(f.Function, modulePrefix) && !strings.HasPrefix(f.Function, modulePrefix+"enclave.RunRecovered") {
+			e.Frames = append(e.Frames, strings.TrimPrefix(f.Function, modulePrefix)+" "+path.Base(f.File)+":"+strconv.Itoa(f.Line))
+			if len(e.Frames) == maxPanicFrames {
+				break
+			}
+		}
+		if !more {
+			break
+		}
+	}
+	return e
+}
+
 // RunRecovered runs a manager's loop; a panic zeroizes the vault (no
-// flush) and returns ErrPanic.
+// flush) and returns a *PanicError (errors.Is ErrPanic).
 func RunRecovered(ctx context.Context, m *vault.Manager) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
+			pe := panicError(r)
 			m.Crash()
-			err = ErrPanic
+			err = pe
 		}
 	}()
 	return m.Run(ctx)

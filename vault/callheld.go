@@ -151,19 +151,24 @@ func (m *Manager) depositCallMsg(ctx context.Context, e *OutboxEntry, now time.T
 		e.Done = true
 		return nil
 	}
+	// Not sealable now (no current epoch, a demoted one): ended and
+	// dropped, not sent, so that it never holds the mailbox's handshake
+	// behind it (as a demoted epoch's messages are held, §3.4.1, a held
+	// call message is not).
 	kr := m.sessions[p.ID]
-	if kr == nil || kr.Current() == nil {
-		return errCallNoSession
+	var raw []byte
+	err := errCallNoSession
+	if kr != nil && kr.Current() != nil {
+		c := *cm.inner // sealFor sets the copy's features
+		raw, err = m.sealFor(p, kr.Current(), &c)
 	}
-	c := *cm.inner // sealFor sets the copy's features
-	raw, err := m.sealFor(p, kr.Current(), &c)
 	if err != nil {
-		return err // demoted: it waits, with the backoff, for a new epoch
+		m.dropCallMsg(e.InnerID)
+		e.Done = true
+		return nil
 	}
-	e.Payload = raw
-	err = m.deposit(ctx, e, now)
+	err = m.depositPayload(ctx, e, raw, now) // never on e.Payload: a marker stays empty
 	suite.Wipe(raw)
-	e.Payload = nil
 	if cm.offer && (err == nil || e.Done) {
 		m.dropCallMsg(e.InnerID) // an offer is kept no longer than its deposit
 	}

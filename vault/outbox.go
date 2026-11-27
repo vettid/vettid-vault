@@ -641,6 +641,13 @@ func (m *Manager) drainOutbox(ctx context.Context) {
 			}
 			continue // not stored yet (queue)
 		}
+		if e.CallHeld && m.stateBehind {
+			// (0.97.0 §10.10) Sealed at drain time: not while the last write
+			// failed, so that it never goes under an epoch, or with a seq,
+			// that no write has stored. It waits, in order, for the next.
+			blocked[key] = true
+			continue
+		}
 		if e.Op == OpDeposit && (blocked[key] || awaiting[key] && e.Token == "" && !e.QuotaRefresh || e.PeerID != "" && held[e.PeerID] && !e.Handshake) {
 			continue
 		}
@@ -776,7 +783,7 @@ func (m *Manager) drainOutbox(ctx context.Context) {
 	}
 	var kept []*OutboxEntry
 	for _, e := range vol {
-		if callWaiting[e.RelayURL+"|"+e.Mailbox] && ctx.Err() == nil {
+		if callWaiting[e.RelayURL+"|"+e.Mailbox] && ctx.Err() == nil && now.Sub(e.Created) < keptMaxAge && len(kept) < keptMax {
 			kept = append(kept, e)
 			continue
 		}
@@ -811,8 +818,23 @@ func (m *Manager) drainOutbox(ctx context.Context) {
 	}
 }
 
+// keptMaxAge and keptMax bound the memory-only deposits kept behind a held
+// call message (0.97.0 §10.10 "Order"): older ones, or those past the
+// count, are lost as before, as a volatile deposit to a blocked mailbox is.
+// A minute is longer than a call's ephemeral messages live (30 s).
+const (
+	keptMaxAge = time.Minute
+	keptMax    = 256
+)
+
 // deposit performs one deposit and applies the §8.6 error table.
 func (m *Manager) deposit(ctx context.Context, e *OutboxEntry, now time.Time) error {
+	return m.depositPayload(ctx, e, e.Payload, now)
+}
+
+// depositPayload is deposit with the sealed bytes given apart from e (a held
+// call message's, sealed from memory: never on its marker, 0.97.0 §10.10).
+func (m *Manager) depositPayload(ctx context.Context, e *OutboxEntry, payload []byte, now time.Time) error {
 	tok := e.Token
 	p := m.peer(e.PeerID)
 	if tok == "" {
@@ -856,7 +878,7 @@ func (m *Manager) deposit(ctx context.Context, e *OutboxEntry, now time.Time) er
 	}
 	// Signed with the key the token was issued to: an old relay key while
 	// the recipient holds none for the current one (§3.4 (a)).
-	msgID, err := m.relayFor(tok).Deposit(withOneAttempt(ctx), e.RelayURL, e.Mailbox, tok, e.Payload)
+	msgID, err := m.relayFor(tok).Deposit(withOneAttempt(ctx), e.RelayURL, e.Mailbox, tok, payload)
 	if mayHaveStored(err) {
 		e.Tried = true // 0.88.7 §8.3: it may have reached the relay
 	}

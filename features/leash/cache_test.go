@@ -1,6 +1,7 @@
 package leash
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"strings"
@@ -30,6 +31,9 @@ func TestItemGetCachedWithoutValue(t *testing.T) {
 		`{"field_id":"f2","label":"Address","kind":"address"}],"withheld":true}`
 	if string(res.Cached) != want || !res.SentOnce {
 		t.Fatalf("cached:\n%s\nwant\n%s\nsent once %v", res.Cached, want, res.SentOnce)
+	}
+	if c := r.it.lastRead; len(c) == 0 || !bytes.Equal(c, make([]byte, len(c))) {
+		t.Fatalf("the item's content read for the answer was not wiped: %q", c)
 	}
 }
 

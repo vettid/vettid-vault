@@ -919,10 +919,11 @@ func (m *Manager) sendResponse(p *Peer, req *envelope.Inner, key string, out *en
 // the same id, time, type and re (a retransmission is the same answer), another body.
 func (m *Manager) sendResponseCached(p *Peer, req *envelope.Inner, key string, out *envelope.Inner, cached json.RawMessage,
 	sentOnce bool, holdCall string, now time.Time) {
-	if sentOnce {
-		// (§8.2, 0.97.0) The body with the secret is wiped on every exit:
-		// sealed once from memory, replaced by response_too_large, or
-		// dropped (no id, no usable epoch).
+	if sentOnce || holdCall != "" {
+		// (§8.2, §10.10, 0.97.0) The body with the secret is wiped on every
+		// exit: sealed once from memory, copied into memory for its call,
+		// replaced by response_too_large, or dropped (no id, no usable
+		// epoch).
 		body := out.Body
 		defer suite.Wipe(body)
 	}
@@ -982,9 +983,8 @@ func (m *Manager) sendResponseCached(p *Peer, req *envelope.Inner, key string, o
 		// lasts, never stored (callheld.go). Not held (no usable epoch, a
 		// suspended device), it is lost as a sent-once answer is, and a
 		// retransmission gets the cache's copy. The handler's bytes are
-		// wiped either way (holdCallMsg keeps a copy).
+		// wiped either way (above; holdCallMsg keeps a copy).
 		m.holdCallMsg(p, out, holdCall, false, "", now)
-		suite.Wipe(out.Body)
 		return
 	}
 	m.sealAndQueue(p, out)

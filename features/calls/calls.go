@@ -22,6 +22,7 @@ import (
 	"crypto/ed25519"
 	"encoding/json"
 	"errors"
+	"slices"
 	"sort"
 	"strconv"
 	"sync"
@@ -31,6 +32,7 @@ import (
 	"github.com/vettid/vettid-vault/vms/callwire"
 	"github.com/vettid/vettid-vault/vms/envelope"
 	"github.com/vettid/vettid-vault/vms/strictjson"
+	"github.com/vettid/vettid-vault/vms/suite"
 )
 
 // Limits and times (§10.10).
@@ -320,12 +322,13 @@ func (f *Feature) sorted() []string {
 	return ids
 }
 
-// iceFor makes and signs this vault's ICE configuration for a call (§10.10 "Servers and credentials").
-func (f *Feature) iceFor(_ context.Context, s *vault.Session, callID string) (cfg, sig []byte, err error) {
+// iceFor makes and signs this vault's ICE configuration for a call (§10.10 "Servers and credentials"); turn: it
+// carries a TURN entry (one with a credential).
+func (f *Feature) iceFor(_ context.Context, s *vault.Session, callID string) (cfg, sig []byte, turn bool, err error) {
 	now := s.Now()
 	servers, exp, err := f.iceSrc.Servers(s, callID, now)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, false, err
 	}
 	// The calling service may cost a member the relay, never a direct call (CALLING-SERVICE §7.5): servers the
 	// configuration cannot carry (an issuer's answer that passed its checks but whose configuration would be over
@@ -358,9 +361,9 @@ func (f *Feature) iceFor(_ context.Context, s *vault.Session, callID string) (cf
 		if sig, err = s.SignICEConfig(cfg); err != nil {
 			continue
 		}
-		return cfg, sig, nil
+		return cfg, sig, slices.ContainsFunc(list, func(sv callwire.ICEServer) bool { return sv.Username != "" || sv.Credential != "" }), nil
 	}
-	return nil, nil, err
+	return nil, nil, false, err
 }
 
 // Start is a parsed call.start body.
@@ -659,17 +662,14 @@ func (f *Feature) start(ctx context.Context, s *vault.Session, body []byte) (jso
 		}
 	}
 	exp := now.Add(OfferTTL).UTC().Truncate(time.Millisecond)
-	cfg, isig, err := f.iceFor(ctx, s, id)
+	cfg, isig, turn, err := f.iceFor(ctx, s, id)
 	if err != nil {
 		return nil, errInternal
 	}
+	defer suite.Wipe(cfg) // the configuration with the credential: copied (base64) into the answer
 	// §10.10 (0.90.15): an answer with a TURN entry is cached (§8.2) without it, so no credential is kept in the
 	// vault's state: the same call id and exp, STUN only (or no servers, should that form fail), signed again, and
 	// (0.97.0) withheld: true. Made before the offer goes, so that nothing can fail once the call is placed.
-	turn, err := hasTURN(cfg)
-	if err != nil {
-		return nil, errInternal
-	}
 	var scfg, ssig []byte
 	if turn {
 		if scfg, ssig, err = stunOnly(s, cfg, false); err != nil {
@@ -853,7 +853,7 @@ func (f *Feature) offer(ctx context.Context, s *vault.Session, in *envelope.Inne
 		f.missed(s, c)
 		return nil
 	}
-	cfg, isig, err := f.iceFor(ctx, s, c.ID)
+	cfg, isig, turn, err := f.iceFor(ctx, s, c.ID)
 	if err != nil {
 		f.finish(s, c, "failed")
 		_ = s.SendToConnection(conn, "call.end", endJSON(c.ID, "failed"))
@@ -868,26 +868,14 @@ func (f *Feature) offer(ctx context.Context, s *vault.Session, in *envelope.Inne
 	}
 	ev := eb.Bytes()
 	o := vault.SendOptions{Exp: c.Exp}
-	if turn, err := hasTURN(cfg); err != nil || turn {
+	if turn {
 		// (0.97.0 §10.10) With a TURN entry: held in memory while the call rings, never stored (CallHeld).
 		o.Call = c.ID
 	}
 	s.NotifyDevicesWith("call.offer", ev, "", o)
+	suite.Wipe(ev) // each device's copy is sealed or held (copied) by now
+	suite.Wipe(cfg)
 	return nil
-}
-
-// hasTURN reports whether the configuration cfg carries a TURN entry (one with a credential).
-func hasTURN(cfg []byte) (bool, error) {
-	c, err := callwire.ParseICEConfig(cfg)
-	if err != nil {
-		return false, err
-	}
-	for _, sv := range c.Servers {
-		if sv.Username != "" || sv.Credential != "" {
-			return true, nil
-		}
-	}
-	return false, nil
 }
 
 // CallHeld implements vault.CallKeeper (0.97.0 §10.10): a call's message carrying its TURN credential may still
@@ -1411,3 +1399,5 @@ func (f *Feature) Get(id string) (Call, bool) {
 	}
 	return *c, true
 }
+
+var _ vault.CallKeeper = (*Feature)(nil) // (0.97.0 §10.10) a drifted signature would drop every held message

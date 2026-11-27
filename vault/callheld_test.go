@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -44,9 +45,9 @@ func (f *callHeldFeature) Handle(_ context.Context, s *Session, in *envelope.Inn
 		return f.last, nil
 	default:
 		f.held["c2"] = "rings"
-		s.NotifyDevicesWith("call.offer", json.RawMessage(`{"turn":"SECRET-TURN-OFFER"}`), "",
+		s.NotifyDevicesWith("call.offer", json.RawMessage(`{"call_id":"c2","turn":"SECRET-TURN-OFFER"}`), "",
 			SendOptions{Exp: s.Now().Add(45 * time.Second), Call: "c2"})
-		s.NotifyDevicesWith("call.ice", json.RawMessage(`{"after":"ephemeral"}`), "",
+		s.NotifyDevicesWith("call.ice", json.RawMessage(`{"after":"ephemeral","n":`+strconv.Itoa(f.calls)+`}`), "",
 			SendOptions{Exp: s.Now().Add(time.Minute), MemoryOnly: true})
 		s.NotifyAllDevices("sync.event", json.RawMessage(`{"kind":"after"}`))
 		return json.RawMessage(`{}`), nil
@@ -219,14 +220,13 @@ func TestCallHeldOfferRetriedAndAheadOfLaterDeposits(t *testing.T) {
 	}
 	d.relay.failMailbox = nil
 	d.inbox(app)
-	retryNow(d.m)
-	d.m.drainOutbox(context.Background()) // the memory-only one goes after the offer's own drain
+	retryNow(d.m) // one drain: the offer, then the durable and the memory-only messages behind it
 	var order []string
 	for _, in := range d.inbox(app)["dev1"] {
 		switch {
 		case in.Type == "call.offer":
 			order = append(order, "offer")
-			if string(in.Body) != `{"turn":"SECRET-TURN-OFFER"}` {
+			if string(in.Body) != `{"call_id":"c2","turn":"SECRET-TURN-OFFER"}` {
 				t.Fatalf("offer %s", in.Body)
 			}
 		case in.Type == "call.ice":
@@ -425,5 +425,184 @@ func TestCallHeldOfferWipedWhenItsMarkerEnds(t *testing.T) {
 	defer d.m.mu.Unlock()
 	if len(d.m.callMsgs) != 0 {
 		t.Fatal("the offer is still held after its marker ended")
+	}
+}
+
+// A deletion drops the held call messages first: step 2's drain sends no offer, and the deletion's notice goes.
+func TestCallHeldDroppedAtDeletion(t *testing.T) {
+	d, _ := newCallHeld(t)
+	app := d.self()
+	d.relay.failMailbox = map[string]error{d.devPeer.Relay.Mailbox: errors.New("relay down")}
+	d.sendAs(app, "test.callring", `{}`)
+	d.relay.failMailbox = nil
+	d.inbox(app)
+	if err := d.m.Delete(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	got := d.inbox(app)["dev1"]
+	if find(got, ofType("call.offer")) != nil {
+		t.Fatal("the held offer was sent at the deletion")
+	}
+	if find(got, ofType("device.unlinked")) == nil {
+		t.Fatalf("the deletion's notice waited behind the held offer: %d deposits", len(got))
+	}
+}
+
+// A held message that can't be sealed (no current epoch for the device) ends at once, dropped and not sent, and
+// holds nothing behind it.
+func TestCallHeldUnsealableEnds(t *testing.T) {
+	d, _ := newCallHeld(t)
+	app := d.self()
+	d.relay.failMailbox = map[string]error{d.devPeer.Relay.Mailbox: errors.New("relay down")}
+	d.sendAs(app, "test.callring", `{}`)
+	d.relay.failMailbox = nil
+	d.m.mu.Lock()
+	kr := d.m.sessions[d.devPeer.ID]
+	delete(d.m.sessions, d.devPeer.ID)
+	d.m.mu.Unlock()
+	d.inbox(app)
+	retryNow(d.m)
+	got := d.inbox(app)["dev1"]
+	d.m.mu.Lock()
+	d.m.sessions[d.devPeer.ID] = kr
+	for _, e := range d.m.st.Outbox {
+		if e.CallHeld && !e.Done {
+			t.Fatal("an unsealable marker still waits")
+		}
+	}
+	n := len(d.m.callMsgs)
+	d.m.mu.Unlock()
+	if n != 0 || find(got, ofType("call.offer")) != nil {
+		t.Fatalf("held %d after a failed seal", n)
+	}
+	if find(got, ofType("sync.event")) == nil {
+		t.Fatal("the durable message behind it did not go")
+	}
+}
+
+// While the last state write failed, a marker is not deposited (it waits, in order); after a write, it goes.
+func TestCallHeldWaitsWhileTheStateIsBehind(t *testing.T) {
+	d, _ := newCallHeld(t)
+	app := d.self()
+	d.relay.failMailbox = map[string]error{d.devPeer.Relay.Mailbox: errors.New("relay down")}
+	d.sendAs(app, "test.callring", `{}`)
+	d.relay.failMailbox = nil
+	d.m.mu.Lock()
+	d.m.stateBehind = true
+	d.m.mu.Unlock()
+	d.inbox(app)
+	retryNow(d.m)
+	if got := d.inbox(app)["dev1"]; find(got, ofType("call.offer")) != nil || find(got, ofType("sync.event")) != nil {
+		t.Fatal("deposited while the state is behind")
+	}
+	d.m.mu.Lock()
+	d.m.stateBehind = false
+	d.m.mu.Unlock()
+	retryNow(d.m)
+	if find(d.inbox(app)["dev1"], ofType("call.offer")) == nil {
+		t.Fatal("not deposited once the state caught up")
+	}
+}
+
+// The sealed bytes of a held message are wiped once deposited (the relay is handed the very slice).
+func TestCallHeldSealedBytesWiped(t *testing.T) {
+	d, _ := newCallHeld(t)
+	app := d.self()
+	var seen [][]byte
+	d.relay.checkPayload = func(mailbox, _ string, payload []byte) error {
+		if mailbox == d.devPeer.Relay.Mailbox {
+			seen = append(seen, payload)
+		}
+		return nil
+	}
+	d.sendAs(app, "test.callring", `{}`)
+	if find(d.inbox(app)["dev1"], ofType("call.offer")) == nil {
+		t.Fatal("no offer: the check proves nothing")
+	}
+	zero := 0
+	for _, p := range seen {
+		if len(p) > 0 && bytes.Equal(p, make([]byte, len(p))) {
+			zero++
+		}
+	}
+	if zero != 2 {
+		t.Fatalf("%d of %d deposits wiped, want the held offer's and the memory-only message's", zero, len(seen))
+	}
+}
+
+// Memory-only messages kept behind a held message go in the order they were made, older batches first; those
+// kept past a minute, or past the count, are lost as before.
+func TestCallHeldKeptInOrderAndBounded(t *testing.T) {
+	d, _ := newCallHeld(t)
+	app := d.self()
+	d.relay.failMailbox = map[string]error{d.devPeer.Relay.Mailbox: errors.New("relay down")}
+	d.sendAs(app, "test.callring", `{}`)
+	d.sendAs(app, "test.callring", `{}`)
+	d.relay.failMailbox = nil
+	d.inbox(app)
+	retryNow(d.m)
+	var ns []string
+	for _, in := range d.inbox(app)["dev1"] {
+		if in.Type == "call.ice" {
+			ns = append(ns, string(in.Body))
+		}
+	}
+	if len(ns) != 2 || !strings.Contains(ns[0], `"n":1`) || !strings.Contains(ns[1], `"n":2`) {
+		t.Fatalf("kept messages %v", ns)
+	}
+
+	d.relay.failMailbox = map[string]error{d.devPeer.Relay.Mailbox: errors.New("relay down")}
+	d.sendAs(app, "test.callring", `{}`)
+	d.m.mu.Lock()
+	for _, e := range d.m.volatile {
+		e.Created = e.Created.Add(-2 * keptMaxAge)
+	}
+	for range keptMax + 10 {
+		d.m.volatile = append(d.m.volatile, &OutboxEntry{ID: "x", Op: OpDeposit, PeerID: d.devPeer.ID, RelayURL: d.devPeer.Relay.URL,
+			Mailbox: d.devPeer.Relay.Mailbox, Payload: []byte("p"), BestEffort: true, Created: d.m.now()})
+	}
+	d.m.mu.Unlock()
+	d.m.drainOutbox(context.Background())
+	d.m.mu.Lock()
+	defer d.m.mu.Unlock()
+	if len(d.m.volatile) != keptMax {
+		t.Fatalf("%d kept, want %d (the old one and those past the count lost)", len(d.m.volatile), keptMax)
+	}
+	for _, e := range d.m.volatile {
+		if e.ID != "x" {
+			t.Fatal("a message kept past a minute")
+		}
+	}
+}
+
+// The offer's marker carries the offer's wake class (§14.2 trigger 5); an offer held for a call goes to apps and
+// desktops only.
+func TestCallHeldOfferWakeAndKinds(t *testing.T) {
+	d, _ := newCallHeld(t)
+	app := d.self()
+	d.m.mu.Lock()
+	d.m.st.Push = &PushRegistration{DeviceID: d.devPeer.ID}
+	d.m.mu.Unlock()
+	d.relay.failMailbox = map[string]error{d.devPeer.Relay.Mailbox: errors.New("relay down")}
+	d.sendAs(app, "test.callring", `{}`)
+	d.m.mu.Lock()
+	defer d.m.mu.Unlock()
+	wake := ""
+	for _, e := range d.m.st.Outbox {
+		if e.CallHeld {
+			wake = e.Wake
+		}
+	}
+	if wake != wakeCall+":c2" {
+		t.Fatalf("the marker's wake %q", wake)
+	}
+	agent := *d.devPeer
+	agent.ID, agent.Kind = "agent1", KindAgent
+	d.m.sessions["agent1"] = d.m.sessions[d.devPeer.ID]
+	defer delete(d.m.sessions, "agent1")
+	before := len(d.m.callMsgs)
+	if id := d.m.sendWith(&agent, "call.offer", json.RawMessage(`{"call_id":"c2"}`), SendOptions{Call: "c2"}, d.m.now()); id != "" ||
+		len(d.m.callMsgs) != before {
+		t.Fatal("an offer held for an agent")
 	}
 }

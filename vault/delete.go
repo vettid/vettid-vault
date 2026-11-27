@@ -102,6 +102,9 @@ func (m *Manager) beginDelete(via string, now time.Time) {
 	if m.st == nil {
 		return
 	}
+	// (0.97.0 §10.10) The call messages held in memory are dropped first:
+	// step 2's drain sends none of them, and none holds back the notices.
+	m.dropCallMsgs()
 	if m.st.Deleting != nil {
 		// Already marked in the state (0.51.0, §12.5): a marking flush
 		// that stored the state and perhaps not the header. Step 1 is

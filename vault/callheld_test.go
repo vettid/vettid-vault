@@ -148,6 +148,13 @@ func TestCallHeldAnswerCopyOnceTheCallIsGone(t *testing.T) {
 			app := d.self()
 			d.relay.failMailbox = map[string]error{d.devPeer.Relay.Mailbox: errors.New("relay down")}
 			id := d.sendAs(app, "test.callstart", `{}`)
+			d.m.mu.Lock()
+			for _, e := range d.m.st.Outbox {
+				if e.CallHeld && (e.Attempts == 0 || e.Payload != nil) {
+					t.Fatalf("the marker was not tried, or keeps the sealed bytes after its failed attempt (%d)", e.Attempts)
+				}
+			}
+			d.m.mu.Unlock()
 			d.relay.failMailbox = nil
 			if gone == "ended" {
 				delete(f.held, "c1")

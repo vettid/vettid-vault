@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/vettid/vettid-vault/internal/featuretest"
+	"github.com/vettid/vettid-vault/vault"
 	"github.com/vettid/vettid-vault/vms/callwire"
 	"github.com/vettid/vettid-vault/vms/strictjson"
 	"github.com/vettid/vettid-vault/vms/suite"
@@ -49,19 +50,44 @@ func TestStartHeldForTheCallWithTURN(t *testing.T) {
 	}
 }
 
-// Without a TURN entry (no usable credential) the answer is not held and is cached as it is, without withheld.
+// stunSource gives every configuration the STUN entry alone (a pool with no usable credential).
+type stunSource struct{}
+
+func (stunSource) Servers(*vault.Session, string, time.Time) ([]callwire.ICEServer, time.Time, error) {
+	return []callwire.ICEServer{{URLs: []string{"stun:stun.example:3478"}}}, t0.Add(ICETTL), nil
+}
+func (stunSource) Retire(string)                    {}
+func (stunSource) Drop(string)                      {}
+func (stunSource) Prime(*vault.Session, time.Time) {}
+
+// Without a TURN entry (no usable credential: no servers, or the STUN entry alone) the answer is not held and is
+// cached as it is, without withheld; the offers are queued as before.
 func TestStartWithoutTURNNotHeld(t *testing.T) {
-	f := New(Options{})
-	h := featuretest.NewHost()
-	h.AddConnection("c1")
-	h.AddDevice("dev-app", "app")
-	sk, _ := suite.GeneratePrivateKey()
-	r := featuretest.Call(f, h, t0, "app", "call.start", startBody("c1", sk.Public().Bytes()))
-	if !r.OK() {
-		t.Fatal(r.Code)
-	}
-	if r.HeldForCall != "" || r.Cached != nil || strings.Contains(string(r.Body), "withheld") {
-		t.Fatalf("held %q, cached %s, body %s", r.HeldForCall, r.Cached, r.Body)
+	for name, src := range map[string]ICESource{"none": nil, "stun": stunSource{}} {
+		f := New(Options{ICE: src})
+		h := featuretest.NewHost()
+		h.AddConnection("c1")
+		h.AddDevice("dev-app", "app")
+		sk, _ := suite.GeneratePrivateKey()
+		r := featuretest.Call(f, h, t0, "app", "call.start", startBody("c1", sk.Public().Bytes()))
+		if !r.OK() {
+			t.Fatal(name, r.Code)
+		}
+		if name == "stun" && !strings.Contains(string(mustCfg(t, r.Body)), "stun:") {
+			t.Fatal("no STUN entry: the check proves nothing")
+		}
+		if r.HeldForCall != "" || r.Cached != nil || strings.Contains(string(r.Body), "withheld") {
+			t.Fatalf("%s: held %q, cached %s, body %s", name, r.HeldForCall, r.Cached, r.Body)
+		}
+		b := newSide("cA")
+		b.f = New(Options{ICE: src})
+		ok, _ := callwire.NewOfferKey()
+		featuretest.CallExp(b.f, b.h, t0, t0.Add(OfferTTL), "connection:cA", "call.offer", peerOffer("cA", newCallID("cA"), "audio", ok.Public().Bytes()))
+		for _, sent := range b.h.Sent {
+			if sent.Type == "call.offer" && sent.Opt.Call != "" {
+				t.Fatalf("%s: an offer without TURN is held", name)
+			}
+		}
 	}
 }
 

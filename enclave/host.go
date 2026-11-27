@@ -91,8 +91,9 @@ func (h *LocalHost) start(id string, m *vault.Manager, openedAt time.Time) {
 var ErrPanic = errors.New("enclave: vault run loop panicked")
 
 // PanicError is ErrPanic with what may be logged of the panic: the
-// value's type, a runtime error's own text (it carries no vault data:
-// indexes, lengths, a nil dereference) and the frames of this module where
+// value's type, a runtime error's own text (only fixed words, type names
+// and integers such as an index and a length; an index may come from data,
+// so at most one number of it) and the frames of this module where
 // it happened, as function names and lines. Never the value of another
 // panic, which could hold vault data.
 type PanicError struct {

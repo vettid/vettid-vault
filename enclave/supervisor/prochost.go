@@ -1416,7 +1416,13 @@ func (p *vproc) notify(f *hostproto.Frame) {
 		for i := 2; i+1 < len(f.Fields) && i < 2+16; i += 2 {
 			kv = append(kv, string(f.Fields[i]), truncate(string(f.Fields[i+1]), 120))
 		}
-		s.log.Info("vault: "+truncate(string(f.Fields[1]), 120), kv...)
+		// At the level the vault process logged it: a Warn (a panic, a run
+		// loop that ended) is not to read as routine.
+		lvl := slog.LevelInfo
+		if l := string(f.Fields[0]); l == slog.LevelWarn.String() || l == slog.LevelError.String() {
+			lvl = slog.LevelWarn
+		}
+		s.log.Log(context.Background(), lvl, "vault: "+truncate(string(f.Fields[1]), 120), kv...)
 	}
 }
 

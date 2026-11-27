@@ -19,10 +19,12 @@ import (
 // sent requests while the vault was locked; the vault is unlocked with the
 // PIN only and must stay up and answer them.
 func TestUnlockAfterAgentRequestsWhileLocked(t *testing.T) {
-	for _, scale := range []uint64{1, 24} {
-		for _, ahead := range []time.Duration{0, 36 * time.Hour, 9 * 24 * time.Hour} {
-			t.Run(fmt.Sprintf("scale%d/%s", scale, ahead), func(t *testing.T) { unlockAfterAgentRequests(t, scale, ahead) })
-		}
+	// The check ok, held, and past the idle lock's time (staging's scale).
+	for _, c := range []struct {
+		scale uint64
+		ahead time.Duration
+	}{{1, 0}, {24, 36 * time.Hour}, {24, 9 * 24 * time.Hour}} {
+		t.Run(fmt.Sprintf("scale%d/%s", c.scale, c.ahead), func(t *testing.T) { unlockAfterAgentRequests(t, c.scale, c.ahead) })
 	}
 }
 

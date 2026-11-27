@@ -19,7 +19,7 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"strings"
+	"strconv"
 	"sync"
 	"time"
 
@@ -132,6 +132,10 @@ func Serve(c net.Conn, p Platform) int {
 		return channelEndedExit(m != nil)
 	}
 }
+
+// logFrames is how many frames of a panic the vault process logs: with
+// type and runtime, the eight attributes the supervisor forwards (KindLog).
+const logFrames = 6
 
 // channelEndedExit is the exit code when the supervisor's channel ended
 // with no exit decided: ExitLocked after the supervisor's lock (which
@@ -279,8 +283,16 @@ func (pr *proc) runEnded(err error, locked bool) (code int, lockFirst bool) {
 		pr.log.Warn("split brain: newer state written elsewhere; zeroized without flushing")
 		return ExitSplitBrain, false
 	case errors.As(err, &pe):
-		pr.log.Warn("vault run loop panicked; zeroized without flushing", "type", pe.Type, "runtime", pe.Runtime,
-			"at", strings.Join(pe.Frames, " < "))
+		// One attribute per frame, innermost first: the supervisor cuts each
+		// value it forwards to 120 bytes and takes at most eight.
+		args := []any{"type", pe.Type, "runtime", pe.Runtime}
+		for i, fr := range pe.Frames {
+			if i == logFrames {
+				break
+			}
+			args = append(args, "at"+strconv.Itoa(i), fr)
+		}
+		pr.log.Warn("vault run loop panicked; zeroized without flushing", args...)
 		return ExitError, false
 	case locked:
 		return ExitLocked, false

@@ -42,7 +42,7 @@ func TestRunEndedTellsAPanicFromALock(t *testing.T) {
 	}
 	buf.Reset()
 	pr.runEnded(pe, true)
-	if !strings.Contains(buf.String(), "vault.f x.go:1 < vault.g y.go:2") || !strings.Contains(buf.String(), "index out of range") {
+	if !strings.Contains(buf.String(), `at0="vault.f x.go:1" at1="vault.g y.go:2"`) || !strings.Contains(buf.String(), "index out of range") {
 		t.Fatalf("panic log: %q", buf.String())
 	}
 }

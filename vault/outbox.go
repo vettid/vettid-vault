@@ -783,8 +783,15 @@ func (m *Manager) drainOutbox(ctx context.Context) {
 	}
 	var kept []*OutboxEntry
 	for _, e := range vol {
-		if callWaiting[e.RelayURL+"|"+e.Mailbox] && ctx.Err() == nil && now.Sub(e.Created) < keptMaxAge && len(kept) < keptMax {
-			kept = append(kept, e)
+		if callWaiting[e.RelayURL+"|"+e.Mailbox] {
+			// Behind a held call message: kept within the bounds, else lost;
+			// never deposited ahead of it, whatever holds the marker (a
+			// marker waiting for a fresh token does not block the mailbox).
+			if ctx.Err() == nil && now.Sub(e.Created) < keptMaxAge && len(kept) < keptMax {
+				kept = append(kept, e)
+			} else {
+				suite.Wipe(e.Payload)
+			}
 			continue
 		}
 		if blocked[e.RelayURL+"|"+e.Mailbox] || quotaWaiting[e.RelayURL+"|"+e.Mailbox] || ctx.Err() != nil {

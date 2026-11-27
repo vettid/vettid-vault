@@ -31,13 +31,17 @@ type Sent struct {
 	Type string
 	Body json.RawMessage
 	Opt  vault.SendOptions
+	// Given is the very slice the handler passed (NotifyDevicesWith), to see what it wipes afterwards.
+	Given json.RawMessage
 }
 
 // Host is a fake vault.Host.
 type Host struct {
-	ID         string
-	Conns      map[string]vault.PeerInfo
-	Sent       []Sent
+	ID    string
+	Conns map[string]vault.PeerInfo
+	Sent  []Sent
+	// Signed are the very ICE configurations SignICEConfig was given, to see what the feature wipes afterwards.
+	Signed     [][]byte
 	Activities []vault.Activity
 	// AppFeatures is the member's app's last features list (Session.AppFeature).
 	AppFeatures []string
@@ -422,6 +426,7 @@ func (h *Host) TimeScale() uint64 { return max(h.Scale, 1) }
 func identitySeed() []byte { return make([]byte, 32) }
 
 func (h *Host) SignICEConfig(config []byte) ([]byte, error) {
+	h.Signed = append(h.Signed, config)
 	if _, err := callwire.ParseICEConfig(config); err != nil {
 		return nil, err
 	}
@@ -525,7 +530,7 @@ func (h *Host) NotifyDevicesWith(typ string, body json.RawMessage, except string
 	if except != "" {
 		to = "devices-except:" + except
 	}
-	h.Sent = append(h.Sent, Sent{To: to, Type: typ, Body: append(json.RawMessage(nil), body...), Opt: o})
+	h.Sent = append(h.Sent, Sent{To: to, Type: typ, Body: append(json.RawMessage(nil), body...), Opt: o, Given: body})
 }
 
 // AddConnection adds an active connection.

@@ -606,3 +606,56 @@ func TestCallHeldOfferWakeAndKinds(t *testing.T) {
 		t.Fatal("an offer held for an agent")
 	}
 }
+
+// A memory-only message past its bound behind a held message is lost, never deposited ahead of it, also while the
+// marker waits for a fresh token (which does not block the mailbox) (0.97.0 §10.10 "Order").
+func TestCallHeldOverBoundNeverAheadOfAnAwaitingMarker(t *testing.T) {
+	d, _ := newCallHeld(t)
+	app := d.self()
+	d.relay.failMailbox = map[string]error{d.devPeer.Relay.Mailbox: errors.New("relay down")}
+	d.sendAs(app, "test.callring", `{}`)
+	d.relay.failMailbox = nil
+	d.m.mu.Lock()
+	markers := 0
+	for _, e := range d.m.st.Outbox {
+		if e.CallHeld && !e.Done {
+			e.AwaitToken, e.NotBefore = true, d.m.now().Add(time.Hour)
+			markers++
+		}
+	}
+	for _, e := range d.m.volatile {
+		e.Created = e.Created.Add(-2 * keptMaxAge)
+	}
+	kept := len(d.m.volatile)
+	d.m.mu.Unlock()
+	if markers != 1 || kept == 0 {
+		t.Fatalf("markers %d, kept %d: the check proves nothing", markers, kept)
+	}
+	d.inbox(app)
+	d.m.drainOutbox(context.Background())
+	if got := d.inbox(app)["dev1"]; find(got, ofType("call.ice")) != nil {
+		t.Fatal("an old memory-only message went ahead of the held offer")
+	}
+	d.m.mu.Lock()
+	defer d.m.mu.Unlock()
+	if len(d.m.volatile) != 0 {
+		t.Fatal("the old memory-only message is still kept")
+	}
+}
+
+// fits() wipes the plaintext copy it makes of an answer (a TURN credential, a value).
+func TestFitsWipesItsCopy(t *testing.T) {
+	d, _ := newCallHeld(t)
+	app := d.self()
+	var copies [][]byte
+	d.m.opt.Hooks.FitsCopy = func(b []byte) { copies = append(copies, b) }
+	d.sendAs(app, "test.callstart", `{}`)
+	if len(copies) == 0 {
+		t.Fatal("fits made no copy: the check proves nothing")
+	}
+	for _, c := range copies {
+		if !bytes.Equal(c, make([]byte, len(c))) {
+			t.Fatalf("fits' copy not wiped: %q", c)
+		}
+	}
+}

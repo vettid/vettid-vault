@@ -260,6 +260,9 @@ const EventAppKey = "app_key"
 
 // Hooks let tests and supervisors observe or interrupt processing.
 type Hooks struct {
+	// FitsCopy, if set, is handed the plaintext copy fits() makes of an
+	// answer before it is wiped (a test of the wipe).
+	FitsCopy func([]byte)
 	// Adopt, if set, is called in the write in which the vault starts to
 	// hold token tok of kind (standing, reconnect) for the peer; from is
 	// "carried" (an adoption of a handshake's carried tokens, 0.88.2

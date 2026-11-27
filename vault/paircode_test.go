@@ -1110,9 +1110,9 @@ func TestPairCodeDuplicateInOneBatch(t *testing.T) {
 	}
 }
 
-// Only an answer marked sent-once (the pairing code) leaves the stored
-// outbox: any other with a cached copy (a LEASH value, a TURN credential)
-// keeps its durable deposit and its retries.
+// Only an answer marked sent-once (a pairing code; 0.97.0, a LEASH value)
+// leaves the stored outbox: any other with a cached copy (a TURN
+// credential, 0.97.0 §8.2) keeps its durable deposit and its retries.
 func TestSentOnceIsOnlyForTheMarkedAnswer(t *testing.T) {
 	d := newDevFixture(t)
 	req := &envelope.Inner{ID: "01JB2Z6V9K3M4N5P6Q7R8S9TB0", Type: "item.get"}
@@ -1135,12 +1135,12 @@ func TestSentOnceIsOnlyForTheMarkedAnswer(t *testing.T) {
 	d.m.mu.Lock()
 	defer d.m.mu.Unlock()
 	out := &envelope.Inner{Type: req.Type, Re: req.ID, Status: envelope.StatusOK, Body: []byte(`{"value":"s3cr3t"}`)}
-	d.m.sendResponseCached(d.devPeer, req, "k1", out, json.RawMessage(`{"withheld":true}`), false, d.m.now())
+	d.m.sendResponseCached(d.devPeer, req, "k1", out, json.RawMessage(`{"withheld":true}`), false, "", d.m.now())
 	if !stored(out.ID) || inMemory(out.ID) {
 		t.Fatal("a cached-copy answer not marked sent-once lost its durable deposit")
 	}
 	out2 := &envelope.Inner{Type: "device.pair.create", Re: "01JB2Z6V9K3M4N5P6Q7R8S9TB1", Status: envelope.StatusOK, Body: []byte(`{"code":"ABCDEFGH"}`)}
-	d.m.sendResponseCached(d.devPeer, &envelope.Inner{ID: out2.Re, Type: out2.Type}, "k2", out2, json.RawMessage(`{}`), true, d.m.now())
+	d.m.sendResponseCached(d.devPeer, &envelope.Inner{ID: out2.Re, Type: out2.Type}, "k2", out2, json.RawMessage(`{}`), true, "", d.m.now())
 	if stored(out2.ID) || !inMemory(out2.ID) {
 		t.Fatal("the sent-once answer is in the stored outbox")
 	}

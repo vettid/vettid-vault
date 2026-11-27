@@ -38,9 +38,11 @@ func (w *window) UseKey(time.Time, time.Duration) (ed25519.PrivateKey, bool) {
 // fakeItems is the items feature as leash sees it: which items each
 // agent rule includes (§10.11, §10.12).
 type fakeItems struct {
-	incl  map[string]map[string]bool // rule → item
-	items map[string]*itemspec.Item
-	used  map[string]int
+	// lastRead is the content AgentRead last returned (the very slice).
+	lastRead []byte
+	incl     map[string]map[string]bool // rule → item
+	items    map[string]*itemspec.Item
+	used     map[string]int
 	// ways are the settings per agent and item (the real feature keeps a
 	// copy per inclusion).
 	ways map[[2]string]*itemspec.ItemWays
@@ -132,7 +134,8 @@ func (f *fakeItems) AgentRead(agent string, rules []itemspec.AgentRule, item str
 		return nil, false
 	}
 	f.used[item]++
-	return it.Content(fields), true
+	f.lastRead = it.Content(fields)
+	return f.lastRead, true
 }
 
 func (f *fakeItems) AgentFieldValue(agent string, rules []itemspec.AgentRule, item, field string) (string, bool) {

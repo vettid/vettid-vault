@@ -22,6 +22,7 @@ import (
 	"crypto/ed25519"
 	"encoding/json"
 	"errors"
+	"slices"
 	"sort"
 	"strconv"
 	"sync"
@@ -31,6 +32,7 @@ import (
 	"github.com/vettid/vettid-vault/vms/callwire"
 	"github.com/vettid/vettid-vault/vms/envelope"
 	"github.com/vettid/vettid-vault/vms/strictjson"
+	"github.com/vettid/vettid-vault/vms/suite"
 )
 
 // Limits and times (§10.10).
@@ -320,12 +322,13 @@ func (f *Feature) sorted() []string {
 	return ids
 }
 
-// iceFor makes and signs this vault's ICE configuration for a call (§10.10 "Servers and credentials").
-func (f *Feature) iceFor(_ context.Context, s *vault.Session, callID string) (cfg, sig []byte, err error) {
+// iceFor makes and signs this vault's ICE configuration for a call (§10.10 "Servers and credentials"); turn: it
+// carries a TURN entry (one with a credential).
+func (f *Feature) iceFor(_ context.Context, s *vault.Session, callID string) (cfg, sig []byte, turn bool, err error) {
 	now := s.Now()
 	servers, exp, err := f.iceSrc.Servers(s, callID, now)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, false, err
 	}
 	// The calling service may cost a member the relay, never a direct call (CALLING-SERVICE §7.5): servers the
 	// configuration cannot carry (an issuer's answer that passed its checks but whose configuration would be over
@@ -358,9 +361,9 @@ func (f *Feature) iceFor(_ context.Context, s *vault.Session, callID string) (cf
 		if sig, err = s.SignICEConfig(cfg); err != nil {
 			continue
 		}
-		return cfg, sig, nil
+		return cfg, sig, slices.ContainsFunc(list, func(sv callwire.ICEServer) bool { return sv.Username != "" || sv.Credential != "" }), nil
 	}
-	return nil, nil, err
+	return nil, nil, false, err
 }
 
 // Start is a parsed call.start body.
@@ -659,17 +662,20 @@ func (f *Feature) start(ctx context.Context, s *vault.Session, body []byte) (jso
 		}
 	}
 	exp := now.Add(OfferTTL).UTC().Truncate(time.Millisecond)
-	cfg, isig, err := f.iceFor(ctx, s, id)
+	cfg, isig, turn, err := f.iceFor(ctx, s, id)
 	if err != nil {
 		return nil, errInternal
 	}
-	// §10.10 (0.90.15): the answer is cached (§8.2) for a retransmission without its TURN entry, so no credential
-	// is kept in the vault's state: the same call id and exp, STUN only (or no servers, should that form fail),
-	// signed again. Made before the offer goes, so that nothing can fail once the call is placed.
-	scfg, ssig, err := stunOnly(s, cfg, false)
-	if err != nil {
-		if scfg, ssig, err = stunOnly(s, cfg, true); err != nil {
-			return nil, errInternal
+	defer suite.Wipe(cfg) // the configuration with the credential: copied (base64) into the answer
+	// §10.10 (0.90.15): an answer with a TURN entry is cached (§8.2) without it, so no credential is kept in the
+	// vault's state: the same call id and exp, STUN only (or no servers, should that form fail), signed again, and
+	// (0.97.0) withheld: true. Made before the offer goes, so that nothing can fail once the call is placed.
+	var scfg, ssig []byte
+	if turn {
+		if scfg, ssig, err = stunOnly(s, cfg, false); err != nil {
+			if scfg, ssig, err = stunOnly(s, cfg, true); err != nil {
+				return nil, errInternal
+			}
 		}
 	}
 	ob := v.add(strictjson.NewBuilder().String("call_id", id).String("media", st.Media).String("sdp", st.SDP).Base64("ek", st.EK))
@@ -688,12 +694,17 @@ func (f *Feature) start(ctx context.Context, s *vault.Session, body []byte) (jso
 	f.prune(now)
 	s.Record(vault.Activity{Kind: "call.outgoing", ConnectionID: st.ConnectionID, Ref: id, Direction: DirOut, Audit: true})
 	f.clearUnanswered(s, st.ConnectionID, now) // a call the member places clears the counts
-	answer := func(cfg, isig []byte) json.RawMessage {
+	answer := func(cfg, isig []byte) *strictjson.Builder {
 		return strictjson.NewBuilder().String("call_id", id).String("exp", envelope.FormatTS(exp)).
-			Base64("ice_config", cfg).Base64("ice_sig", isig).Bytes()
+			Base64("ice_config", cfg).Base64("ice_sig", isig)
 	}
-	s.CacheResponseAs(answer(scfg, ssig))
-	return answer(cfg, isig), nil
+	if turn {
+		// (0.97.0 §10.10, owner decision b, GC #19349) The live answer, with its credential, is held in memory
+		// while the call lasts (CallHeld), never in the stored outbox; a retransmission gets it again from
+		// there, and the copy only once the vault no longer holds the call.
+		s.CacheResponseAsHeldForCall(answer(scfg, ssig).Bool("withheld", true).Bytes(), id)
+	}
+	return answer(cfg, isig).Bytes(), nil
 }
 
 // stunOnly returns the configuration cfg without its TURN entries (those with a credential), or (none) without
@@ -842,7 +853,7 @@ func (f *Feature) offer(ctx context.Context, s *vault.Session, in *envelope.Inne
 		f.missed(s, c)
 		return nil
 	}
-	cfg, isig, err := f.iceFor(ctx, s, c.ID)
+	cfg, isig, turn, err := f.iceFor(ctx, s, c.ID)
 	if err != nil {
 		f.finish(s, c, "failed")
 		_ = s.SendToConnection(conn, "call.end", endJSON(c.ID, "failed"))
@@ -856,8 +867,28 @@ func (f *Feature) offer(ctx context.Context, s *vault.Session, in *envelope.Inne
 		eb.Raw("suites", suitesJSON(of.Suites)).Base64("device_sig2", of.DeviceSig2).Base64("vault_sig2", of.VaultSig2)
 	}
 	ev := eb.Bytes()
-	s.NotifyDevicesWith("call.offer", ev, "", vault.SendOptions{Exp: c.Exp})
+	o := vault.SendOptions{Exp: c.Exp}
+	if turn {
+		// (0.97.0 §10.10) With a TURN entry: held in memory while the call rings, never stored (CallHeld).
+		o.Call = c.ID
+	}
+	s.NotifyDevicesWith("call.offer", ev, "", o)
+	suite.Wipe(ev) // each device's copy is sealed or held (copied) by now
+	suite.Wipe(cfg)
 	return nil
+}
+
+// CallHeld implements vault.CallKeeper (0.97.0 §10.10): a call's message carrying its TURN credential may still
+// go while the vault holds the call's ICE configuration. An offer while the call rings and its exp has not passed;
+// a call.start answer while the call lasts (ringing until its exp, or answered and not ended).
+func (f *Feature) CallHeld(callID string, offer bool, now time.Time) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	c := f.calls[callID]
+	if c == nil || !c.live(now) {
+		return false
+	}
+	return !offer || c.State == StateRinging
 }
 
 // glare settles two members calling each other at once (§10.10 "Glare",
@@ -1368,3 +1399,5 @@ func (f *Feature) Get(id string) (Call, bool) {
 	}
 	return *c, true
 }
+
+var _ vault.CallKeeper = (*Feature)(nil) // (0.97.0 §10.10) a drifted signature would drop every held message

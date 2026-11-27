@@ -852,7 +852,7 @@ func (m *Manager) dispatch(ctx context.Context, p *Peer, in *envelope.Inner, ep 
 			// (message.attachment.get, §10.5.1), or when a blob call has run
 			// (BlobHost, vote.site.sync).
 		case herr == nil:
-			m.respondCached(p, in, rkey, body, s.cacheBody, s.sentOnce, now)
+			m.respondCached(p, in, rkey, body, s.cacheBody, s.sentOnce, s.holdCall, now)
 		case errors.As(herr, &he):
 			m.respondErrorBody(p, in, rkey, he.Code, he.Message, he.Body, now)
 		default:
@@ -873,15 +873,16 @@ func disp(eph bool) disposition {
 // respond deposits a response to the requester only (§9.1), and caches it
 // for 24 h (§8.2).
 func (m *Manager) respond(p *Peer, req *envelope.Inner, key string, body json.RawMessage, now time.Time) {
-	m.respondCached(p, req, key, body, nil, false, now)
+	m.respondCached(p, req, key, body, nil, false, "", now)
 }
 
 // respondCached is respond with cached, if not nil, as the body of the cached copy (Session.CacheResponseAs).
-func (m *Manager) respondCached(p *Peer, req *envelope.Inner, key string, body, cached json.RawMessage, sentOnce bool, now time.Time) {
+func (m *Manager) respondCached(p *Peer, req *envelope.Inner, key string, body, cached json.RawMessage, sentOnce bool,
+	holdCall string, now time.Time) {
 	if body == nil {
 		body = json.RawMessage(`{}`)
 	}
-	m.sendResponseCached(p, req, key, &envelope.Inner{Type: req.Type, Re: req.ID, Status: envelope.StatusOK, Body: body}, cached, sentOnce, now)
+	m.sendResponseCached(p, req, key, &envelope.Inner{Type: req.Type, Re: req.ID, Status: envelope.StatusOK, Body: body}, cached, sentOnce, holdCall, now)
 }
 
 // volatileKey is the response key of an answer to a volatile request
@@ -911,13 +912,21 @@ func (m *Manager) respondErrorBody(p *Peer, req *envelope.Inner, key, code, msg 
 }
 
 func (m *Manager) sendResponse(p *Peer, req *envelope.Inner, key string, out *envelope.Inner, now time.Time) {
-	m.sendResponseCached(p, req, key, out, nil, false, now)
+	m.sendResponseCached(p, req, key, out, nil, false, "", now)
 }
 
 // sendResponseCached is sendResponse with cached, if not nil, as the body of the copy kept for retransmissions:
 // the same id, time, type and re (a retransmission is the same answer), another body.
 func (m *Manager) sendResponseCached(p *Peer, req *envelope.Inner, key string, out *envelope.Inner, cached json.RawMessage,
-	sentOnce bool, now time.Time) {
+	sentOnce bool, holdCall string, now time.Time) {
+	if sentOnce || holdCall != "" {
+		// (§8.2, §10.10, 0.97.0) The body with the secret is wiped on every
+		// exit: sealed once from memory, copied into memory for its call,
+		// replaced by response_too_large, or dropped (no id, no usable
+		// epoch).
+		body := out.Body
+		defer suite.Wipe(body)
+	}
 	if !envelope.ValidType(out.Type) {
 		out.Type = "error"
 	}
@@ -960,12 +969,22 @@ func (m *Manager) sendResponseCached(p *Peer, req *envelope.Inner, key string, o
 	}
 	if keep != out && sentOnce {
 		// The answer holds what the vault must never keep (a pairing code,
-		// §6.7.2; CacheResponseAsSentOnce): sent once from memory after the
+		// §6.7.2; (0.97.0 §8.2) an agent's item.get, item.run or item.proxy
+		// value; CacheResponseAsSentOnce): sent once from memory after the
 		// batch's flush, never in the stored outbox, and its body wiped
 		// once sealed. A lost deposit is answered from the cache's copy on
-		// retransmission. (Other cached-copy answers, LEASH values and TURN
-		// credentials, keep their durable deposit with its retries.)
+		// retransmission.
 		m.depositOnce(p, out)
+		return
+	}
+	if keep != out && holdCall != "" {
+		// (0.97.0 §10.10) A call.start answer with a TURN credential
+		// (CacheResponseAsHeldForCall): held in memory while the call
+		// lasts, never stored (callheld.go). Not held (no usable epoch, a
+		// suspended device), it is lost as a sent-once answer is, and a
+		// retransmission gets the cache's copy. The handler's bytes are
+		// wiped either way (above; holdCallMsg keeps a copy).
+		m.holdCallMsg(p, out, holdCall, false, "", now)
 		return
 	}
 	m.sealAndQueue(p, out)
@@ -998,6 +1017,7 @@ func (m *Manager) fits(in *envelope.Inner) bool {
 	if err != nil {
 		return true // not a size problem: sealing reports it as before
 	}
+	defer suite.Wipe(j) // a plaintext copy of the answer (a value, a code)
 	_, err = envelope.PaddedLen(len(j))
 	return err == nil
 }
@@ -1011,6 +1031,13 @@ func (m *Manager) resendCached(p *Peer, raw []byte) {
 	in.Features = m.featuresFor(p)
 	if !m.fits(in) {
 		in = tooLarge(in) // cached by a release before §8.1's rule
+	}
+	// (0.97.0 §10.10 "A lost call.start answer") A retransmitted
+	// call.start whose call the vault still holds gets the live answer
+	// again, from memory, in the mailbox's order; the cache's copy only
+	// once it no longer does.
+	if m.rearmCallAnswer(p, in.ID, m.now()) {
+		return
 	}
 	// A duplicate of a request whose answer is still waiting in memory
 	// (sent once, depositOnce: a pairing code) goes behind it, in memory

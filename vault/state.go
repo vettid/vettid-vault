@@ -1159,6 +1159,11 @@ type OutboxEntry struct {
 	Ephemeral bool   `json:"ephemeral,omitempty"`
 	FinEpoch  []byte `json:"fin_epoch,omitempty"`
 	Handshake bool   `json:"handshake,omitempty"`
+	// CallHeld (0.97.0 §10.10) marks the marker of a call message held in
+	// memory (callheld.go): it has no payload and holds only the message's
+	// place in its mailbox's order; the message, with its TURN
+	// credential, is never stored. Its InnerID names the message.
+	CallHeld bool `json:"call_held,omitempty"`
 }
 
 // AuditEntry records a dropped or refused message (§6.3, §6.6, §7.3).

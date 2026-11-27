@@ -224,7 +224,8 @@ type Session struct {
 	epoch *handshake.Epoch
 	// cacheBody, if set, is the body the request's answer is cached with instead of the one sent (CacheResponseAs).
 	cacheBody json.RawMessage
-	sentOnce  bool // CacheResponseAsSentOnce: the answer is deposited from memory only
+	sentOnce  bool   // CacheResponseAsSentOnce: the answer is deposited from memory only
+	holdCall  string // CacheResponseAsHeldForCall: the answer is held in memory for this call
 	// agentRefusal and approval are set by the AgentPolicy while it decides
 	// an agent's request (RefuseAgentWith, FlagApproval, ApprovalPrevious,
 	// NoteApproval).
@@ -392,7 +393,8 @@ func (s *Session) HeldNote() json.RawMessage { return append(json.RawMessage(nil
 func (s *Session) CacheResponseAs(body json.RawMessage) { s.cacheBody = body }
 
 // CacheResponseAsSentOnce is CacheResponseAs for an answer whose secret
-// must not be in saved state at all (0.94.0 §6.7.2: a pairing code): the
+// must not be in saved state at all (0.94.0 §6.7.2: a pairing code;
+// 0.97.0 §8.2: an agent's item.get, item.run or item.proxy value): the
 // answer the handler returns is sealed and deposited once, from memory,
 // never in the stored outbox, and its body is wiped once sealed, so the
 // handler returns a slice of its own. A lost deposit is answered from the
@@ -401,8 +403,27 @@ func (s *Session) CacheResponseAsSentOnce(body json.RawMessage) {
 	s.cacheBody, s.sentOnce = body, true
 }
 
+// CacheResponseAsHeldForCall is CacheResponseAs for a call.start answer
+// carrying a TURN credential (0.97.0 §10.10, owner decision b, GC
+// #19349): the answer the handler returns is held in memory for callID,
+// never in the stored outbox, and deposited after the batch's flush in
+// the mailbox's order, again with the outbox's backoff while the call
+// lasts (CallKeeper). A retransmission while the vault still holds the
+// call gets that answer again; after a lock or stop, body (the copy
+// without the credential, withheld: true).
+func (s *Session) CacheResponseAsHeldForCall(body json.RawMessage, callID string) {
+	s.cacheBody, s.holdCall = body, callID
+}
+
+// HeldForCall is the call whose answer is held in memory
+// (CacheResponseAsHeldForCall), or "".
+func (s *Session) HeldForCall() string { return s.holdCall }
+
 // CachedResponseBody returns the body set by CacheResponseAs (nil: the answer is cached as sent).
 func (s *Session) CachedResponseBody() json.RawMessage { return s.cacheBody }
+
+// SentOnce reports whether the answer is deposited once from memory only (CacheResponseAsSentOnce).
+func (s *Session) SentOnce() bool { return s.sentOnce }
 
 // Host is what a Session acts on. The Manager implements it for the
 // messages it dispatches; tests of feature packages supply their own.
@@ -498,6 +519,13 @@ type SendOptions struct {
 	// behind queued deposits to the same mailbox, once and best effort: it
 	// never reaches vault state (ephemeral types such as call.ice, §8.5).
 	MemoryOnly bool
+	// Call (0.97.0 §10.10) holds a V→D call.offer carrying a TURN
+	// credential in memory for that call_id, never in the stored outbox:
+	// deposited after the batch's flush in the mailbox's order, again with
+	// the outbox's backoff while the call rings and its exp has not
+	// passed (CallKeeper), and lost at a lock or stop. To owner apps and
+	// desktops only.
+	Call string
 	// Kind limits a fan-out (NotifyDevicesWith) to owner devices of one
 	// kind ("" for all): a desktop's message.new leaves out what only the
 	// app gets (§10.5.1 "Desktops").

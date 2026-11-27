@@ -120,6 +120,14 @@ func (m *Manager) sendWith(p *Peer, typ string, body json.RawMessage, o SendOpti
 		return "" // the owner check's hold (§3.6.3): no fan-out
 	}
 	in := &envelope.Inner{ID: m.newID(now), Type: typ, TS: now, Exp: o.Exp, Body: body}
+	if o.Call != "" {
+		// (0.97.0 §10.10) A V→D call.offer with a TURN credential: held in
+		// memory, never stored (callheld.go).
+		if p.Kind != KindApp && p.Kind != KindDesktop || !m.holdCallMsg(p, in, o.Call, true, m.wakeClass(p, typ, body), now) {
+			return ""
+		}
+		return in.ID
+	}
 	if !o.MemoryOnly {
 		return m.sealAndQueueWake(p, in, m.wakeClass(p, typ, body))
 	}
@@ -618,6 +626,7 @@ func (m *Manager) drainOutbox(ctx context.Context) {
 		return
 	}
 	now := m.now()
+	m.sweepCallMsgs(now) // (0.97.0 §10.10) a held call message that may no longer go ends here
 	blocked := map[string]bool{}
 	awaiting := map[string]bool{}
 	held := map[string]bool{} // held for a pending reconnect (§6.3.1)
@@ -631,6 +640,13 @@ func (m *Manager) drainOutbox(ctx context.Context) {
 				blocked[key] = true
 			}
 			continue // not stored yet (queue)
+		}
+		if e.CallHeld && m.stateBehind {
+			// (0.97.0 §10.10) Sealed at drain time: not while the last write
+			// failed, so that it never goes under an epoch, or with a seq,
+			// that no write has stored. It waits, in order, for the next.
+			blocked[key] = true
+			continue
 		}
 		if e.Op == OpDeposit && (blocked[key] || awaiting[key] && e.Token == "" && !e.QuotaRefresh || e.PeerID != "" && held[e.PeerID] && !e.Handshake) {
 			continue
@@ -685,7 +701,11 @@ func (m *Manager) drainOutbox(ctx context.Context) {
 		var err error
 		switch e.Op {
 		case OpDeposit:
-			err = m.deposit(ctx, e, now)
+			if e.CallHeld {
+				err = m.depositCallMsg(ctx, e, now) // (0.97.0 §10.10) sealed from memory
+			} else {
+				err = m.deposit(ctx, e, now)
+			}
 			if err == nil && !e.Done {
 				m.pushDeposited(e.PeerID, e.Wake) // §14.2: after the relay accepted it
 			}
@@ -752,7 +772,21 @@ func (m *Manager) drainOutbox(ctx context.Context) {
 			quotaWaiting[e.RelayURL+"|"+e.Mailbox] = true
 		}
 	}
+	// (0.97.0 §10.10 "Order") A held call message still undelivered to a
+	// mailbox: the memory-only deposits to it wait behind it, kept for a
+	// later drain rather than lost.
+	callWaiting := map[string]bool{}
+	for _, e := range m.st.Outbox {
+		if e.CallHeld && !e.Done {
+			callWaiting[e.RelayURL+"|"+e.Mailbox] = true
+		}
+	}
+	var kept []*OutboxEntry
 	for _, e := range vol {
+		if callWaiting[e.RelayURL+"|"+e.Mailbox] && ctx.Err() == nil && now.Sub(e.Created) < keptMaxAge && len(kept) < keptMax {
+			kept = append(kept, e)
+			continue
+		}
 		if blocked[e.RelayURL+"|"+e.Mailbox] || quotaWaiting[e.RelayURL+"|"+e.Mailbox] || ctx.Err() != nil {
 			suite.Wipe(e.Payload)
 			continue // lost: the requester retransmits, which re-executes
@@ -762,6 +796,7 @@ func (m *Manager) drainOutbox(ctx context.Context) {
 		}
 		suite.Wipe(e.Payload)
 	}
+	m.volatile = append(kept, m.volatile...)
 	if m.settledWrite {
 		// The rotation made when the relay settled a transfer's notice
 		// (unlinkOutcome): its state write, then its notices.
@@ -783,8 +818,23 @@ func (m *Manager) drainOutbox(ctx context.Context) {
 	}
 }
 
+// keptMaxAge and keptMax bound the memory-only deposits kept behind a held
+// call message (0.97.0 §10.10 "Order"): older ones, or those past the
+// count, are lost as before, as a volatile deposit to a blocked mailbox is.
+// A minute is longer than a call's ephemeral messages live (30 s).
+const (
+	keptMaxAge = time.Minute
+	keptMax    = 256
+)
+
 // deposit performs one deposit and applies the §8.6 error table.
 func (m *Manager) deposit(ctx context.Context, e *OutboxEntry, now time.Time) error {
+	return m.depositPayload(ctx, e, e.Payload, now)
+}
+
+// depositPayload is deposit with the sealed bytes given apart from e (a held
+// call message's, sealed from memory: never on its marker, 0.97.0 §10.10).
+func (m *Manager) depositPayload(ctx context.Context, e *OutboxEntry, payload []byte, now time.Time) error {
 	tok := e.Token
 	p := m.peer(e.PeerID)
 	if tok == "" {
@@ -828,7 +878,7 @@ func (m *Manager) deposit(ctx context.Context, e *OutboxEntry, now time.Time) er
 	}
 	// Signed with the key the token was issued to: an old relay key while
 	// the recipient holds none for the current one (§3.4 (a)).
-	msgID, err := m.relayFor(tok).Deposit(withOneAttempt(ctx), e.RelayURL, e.Mailbox, tok, e.Payload)
+	msgID, err := m.relayFor(tok).Deposit(withOneAttempt(ctx), e.RelayURL, e.Mailbox, tok, payload)
 	if mayHaveStored(err) {
 		e.Tried = true // 0.88.7 §8.3: it may have reached the relay
 	}

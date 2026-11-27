@@ -37,6 +37,7 @@ import (
 	"github.com/vettid/vettid-vault/vms/envelope"
 	"github.com/vettid/vettid-vault/vms/leashwire"
 	"github.com/vettid/vettid-vault/vms/strictjson"
+	"github.com/vettid/vettid-vault/vms/suite"
 )
 
 // Limits (§10.11).
@@ -1408,12 +1409,20 @@ func (f *Feature) request(s *vault.Session, body []byte) (json.RawMessage, error
 }
 
 // cacheNoValue: an op whose answer carries a secret value is never cached
-// with it (#14595). Each handler sets its copy without the value; one that
-// did not is cached as {"withheld":true} rather than as the answer.
+// with it (#14595), and (0.97.0 §8.2 "Sent once from memory") never
+// written to the stored outbox: the answer is deposited once from memory
+// and its body wiped once sealed. Each handler sets its copy without the
+// value; one that did not is cached as {"withheld":true} rather than as
+// the answer.
 func cacheNoValue(s *vault.Session, op string) {
-	if valueOps[op] && s.CachedResponseBody() == nil {
-		s.CacheResponseAs(withheldOnly)
+	if !valueOps[op] {
+		return
 	}
+	cached := s.CachedResponseBody()
+	if cached == nil {
+		cached = withheldOnly
+	}
+	s.CacheResponseAsSentOnce(cached)
 }
 
 // valueOps are the ops whose answers carry a secret value (§8.2 Exception).
@@ -1449,6 +1458,7 @@ func (f *Feature) answer(s *vault.Session, r *Request) (json.RawMessage, error) 
 		}
 		f.note(s, agent, f.agent(s, agent), vault.Activity{Kind: KindRead, Ref: r.ItemID, Feed: true})
 		answer := agentContent(content)
+		suite.Wipe(content)                  // the item's values: answer is a copy of its own
 		s.CacheResponseAs(getCached(answer)) // no value in the response cache (#14595)
 		return answer, nil
 	case "item.run":
@@ -1474,7 +1484,7 @@ func (f *Feature) answer(s *vault.Session, r *Request) (json.RawMessage, error) 
 func agentContent(content []byte) []byte {
 	o, err := strictjson.ParseObject(content)
 	if err != nil {
-		return content
+		return append([]byte(nil), content...) // a copy: the caller wipes content
 	}
 	b := strictjson.NewBuilder()
 	for _, k := range []string{"item_id", "name", "category", "fields", "notes"} {

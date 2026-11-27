@@ -383,6 +383,9 @@ type Manager struct {
 	// carrying secret values, TypeSpec.Volatile); drained after the
 	// durable outbox, dropped on failure or lock.
 	volatile []*OutboxEntry
+	// callMsgs are the call messages carrying a TURN credential, held in
+	// memory only by inner id (0.97.0 §10.10, callheld.go); wiped at lock.
+	callMsgs map[string]*callMsg
 	dirty    bool
 
 	// transferAfter is the transfer request the current handler approved:
@@ -1127,7 +1130,8 @@ func (m *Manager) persist(ctx context.Context, create bool) error {
 }
 
 // dropVolatile discards the memory-only answers sealed since the last
-// drain (§8.2: lost, the requester retransmits). After a state write that
+// drain, and those kept behind a held call message ((0.97.0) §10.10
+// "Order") (§8.2: lost, the requester retransmits). After a state write that
 // failed they would tell what was not stored: the outbox's entries wait
 // for the next write that stores them (queue), these are never written.
 func (m *Manager) dropVolatile() {
@@ -1428,6 +1432,7 @@ func (m *Manager) zeroize() {
 		suite.Wipe(e.Payload)
 	}
 	m.volatile = nil
+	m.dropCallMsgs()
 	for _, e := range m.reqEpochs {
 		e.Destroy()
 	}
@@ -1662,6 +1667,10 @@ func (m *Manager) lockLocked(ctx context.Context) error {
 	if m.locked {
 		return nil
 	}
+	// (0.97.0 §10.10 "Order") The call messages held in memory are dropped
+	// first: their markers end in the drain below, and vault.locking never
+	// waits behind them.
+	m.dropCallMsgs()
 	if m.st != nil && m.st.Deleting != nil {
 		return m.lockDeleting(ctx)
 	}

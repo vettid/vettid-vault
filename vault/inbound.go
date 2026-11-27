@@ -1018,6 +1018,9 @@ func (m *Manager) fits(in *envelope.Inner) bool {
 		return true // not a size problem: sealing reports it as before
 	}
 	defer suite.Wipe(j) // a plaintext copy of the answer (a value, a code)
+	if h := m.opt.Hooks.FitsCopy; h != nil {
+		h(j)
+	}
 	_, err = envelope.PaddedLen(len(j))
 	return err == nil
 }

@@ -1,6 +1,7 @@
 package calls
 
 import (
+	"bytes"
 	"strings"
 	"testing"
 	"time"
@@ -168,4 +169,47 @@ func mustCfg(t *testing.T, body []byte) []byte {
 		t.Fatal(err)
 	}
 	return c
+}
+
+// The configuration with the credential, and the offer's bytes, are wiped once used (in start and in offer); the
+// copy without the credential needn't be.
+func TestStartAndOfferWipeTheCredential(t *testing.T) {
+	is := &fakeIssuer{exp: t0.Add(6 * time.Hour)}
+	p := poolWith(is)
+	prime(p, t0)
+	f := New(Options{ICE: p})
+	h := featuretest.NewHost()
+	h.AddConnection("c1")
+	h.AddDevice("dev-app", "app")
+	sk, _ := suite.GeneratePrivateKey()
+	if r := featuretest.Call(f, h, t0, "app", "call.start", startBody("c1", sk.Public().Bytes())); !r.OK() || r.HeldForCall == "" {
+		t.Fatalf("%s: not held, the check proves nothing", r.Code)
+	}
+	wiped := func(what string, bs [][]byte) {
+		t.Helper()
+		zero := 0
+		for _, b := range bs {
+			if bytes.Contains(b, []byte(`"credential"`)) || bytes.Contains(b, []byte(`"username"`)) {
+				t.Fatalf("%s: a configuration with the credential was not wiped: %s", what, b)
+			}
+			if len(b) > 0 && bytes.Equal(b, make([]byte, len(b))) {
+				zero++
+			}
+		}
+		if zero == 0 {
+			t.Fatalf("%s: nothing wiped: the check proves nothing", what)
+		}
+	}
+	wiped("start", h.Signed)
+
+	b := newSide("cA")
+	b.f = New(Options{ICE: p})
+	ok, _ := callwire.NewOfferKey()
+	featuretest.CallExp(b.f, b.h, t0, t0.Add(OfferTTL), "connection:cA", "call.offer", peerOffer("cA", newCallID("cA"), "audio", ok.Public().Bytes()))
+	wiped("offer", b.h.Signed)
+	for _, s := range b.h.Sent {
+		if s.Type == "call.offer" && !bytes.Equal(s.Given, make([]byte, len(s.Given))) {
+			t.Fatal("the offer's bytes were not wiped")
+		}
+	}
 }

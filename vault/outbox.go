@@ -120,6 +120,14 @@ func (m *Manager) sendWith(p *Peer, typ string, body json.RawMessage, o SendOpti
 		return "" // the owner check's hold (§3.6.3): no fan-out
 	}
 	in := &envelope.Inner{ID: m.newID(now), Type: typ, TS: now, Exp: o.Exp, Body: body}
+	if o.Call != "" {
+		// (0.97.0 §10.10) A V→D call.offer with a TURN credential: held in
+		// memory, never stored (callheld.go).
+		if p.Kind != KindApp && p.Kind != KindDesktop || !m.holdCallMsg(p, in, o.Call, true, m.wakeClass(p, typ, body), now) {
+			return ""
+		}
+		return in.ID
+	}
 	if !o.MemoryOnly {
 		return m.sealAndQueueWake(p, in, m.wakeClass(p, typ, body))
 	}
@@ -618,6 +626,7 @@ func (m *Manager) drainOutbox(ctx context.Context) {
 		return
 	}
 	now := m.now()
+	m.sweepCallMsgs(now) // (0.97.0 §10.10) a held call message that may no longer go ends here
 	blocked := map[string]bool{}
 	awaiting := map[string]bool{}
 	held := map[string]bool{} // held for a pending reconnect (§6.3.1)
@@ -685,7 +694,11 @@ func (m *Manager) drainOutbox(ctx context.Context) {
 		var err error
 		switch e.Op {
 		case OpDeposit:
-			err = m.deposit(ctx, e, now)
+			if e.CallHeld {
+				err = m.depositCallMsg(ctx, e, now) // (0.97.0 §10.10) sealed from memory
+			} else {
+				err = m.deposit(ctx, e, now)
+			}
 			if err == nil && !e.Done {
 				m.pushDeposited(e.PeerID, e.Wake) // §14.2: after the relay accepted it
 			}
@@ -752,7 +765,21 @@ func (m *Manager) drainOutbox(ctx context.Context) {
 			quotaWaiting[e.RelayURL+"|"+e.Mailbox] = true
 		}
 	}
+	// (0.97.0 §10.10 "Order") A held call message still undelivered to a
+	// mailbox: the memory-only deposits to it wait behind it, kept for a
+	// later drain rather than lost.
+	callWaiting := map[string]bool{}
+	for _, e := range m.st.Outbox {
+		if e.CallHeld && !e.Done {
+			callWaiting[e.RelayURL+"|"+e.Mailbox] = true
+		}
+	}
+	var kept []*OutboxEntry
 	for _, e := range vol {
+		if callWaiting[e.RelayURL+"|"+e.Mailbox] && ctx.Err() == nil {
+			kept = append(kept, e)
+			continue
+		}
 		if blocked[e.RelayURL+"|"+e.Mailbox] || quotaWaiting[e.RelayURL+"|"+e.Mailbox] || ctx.Err() != nil {
 			suite.Wipe(e.Payload)
 			continue // lost: the requester retransmits, which re-executes
@@ -762,6 +789,7 @@ func (m *Manager) drainOutbox(ctx context.Context) {
 		}
 		suite.Wipe(e.Payload)
 	}
+	m.volatile = append(kept, m.volatile...)
 	if m.settledWrite {
 		// The rotation made when the relay settled a transfer's notice
 		// (unlinkOutcome): its state write, then its notices.

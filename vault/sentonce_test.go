@@ -253,7 +253,7 @@ func TestSentOnceTooLargeWipesTheValue(t *testing.T) {
 	req := &envelope.Inner{ID: "01JB2Z6V9K3M4N5P6Q7R8S9TB7", Type: "agent.request"}
 	out := &envelope.Inner{Type: req.Type, Re: req.ID, Status: envelope.StatusOK, Body: big}
 	d.m.mu.Lock()
-	d.m.sendResponseCached(d.devPeer, req, "k7", out, json.RawMessage(`{"withheld":true}`), true, d.m.now())
+	d.m.sendResponseCached(d.devPeer, req, "k7", out, json.RawMessage(`{"withheld":true}`), true, "", d.m.now())
 	replaced := false
 	for _, e := range d.m.st.Outbox {
 		replaced = replaced || e.InnerID == out.ID // response_too_large is sent durably, under the same id

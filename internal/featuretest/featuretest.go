@@ -709,6 +709,9 @@ type Result struct {
 	Cached json.RawMessage
 	// SentOnce: the answer is deposited once from memory, never in the stored outbox (Session.CacheResponseAsSentOnce).
 	SentOnce bool
+	// HeldForCall: the answer is held in memory for this call, never in the stored outbox
+	// (Session.CacheResponseAsHeldForCall); "" if not.
+	HeldForCall string
 }
 
 // OK reports success.
@@ -797,7 +800,7 @@ func CallInner(f vault.Feature, h *Host, now time.Time, kind string, in *envelop
 		}
 		return Result{Code: "internal"}
 	}
-	return Result{Body: out, Cached: s.CachedResponseBody(), SentOnce: s.SentOnce()}
+	return Result{Body: out, Cached: s.CachedResponseBody(), SentOnce: s.SentOnce(), HeldForCall: s.HeldForCall()}
 }
 
 // RoundTrip saves f's state and loads it into g (a fresh instance), as a

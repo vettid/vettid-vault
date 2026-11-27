@@ -131,7 +131,7 @@ func TestCachedAnswerWipes(t *testing.T) {
 	// Replaced under its key: the older answer is wiped.
 	d.m.mu.Lock()
 	req := &envelope.Inner{ID: id, Type: "test.secret"}
-	d.m.sendResponseCached(d.devPeer, req, key, &envelope.Inner{Type: req.Type, Re: id, Status: envelope.StatusOK, Body: []byte(`{"v":"newer"}`)}, nil, false, time.Now())
+	d.m.sendResponseCached(d.devPeer, req, key, &envelope.Inner{Type: req.Type, Re: id, Status: envelope.StatusOK, Body: []byte(`{"v":"newer"}`)}, nil, false, "", time.Now())
 	newer := d.m.st.Responses[key].Inner
 	d.m.mu.Unlock()
 	if !wipedBytes(cached) || !bytes.Contains(newer, []byte("newer")) {

@@ -663,13 +663,19 @@ func (f *Feature) start(ctx context.Context, s *vault.Session, body []byte) (jso
 	if err != nil {
 		return nil, errInternal
 	}
-	// §10.10 (0.90.15): the answer is cached (§8.2) for a retransmission without its TURN entry, so no credential
-	// is kept in the vault's state: the same call id and exp, STUN only (or no servers, should that form fail),
-	// signed again. Made before the offer goes, so that nothing can fail once the call is placed.
-	scfg, ssig, err := stunOnly(s, cfg, false)
+	// §10.10 (0.90.15): an answer with a TURN entry is cached (§8.2) without it, so no credential is kept in the
+	// vault's state: the same call id and exp, STUN only (or no servers, should that form fail), signed again, and
+	// (0.97.0) withheld: true. Made before the offer goes, so that nothing can fail once the call is placed.
+	turn, err := hasTURN(cfg)
 	if err != nil {
-		if scfg, ssig, err = stunOnly(s, cfg, true); err != nil {
-			return nil, errInternal
+		return nil, errInternal
+	}
+	var scfg, ssig []byte
+	if turn {
+		if scfg, ssig, err = stunOnly(s, cfg, false); err != nil {
+			if scfg, ssig, err = stunOnly(s, cfg, true); err != nil {
+				return nil, errInternal
+			}
 		}
 	}
 	ob := v.add(strictjson.NewBuilder().String("call_id", id).String("media", st.Media).String("sdp", st.SDP).Base64("ek", st.EK))
@@ -688,12 +694,17 @@ func (f *Feature) start(ctx context.Context, s *vault.Session, body []byte) (jso
 	f.prune(now)
 	s.Record(vault.Activity{Kind: "call.outgoing", ConnectionID: st.ConnectionID, Ref: id, Direction: DirOut, Audit: true})
 	f.clearUnanswered(s, st.ConnectionID, now) // a call the member places clears the counts
-	answer := func(cfg, isig []byte) json.RawMessage {
+	answer := func(cfg, isig []byte) *strictjson.Builder {
 		return strictjson.NewBuilder().String("call_id", id).String("exp", envelope.FormatTS(exp)).
-			Base64("ice_config", cfg).Base64("ice_sig", isig).Bytes()
+			Base64("ice_config", cfg).Base64("ice_sig", isig)
 	}
-	s.CacheResponseAs(answer(scfg, ssig))
-	return answer(cfg, isig), nil
+	if turn {
+		// (0.97.0 §10.10, owner decision b, GC #19349) The live answer, with its credential, is held in memory
+		// while the call lasts (CallHeld), never in the stored outbox; a retransmission gets it again from
+		// there, and the copy only once the vault no longer holds the call.
+		s.CacheResponseAsHeldForCall(answer(scfg, ssig).Bool("withheld", true).Bytes(), id)
+	}
+	return answer(cfg, isig).Bytes(), nil
 }
 
 // stunOnly returns the configuration cfg without its TURN entries (those with a credential), or (none) without
@@ -856,8 +867,40 @@ func (f *Feature) offer(ctx context.Context, s *vault.Session, in *envelope.Inne
 		eb.Raw("suites", suitesJSON(of.Suites)).Base64("device_sig2", of.DeviceSig2).Base64("vault_sig2", of.VaultSig2)
 	}
 	ev := eb.Bytes()
-	s.NotifyDevicesWith("call.offer", ev, "", vault.SendOptions{Exp: c.Exp})
+	o := vault.SendOptions{Exp: c.Exp}
+	if turn, err := hasTURN(cfg); err != nil || turn {
+		// (0.97.0 §10.10) With a TURN entry: held in memory while the call rings, never stored (CallHeld).
+		o.Call = c.ID
+	}
+	s.NotifyDevicesWith("call.offer", ev, "", o)
 	return nil
+}
+
+// hasTURN reports whether the configuration cfg carries a TURN entry (one with a credential).
+func hasTURN(cfg []byte) (bool, error) {
+	c, err := callwire.ParseICEConfig(cfg)
+	if err != nil {
+		return false, err
+	}
+	for _, sv := range c.Servers {
+		if sv.Username != "" || sv.Credential != "" {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// CallHeld implements vault.CallKeeper (0.97.0 §10.10): a call's message carrying its TURN credential may still
+// go while the vault holds the call's ICE configuration. An offer while the call rings and its exp has not passed;
+// a call.start answer while the call lasts (ringing until its exp, or answered and not ended).
+func (f *Feature) CallHeld(callID string, offer bool, now time.Time) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	c := f.calls[callID]
+	if c == nil || !c.live(now) {
+		return false
+	}
+	return !offer || c.State == StateRinging
 }
 
 // glare settles two members calling each other at once (§10.10 "Glare",

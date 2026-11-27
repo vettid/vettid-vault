@@ -1408,12 +1408,20 @@ func (f *Feature) request(s *vault.Session, body []byte) (json.RawMessage, error
 }
 
 // cacheNoValue: an op whose answer carries a secret value is never cached
-// with it (#14595). Each handler sets its copy without the value; one that
-// did not is cached as {"withheld":true} rather than as the answer.
+// with it (#14595), and (0.97.0 §8.2 "Sent once from memory") never
+// written to the stored outbox: the answer is deposited once from memory
+// and its body wiped once sealed. Each handler sets its copy without the
+// value; one that did not is cached as {"withheld":true} rather than as
+// the answer.
 func cacheNoValue(s *vault.Session, op string) {
-	if valueOps[op] && s.CachedResponseBody() == nil {
-		s.CacheResponseAs(withheldOnly)
+	if !valueOps[op] {
+		return
 	}
+	cached := s.CachedResponseBody()
+	if cached == nil {
+		cached = withheldOnly
+	}
+	s.CacheResponseAsSentOnce(cached)
 }
 
 // valueOps are the ops whose answers carry a secret value (§8.2 Exception).

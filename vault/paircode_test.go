@@ -1110,9 +1110,9 @@ func TestPairCodeDuplicateInOneBatch(t *testing.T) {
 	}
 }
 
-// Only an answer marked sent-once (the pairing code) leaves the stored
-// outbox: any other with a cached copy (a LEASH value, a TURN credential)
-// keeps its durable deposit and its retries.
+// Only an answer marked sent-once (a pairing code; 0.97.0, a LEASH value)
+// leaves the stored outbox: any other with a cached copy (a TURN
+// credential, 0.97.0 §8.2) keeps its durable deposit and its retries.
 func TestSentOnceIsOnlyForTheMarkedAnswer(t *testing.T) {
 	d := newDevFixture(t)
 	req := &envelope.Inner{ID: "01JB2Z6V9K3M4N5P6Q7R8S9TB0", Type: "item.get"}

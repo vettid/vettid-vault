@@ -960,11 +960,13 @@ func (m *Manager) sendResponseCached(p *Peer, req *envelope.Inner, key string, o
 	}
 	if keep != out && sentOnce {
 		// The answer holds what the vault must never keep (a pairing code,
-		// §6.7.2; CacheResponseAsSentOnce): sent once from memory after the
+		// §6.7.2; (0.97.0 §8.2) an agent's item.get, item.run or item.proxy
+		// value; CacheResponseAsSentOnce): sent once from memory after the
 		// batch's flush, never in the stored outbox, and its body wiped
 		// once sealed. A lost deposit is answered from the cache's copy on
-		// retransmission. (Other cached-copy answers, LEASH values and TURN
-		// credentials, keep their durable deposit with its retries.)
+		// retransmission. (call.start's answer, with a TURN credential,
+		// keeps its durable deposit with its retries until the vault is
+		// given a TURN issuer, 0.97.0 §8.2.)
 		m.depositOnce(p, out)
 		return
 	}

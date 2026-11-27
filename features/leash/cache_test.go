@@ -28,8 +28,8 @@ func TestItemGetCachedWithoutValue(t *testing.T) {
 	}
 	want := `{"item_id":"` + r.wifi + `","name":"wifi","category":"login","fields":[{"field_id":"f1","label":"Password","kind":"password"},` +
 		`{"field_id":"f2","label":"Address","kind":"address"}],"withheld":true}`
-	if string(res.Cached) != want {
-		t.Fatalf("cached:\n%s\nwant\n%s", res.Cached, want)
+	if string(res.Cached) != want || !res.SentOnce {
+		t.Fatalf("cached:\n%s\nwant\n%s\nsent once %v", res.Cached, want, res.SentOnce)
 	}
 }
 
@@ -60,8 +60,8 @@ func TestItemRunCachedWithoutValue(t *testing.T) {
 	if !res.OK() || !strings.Contains(string(res.Body), "hunter22") || strings.Contains(string(res.Body), "withheld") {
 		t.Fatalf("answer: %q %s", res.Code, res.Body)
 	}
-	if want := `{"item_id":"` + r.wifi + `","field_id":"f1","withheld":true}`; string(res.Cached) != want {
-		t.Fatalf("cached %s, want %s", res.Cached, want)
+	if want := `{"item_id":"` + r.wifi + `","field_id":"f1","withheld":true}`; string(res.Cached) != want || !res.SentOnce {
+		t.Fatalf("cached %s, want %s, sent once %v", res.Cached, want, res.SentOnce)
 	}
 }
 
@@ -86,8 +86,8 @@ func TestItemRunApprovedCachedWithoutValue(t *testing.T) {
 	if r.stored(r.wifi).Version != 2 {
 		t.Fatal("pin not recorded")
 	}
-	if got, want := string(s.CachedResponseBody()), `{"item_id":"`+r.wifi+`","field_id":"f1","withheld":true}`; got != want {
-		t.Fatalf("cached %s, want %s", got, want)
+	if got, want := string(s.CachedResponseBody()), `{"item_id":"`+r.wifi+`","field_id":"f1","withheld":true}`; got != want || !s.SentOnce() {
+		t.Fatalf("cached %s, want %s, sent once %v", got, want, s.SentOnce())
 	}
 }
 
@@ -105,8 +105,8 @@ func TestItemProxyCachedWithoutValue(t *testing.T) {
 	}
 	want := `{"item_id":"` + r.wifi + `","field_id":"f1","header":"Authorization","prefix":"Bearer ",` +
 		`"host":"api.example.com","expires_at":"2026-10-03T12:15:00.000Z","withheld":true}`
-	if got := string(s.CachedResponseBody()); got != want {
-		t.Fatalf("cached %s, want %s", got, want)
+	if got := string(s.CachedResponseBody()); got != want || !s.SentOnce() {
+		t.Fatalf("cached %s, want %s, sent once %v", got, want, s.SentOnce())
 	}
 }
 
@@ -141,8 +141,8 @@ func TestItemGetApprovedCachedWithoutValue(t *testing.T) {
 	}
 	c := string(s.CachedResponseBody())
 	if c == "" || strings.Contains(c, "hunter22") || strings.Contains(c, `"value"`) || strings.Contains(c, `"notes"`) ||
-		!strings.Contains(c, `"item_id":"`+r.wifi+`"`) || !strings.HasSuffix(c, `,"withheld":true}`) {
-		t.Fatalf("cached %s", c)
+		!strings.Contains(c, `"item_id":"`+r.wifi+`"`) || !strings.HasSuffix(c, `,"withheld":true}`) || !s.SentOnce() {
+		t.Fatalf("cached %s, sent once %v", c, s.SentOnce())
 	}
 }
 
@@ -154,21 +154,21 @@ func TestCacheNoValueBackstop(t *testing.T) {
 	for _, op := range []string{"item.get", "item.run", "item.proxy"} {
 		s := vault.NewSession(context.Background(), r.h, from, t0, nil)
 		cacheNoValue(s, op)
-		if got := string(s.CachedResponseBody()); got != `{"withheld":true}` {
-			t.Fatalf("%s: cached %q", op, got)
+		if got := string(s.CachedResponseBody()); got != `{"withheld":true}` || !s.SentOnce() {
+			t.Fatalf("%s: cached %q, sent once %v", op, got, s.SentOnce())
 		}
 		s = vault.NewSession(context.Background(), r.h, from, t0, nil)
 		s.CacheResponseAs(json.RawMessage(`{"item_id":"x"}`))
 		cacheNoValue(s, op)
-		if got := string(s.CachedResponseBody()); got != `{"item_id":"x"}` {
-			t.Fatalf("%s: copy replaced: %q", op, got)
+		if got := string(s.CachedResponseBody()); got != `{"item_id":"x"}` || !s.SentOnce() {
+			t.Fatalf("%s: copy replaced: %q, sent once %v", op, got, s.SentOnce())
 		}
 	}
 	for _, op := range []string{"catalog", "item.use"} {
 		s := vault.NewSession(context.Background(), r.h, from, t0, nil)
 		cacheNoValue(s, op)
-		if s.CachedResponseBody() != nil {
-			t.Fatalf("%s: cached %s", op, s.CachedResponseBody())
+		if s.CachedResponseBody() != nil || s.SentOnce() {
+			t.Fatalf("%s: cached %s, sent once %v", op, s.CachedResponseBody(), s.SentOnce())
 		}
 	}
 }
@@ -191,7 +191,7 @@ func TestCacheNoValueThroughHandle(t *testing.T) {
 	if err != nil || !strings.Contains(string(res), "hunter22") || strings.Contains(string(res), "withheld") {
 		t.Fatalf("answer: %v %s", err, res)
 	}
-	if got := string(s.CachedResponseBody()); got != `{"withheld":true}` {
-		t.Fatalf("cached %q", got)
+	if got := string(s.CachedResponseBody()); got != `{"withheld":true}` || !s.SentOnce() {
+		t.Fatalf("cached %q, sent once %v", got, s.SentOnce())
 	}
 }

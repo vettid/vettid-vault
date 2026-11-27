@@ -392,7 +392,8 @@ func (s *Session) HeldNote() json.RawMessage { return append(json.RawMessage(nil
 func (s *Session) CacheResponseAs(body json.RawMessage) { s.cacheBody = body }
 
 // CacheResponseAsSentOnce is CacheResponseAs for an answer whose secret
-// must not be in saved state at all (0.94.0 §6.7.2: a pairing code): the
+// must not be in saved state at all (0.94.0 §6.7.2: a pairing code;
+// 0.97.0 §8.2: an agent's item.get, item.run or item.proxy value): the
 // answer the handler returns is sealed and deposited once, from memory,
 // never in the stored outbox, and its body is wiped once sealed, so the
 // handler returns a slice of its own. A lost deposit is answered from the
@@ -403,6 +404,9 @@ func (s *Session) CacheResponseAsSentOnce(body json.RawMessage) {
 
 // CachedResponseBody returns the body set by CacheResponseAs (nil: the answer is cached as sent).
 func (s *Session) CachedResponseBody() json.RawMessage { return s.cacheBody }
+
+// SentOnce reports whether the answer is deposited once from memory only (CacheResponseAsSentOnce).
+func (s *Session) SentOnce() bool { return s.sentOnce }
 
 // Host is what a Session acts on. The Manager implements it for the
 // messages it dispatches; tests of feature packages supply their own.

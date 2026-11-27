@@ -505,3 +505,27 @@ func FuzzPeerMessage(f *testing.F) {
 		}
 	})
 }
+
+// An introduction offered before a lock (VAULT-MESSAGING §10.15, §12.3) is
+// stored with no answers (omitempty); the first answer after the unlock is
+// taken, not a panic on a nil map.
+func TestAnAnswerAfterTheStateIsReadBack(t *testing.T) {
+	a, b, c := world()
+	start(t, a, b, c)
+	raw, err := b.f.Save()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), `"answers"`) {
+		t.Fatalf("not the stored shape this is about: %s", raw)
+	}
+	g := New()
+	featuretest.RoundTrip(t, b.f, g)
+	b.f = g
+	id := b.f.MadeList()[0].ID
+	a.ok(t, vault.KindApp, "intro.accept", `{"intro_id":"`+id+`"}`)
+	deliver(t, a, aB, b, bA)
+	if ev := lastSent(t, b.h, "intro.event"); str(t, ev.Body, "event") != "accepted" {
+		t.Fatalf("B's event: %s", ev.Body)
+	}
+}

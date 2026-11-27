@@ -142,6 +142,13 @@ func (f *Feature) Load(raw json.RawMessage) error {
 	if d.Received == nil {
 		d.Received = map[string]*Received{}
 	}
+	for _, m := range d.Made {
+		if m != nil && m.Answers == nil {
+			// omitempty: an introduction with no answer yet is stored
+			// without answers, and intro.answer writes into it.
+			m.Answers = map[string]string{}
+		}
+	}
 	f.d = d
 	return nil
 }

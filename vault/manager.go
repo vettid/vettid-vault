@@ -897,6 +897,12 @@ func (st *State) init() {
 	st.loadedClean = st.CleanEnd && st.OutboxTried
 	st.CleanEnd = false // set again only by a lock's last write
 	st.OutboxTried = true
+	if st.Attach != nil {
+		// Its maps are omitempty: one stored empty is read back nil, and
+		// the runner writes some of them (turns) without going through
+		// attach() (staging, release 33: a nil map panicked after an unlock).
+		st.attach()
+	}
 	if st.Devices == nil {
 		st.Devices = map[string]*Peer{}
 	}

@@ -3,7 +3,7 @@
 package e2e
 
 import (
-	"context"
+	"encoding/json"
 	"fmt"
 	"sync/atomic"
 	"testing"
@@ -63,7 +63,7 @@ func unlockAfterAgentRequests(t *testing.T, scale uint64, ahead time.Duration) {
 	if _, err := a.app.SessionApprove(ctx, reqID, 0); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := agent.AgentRequest(ctxT(t, 20*time.Second), "item.list", nil); err != nil {
+	if _, err := agent.AgentRequest(ctxT(t, 20*time.Second), "catalog", nil); err != nil {
 		t.Fatalf("before the lock: %v", err)
 	}
 
@@ -72,15 +72,19 @@ func unlockAfterAgentRequests(t *testing.T, scale uint64, ahead time.Duration) {
 		t.Fatal(err)
 	}
 	a.stop()
-	// While locked: requests the vault will find when it opens.
-	for range 2 {
-		go func() {
-			short, cancel := context.WithTimeout(ctx, 3*time.Second)
-			defer cancel()
-			_, _ = agent.AgentRequest(short, "item.list", nil)
-		}()
+	// While locked: a request the vault will find when it opens, sent
+	// again with the same inner id (an application retry, §8.6), as the
+	// connector does.
+	body := json.RawMessage(`{"op":"catalog"}`)
+	id, err := agent.Send(ctx, "agent.request", body)
+	if err != nil {
+		t.Fatal(err)
 	}
-	time.Sleep(4 * time.Second)
+	time.Sleep(time.Second)
+	if _, err := agent.SendWithID(ctx, id, "agent.request", body); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(2 * time.Second)
 
 	m, f, err := a.unlock(ctx, nil)
 	if err != nil {
@@ -94,7 +98,7 @@ func unlockAfterAgentRequests(t *testing.T, scale uint64, ahead time.Duration) {
 	if m.Locked() {
 		t.Fatal("the vault locked itself after the unlock")
 	}
-	if _, err := agent.AgentRequest(ctxT(t, 30*time.Second), "item.list", nil); err != nil {
+	if _, err := agent.AgentRequest(ctxT(t, 30*time.Second), "catalog", nil); err != nil {
 		t.Fatalf("after the unlock: %v", err)
 	}
 	if r := a.request(a.app, "vault.status", `{}`); !r.OK() && r.ErrorCode() != "owner_check_required" {

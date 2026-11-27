@@ -918,6 +918,13 @@ func (m *Manager) sendResponse(p *Peer, req *envelope.Inner, key string, out *en
 // the same id, time, type and re (a retransmission is the same answer), another body.
 func (m *Manager) sendResponseCached(p *Peer, req *envelope.Inner, key string, out *envelope.Inner, cached json.RawMessage,
 	sentOnce bool, now time.Time) {
+	if sentOnce {
+		// (§8.2, 0.97.0) The body with the secret is wiped on every exit:
+		// sealed once from memory, replaced by response_too_large, or
+		// dropped (no id, no usable epoch).
+		body := out.Body
+		defer suite.Wipe(body)
+	}
 	if !envelope.ValidType(out.Type) {
 		out.Type = "error"
 	}
@@ -931,9 +938,6 @@ func (m *Manager) sendResponseCached(p *Peer, req *envelope.Inner, key string, o
 	// sealed within §5.5's bound is replaced by response_too_large, which
 	// is cached and sent instead (sent only, for a volatile request).
 	if !m.fits(out) {
-		if sentOnce {
-			suite.Wipe(out.Body) // the value it replaces goes too (§8.2, 0.97.0)
-		}
 		out = tooLarge(out)
 	}
 	if key == volatileKey {
@@ -1003,6 +1007,7 @@ func (m *Manager) fits(in *envelope.Inner) bool {
 	if err != nil {
 		return true // not a size problem: sealing reports it as before
 	}
+	defer suite.Wipe(j) // a plaintext copy of the answer (a value, a code)
 	_, err = envelope.PaddedLen(len(j))
 	return err == nil
 }

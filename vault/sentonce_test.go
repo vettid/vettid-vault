@@ -266,3 +266,49 @@ func TestSentOnceTooLargeWipesTheValue(t *testing.T) {
 		t.Fatal("the replaced sent-once body was not wiped")
 	}
 }
+
+// 0.97.0 §8.2: never ahead of a blocked durable deposit. The durable message
+// queued ahead of the answer to the same mailbox fails once (the relay is
+// otherwise up): the sent-once answer is not delivered ahead of it (it is
+// lost), the durable one goes on its retry, and a retransmission gets the
+// copy without running the handler again.
+func TestSentOnceNeverAheadOfABlockedDeposit(t *testing.T) {
+	d := newDevFixture(t)
+	f := &sentOnceFeature{notify: true}
+	d.m.addFeature(f)
+	app := d.self()
+	failed := 0
+	d.relay.check = func(mailbox, _ string) error {
+		if mailbox == d.devPeer.Relay.Mailbox && failed == 0 {
+			failed++
+			return errors.New("relay blip")
+		}
+		return nil
+	}
+	id := d.sendAs(app, "test.sentonce", `{}`)
+	if failed != 1 || f.calls != 1 {
+		t.Fatalf("failed %d, calls %d", failed, f.calls)
+	}
+	for _, in := range d.inbox(app)["dev1"] {
+		if in.Re == id || bytes.Contains(in.Body, []byte("SECRET")) {
+			t.Fatalf("the sent-once answer went ahead of the blocked deposit: %s", in.Body)
+		}
+	}
+	retryNow(d.m)
+	ahead := false
+	for _, in := range d.inbox(app)["dev1"] {
+		if in.Re == id || bytes.Contains(in.Body, []byte("SECRET")) {
+			t.Fatalf("the sent-once answer was kept for the retry: %s", in.Body)
+		}
+		ahead = ahead || bytes.Contains(in.Body, []byte(`"ahead"`))
+	}
+	if !ahead {
+		t.Fatal("the durable message was not delivered on its retry")
+	}
+	d.sendID(app, id, "test.sentonce", `{}`)
+	retryNow(d.m)
+	again := find(d.inbox(app)["dev1"], reply(id))
+	if again == nil || string(again.Body) != `{"withheld":true}` || f.calls != 1 {
+		t.Fatalf("retransmission: %+v (calls %d)", again, f.calls)
+	}
+}

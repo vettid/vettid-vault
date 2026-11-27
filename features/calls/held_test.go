@@ -56,8 +56,8 @@ type stunSource struct{}
 func (stunSource) Servers(*vault.Session, string, time.Time) ([]callwire.ICEServer, time.Time, error) {
 	return []callwire.ICEServer{{URLs: []string{"stun:stun.example:3478"}}}, t0.Add(ICETTL), nil
 }
-func (stunSource) Retire(string)                    {}
-func (stunSource) Drop(string)                      {}
+func (stunSource) Retire(string)                   {}
+func (stunSource) Drop(string)                     {}
 func (stunSource) Prime(*vault.Session, time.Time) {}
 
 // Without a TURN entry (no usable credential: no servers, or the STUN entry alone) the answer is not held and is

@@ -137,6 +137,15 @@ func TestCallHeldAnswerRetriedFromMemory(t *testing.T) {
 	if again == nil || string(again.Body) != `{"turn":"SECRET-TURN-ANSWER"}` || again.ID != liveID || f.calls != 1 {
 		t.Fatalf("retransmission: %+v (calls %d)", again, f.calls)
 	}
+	// The call ends: the next drain wipes the answer held for it, with nothing asked.
+	delete(f.held, "c1")
+	d.m.drainOutbox(context.Background())
+	d.m.mu.Lock()
+	n := len(d.m.callMsgs)
+	d.m.mu.Unlock()
+	if n != 0 {
+		t.Fatal("the answer is still held after its call ended")
+	}
 }
 
 // Once the vault no longer holds the call (it ended), a retransmission gets the cached copy, withheld; after a

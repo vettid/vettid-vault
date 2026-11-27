@@ -931,6 +931,9 @@ func (m *Manager) sendResponseCached(p *Peer, req *envelope.Inner, key string, o
 	// sealed within §5.5's bound is replaced by response_too_large, which
 	// is cached and sent instead (sent only, for a volatile request).
 	if !m.fits(out) {
+		if sentOnce {
+			suite.Wipe(out.Body) // the value it replaces goes too (§8.2, 0.97.0)
+		}
 		out = tooLarge(out)
 	}
 	if key == volatileKey {

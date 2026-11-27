@@ -155,7 +155,7 @@ func TestSentOnceAnswerBehindTheDurableDeposits(t *testing.T) {
 // run of a held request) sends the answer once from memory too.
 func TestSentOnceHeldAnswerNotInTheStoredOutbox(t *testing.T) {
 	f := newOCFixture(t)
-	st := &sentOnceFeature{}
+	st := &sentOnceFeature{notify: true}
 	f.m.addFeature(st)
 	f.relay.failMailbox = map[string]error{f.desk.peer.Relay.Mailbox: errors.New("relay down")}
 	id := f.sendAs(f.desk, "test.sentonceheld", `{}`)
@@ -167,10 +167,15 @@ func TestSentOnceHeldAnswerNotInTheStoredOutbox(t *testing.T) {
 	if st.calls != 1 {
 		t.Fatalf("%d calls", st.calls)
 	}
+	control := false
 	for _, in := range storedDeposits(t, f.m, f.desk.peer) {
 		if bytes.Contains(in.Body, []byte("SECRET")) || in.Re == id {
 			t.Fatalf("a stored deposit holds the held sent-once answer: %s", in.Body)
 		}
+		control = control || bytes.Contains(in.Body, []byte(`"ahead"`))
+	}
+	if !control {
+		t.Fatal("the durable message ahead of it is not stored: the check proves nothing")
 	}
 	if s, _ := json.Marshal(f.m.st); strings.Contains(string(s), "SECRET") {
 		t.Fatal("the state holds the value")
@@ -222,14 +227,42 @@ func TestSentOnceDuplicateInOneBatch(t *testing.T) {
 		t.Fatalf("answers %v (calls %d)", bodies, f.calls)
 	}
 	d.relay.failMailbox = map[string]error{d.devPeer.Relay.Mailbox: errors.New("relay down")}
+	f.notify = true // the durable message ahead: the positive control
 	id, msgs = pair("down")
 	_ = d.m.ProcessBatch(context.Background(), &fakeCollector{}, msgs)
 	if f.calls != 2 {
 		t.Fatalf("calls %d", f.calls)
 	}
+	control := false
 	for _, in := range storedDeposits(t, d.m, d.devPeer) {
 		if in.Re == id {
 			t.Fatalf("a stored deposit holds an answer: %s", in.Body)
 		}
+		control = control || bytes.Contains(in.Body, []byte(`"ahead"`))
+	}
+	if !control {
+		t.Fatal("the durable message ahead is not stored: the check proves nothing")
+	}
+}
+
+// A sent-once answer too large to seal is replaced by response_too_large
+// (§8.1), and the body with the value it replaces is wiped too.
+func TestSentOnceTooLargeWipesTheValue(t *testing.T) {
+	d := newDevFixture(t)
+	big := []byte(`{"value":"` + strings.Repeat("S", 300*1024) + `"}`)
+	req := &envelope.Inner{ID: "01JB2Z6V9K3M4N5P6Q7R8S9TB7", Type: "agent.request"}
+	out := &envelope.Inner{Type: req.Type, Re: req.ID, Status: envelope.StatusOK, Body: big}
+	d.m.mu.Lock()
+	d.m.sendResponseCached(d.devPeer, req, "k7", out, json.RawMessage(`{"withheld":true}`), true, d.m.now())
+	replaced := false
+	for _, e := range d.m.st.Outbox {
+		replaced = replaced || e.InnerID == out.ID // response_too_large is sent durably, under the same id
+	}
+	d.m.mu.Unlock()
+	if !replaced {
+		t.Fatal("not replaced by response_too_large: the check proves nothing")
+	}
+	if !bytes.Equal(big, make([]byte, len(big))) {
+		t.Fatal("the replaced sent-once body was not wiped")
 	}
 }

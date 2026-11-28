@@ -543,7 +543,7 @@ func (m *Manager) pushLockWake(deposited map[string]bool) {
 // push.token-needed{reason} deposited to the app, in one flush.
 func (m *Manager) pushOutcome(o pushOutcome) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	defer m.unlockOnPanic()
 	if m.locked || m.st == nil || m.st.Push == nil || o.gen != m.pushGen {
 		return
 	}

@@ -1609,7 +1609,7 @@ func (m *Manager) release(r Relay) {
 // error).
 func (m *Manager) Locked() bool {
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	defer m.unlockOnPanic()
 	return m.locked
 }
 
@@ -1617,7 +1617,7 @@ func (m *Manager) Locked() bool {
 // holds no secrets.
 func (m *Manager) Audit() []AuditEntry {
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	defer m.unlockOnPanic()
 	if m.st == nil {
 		return nil
 	}
@@ -1630,7 +1630,7 @@ func (m *Manager) Audit() []AuditEntry {
 // meets unchanged).
 func (m *Manager) FeatureEntries() []string {
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	defer m.unlockOnPanic()
 	if m.st == nil {
 		return nil
 	}
@@ -1645,7 +1645,7 @@ func (m *Manager) FeatureEntries() []string {
 // VaultID returns the vault id.
 func (m *Manager) VaultID() string {
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	defer m.unlockOnPanic()
 	if m.st == nil {
 		return ""
 	}
@@ -1660,7 +1660,7 @@ func (m *Manager) Lock(ctx context.Context) error { return m.LockReason(ctx, "")
 // §11.11.1; "" for none).
 func (m *Manager) LockReason(ctx context.Context, reason string) error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	defer m.unlockOnPanic()
 	if reason == LockDelete {
 		return m.deleteLocked(ctx, "host")
 	}
@@ -1871,7 +1871,7 @@ func (m *Manager) CredentialBackup() *bool {
 // its own state, before anything is locked.
 func (m *Manager) RecoveryRefusal() string {
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	defer m.unlockOnPanic()
 	if m.locked || m.st == nil {
 		return ""
 	}
@@ -1946,6 +1946,6 @@ func (m *Manager) Crash() {
 	if !m.tryLockFor(crashLockWait) {
 		return
 	}
-	defer m.mu.Unlock()
+	defer m.unlockOnPanic()
 	m.zeroize()
 }

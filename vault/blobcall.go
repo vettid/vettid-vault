@@ -163,7 +163,7 @@ func (m *Manager) runBlobCall(r *attRunner, deviceID string, req envelope.Inner,
 	dcancel()
 	wipe(key)
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	defer m.unlockOnPanic()
 	defer wipe(plain)
 	if m.blobBusy[deviceID] == req.ID {
 		delete(m.blobBusy, deviceID)

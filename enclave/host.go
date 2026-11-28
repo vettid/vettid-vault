@@ -100,8 +100,7 @@ func RunRecovered(ctx context.Context, m *vault.Manager) (err error) {
 			if rec := m.RecordedPanic(); rec != nil {
 				pe = rec // described where it happened, under the lock
 			}
-			m.RecordPanic(pe)
-			m.Crash()
+			m.Fail(pe) // recorded, zeroized within its bound, OnPanic told
 			err = pe
 		}
 	}()

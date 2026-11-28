@@ -597,7 +597,7 @@ func deleteStored(ctx context.Context, st store.Store, key string, ver store.Ver
 // entry that is gone. Then it flushes and delivers the outbox.
 func (m *Manager) attApply(r *attRunner, id string, fn func(e *AttEntry, now time.Time)) bool {
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	defer m.unlockOnPanic()
 	if m.locked || m.st == nil || m.att != r {
 		return false
 	}
@@ -614,7 +614,7 @@ func (m *Manager) attApply(r *attRunner, id string, fn func(e *AttEntry, now tim
 
 func (m *Manager) attDrain(r *attRunner) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	defer m.unlockOnPanic()
 	if m.locked || m.st == nil || m.att != r {
 		return
 	}
@@ -1006,7 +1006,7 @@ func (m *Manager) ownerFetchJob(r *attRunner, f *attFetch) attJob {
 		m.transfer(r, PrioOwnerFetch, "fetch:"+f.req.ID, f.at.Add(OwnerFetchStart), func(ctx context.Context) int {
 			answer := func(body []byte, code string) {
 				m.mu.Lock()
-				defer m.mu.Unlock()
+				defer m.unlockOnPanic()
 				if m.locked || m.st == nil || m.att != r {
 					return
 				}

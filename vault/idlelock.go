@@ -145,7 +145,7 @@ func (m *Manager) idleWatch(ctx context.Context) {
 // idleWatchOnce runs one look; true once the vault is locked.
 func (m *Manager) idleWatchOnce() bool {
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	defer m.unlockOnPanic()
 	if m.locked || m.st == nil {
 		return true
 	}

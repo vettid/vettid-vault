@@ -100,8 +100,8 @@ func (m *Manager) MarkPanicking() { m.panicking.Store(true) }
 // panic's own.
 func (m *Manager) RecordedPanic() *PanicError { return m.panicErr.Load() }
 
-// unlockOnPanic is the deferred unlock of the manager's main lock sites
-// (ProcessBatch, Start, the attachments pass): a panic under the lock is
+// unlockOnPanic is the deferred unlock of every m.mu site of the package
+// (TestNoPlainDeferredUnlocks): a panic under the lock is
 // recorded before the lock goes to a waiter, which would otherwise store or
 // send the half-changed state, then panics on to the goroutine's recover.
 func (m *Manager) unlockOnPanic() {

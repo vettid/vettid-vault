@@ -93,7 +93,7 @@ func (h managerHost) DeleteVault(via string, now time.Time) error {
 // Deleting reports whether a deletion has started (tests, hosts).
 func (m *Manager) Deleting() bool {
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	defer m.unlockOnPanic()
 	return m.st != nil && m.st.Deleting != nil
 }
 

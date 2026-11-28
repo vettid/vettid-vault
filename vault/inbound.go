@@ -208,7 +208,7 @@ func (m *Manager) Step(ctx context.Context) (int, error) {
 
 func (m *Manager) getCollector(ctx context.Context) (Collector, error) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	defer m.unlockOnPanic()
 	if m.locked {
 		return nil, ErrLocked
 	}

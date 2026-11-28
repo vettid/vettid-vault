@@ -703,7 +703,7 @@ func (m *Manager) hAddressUpdate(_ context.Context, s *Session, in *envelope.Inn
 // and every session is rekeyed.
 func (m *Manager) RotateIdentity(ctx context.Context) error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	defer m.unlockOnPanic()
 	if m.locked {
 		return ErrLocked
 	}

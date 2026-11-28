@@ -266,7 +266,7 @@ func (m *Manager) applyAccount(raw []byte, now time.Time) bool {
 // AccountVersion returns the stored snapshot's version (0: none).
 func (m *Manager) AccountVersion() uint64 {
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	defer m.unlockOnPanic()
 	if m.st == nil || m.st.Account == nil {
 		return 0
 	}
@@ -277,7 +277,7 @@ func (m *Manager) AccountVersion() uint64 {
 // (§11.13): stored and announced in one flush.
 func (m *Manager) SetAccount(ctx context.Context, raw []byte) error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	defer m.unlockOnPanic()
 	if m.locked {
 		return ErrLocked
 	}

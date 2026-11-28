@@ -1125,6 +1125,11 @@ func (m *Manager) allPeers() []*Peer {
 
 // persist flushes state. create = the first write (create-only objects).
 func (m *Manager) persist(ctx context.Context, create bool) error {
+	if m.Panicked() {
+		// A goroutine panicked (Manager.Go): the state may be half changed,
+		// and nothing of it is stored before the zeroize takes it.
+		return ErrLocked
+	}
 	if m.st == nil {
 		// Zeroized (a split brain, a crash): nothing is written. A caller
 		// that goes on after the loss reaches here, not a nil state.
@@ -1236,6 +1241,9 @@ func (m *Manager) writeHeader(ctx context.Context) error { return m.writeHeaderW
 // feature's handler, which holds its lock), as does a Required feature
 // that did not load.
 func (m *Manager) writeHeaderWith(ctx context.Context, features bool) error {
+	if m.Panicked() {
+		return ErrLocked // as persist: nothing is stored after a panic
+	}
 	if err := m.confirmAppKey(ctx); err != nil {
 		return err
 	}

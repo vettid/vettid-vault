@@ -98,29 +98,36 @@ func (m *Manager) Go(f func()) {
 	}()
 }
 
-// panicked handles a panic in one of the vault's goroutines. It is told
-// first (Options.OnPanic: a vault process logs it and decides its end as an
-// error), before the vault reads as locked, so that nothing ends it as a
-// lock meanwhile; Run returns it too (withPanic). Then the vault is
-// zeroized, waited for at most crashLockWait: a lock the panic left held
-// (the manager's or another the zeroize takes) must not hang the end, and
-// a vault process ends anyway, which wipes its memory.
+// panicked handles a panic in one of the vault's goroutines. The panic is
+// recorded first: from then on nothing is stored or sent (persist, the
+// header write, an attachment's write and the outbox drain refuse while
+// Panicked), so a state the panic left half changed never reaches the
+// store, and Run returns it (withPanic), so that the vault's end is an
+// error whatever ends the loop. The zeroize starts at once, in a goroutine
+// of its own, and Options.OnPanic is told (a vault process ends as an
+// error); the zeroize is waited for at most crashLockWait: a lock the panic
+// left held (the manager's or another the zeroize takes) must not hang the
+// end, and a vault process ends anyway, which wipes its memory.
 func (m *Manager) panicked(pe *PanicError) {
 	m.panicErr.CompareAndSwap(nil, pe)
-	if h := m.opt.OnPanic; h != nil {
-		h(pe)
-	}
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
 		defer func() { _ = recover() }() // a zeroize that panics in turn changes nothing
 		m.Crash()
 	}()
+	if h := m.opt.OnPanic; h != nil {
+		h(pe)
+	}
 	select {
 	case <-done:
 	case <-time.After(crashLockWait):
 	}
 }
+
+// Panicked reports whether one of the vault's goroutines panicked: the
+// vault is (being) zeroized, and nothing more of it is stored or sent.
+func (m *Manager) Panicked() bool { return m.panicErr.Load() != nil }
 
 // withPanic is what Run returns: a goroutine's panic over err (the loop
 // then ended because the panic zeroized the vault).

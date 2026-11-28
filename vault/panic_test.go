@@ -1,6 +1,7 @@
 package vault
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -127,33 +128,38 @@ func TestARuntimePointerErrorKeepsItsText(t *testing.T) {
 	}
 }
 
-// The panic is told before the vault reads as locked, so that nothing ends
-// it as a lock meanwhile, and Run returns it whatever ended the loop.
-func TestAGoroutinePanicIsToldBeforeTheVaultLocks(t *testing.T) {
-	lockedWhenTold := make(chan bool, 1)
-	var m *Manager
-	m = &Manager{opt: Options{OnPanic: func(*PanicError) { lockedWhenTold <- m.Locked() }}}
-	m.Go(func() { _ = indexPanic(2) })
-	select {
-	case locked := <-lockedWhenTold:
-		if locked {
-			t.Fatal("the vault read as locked before the panic was told")
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("not told")
+// After a goroutine's panic nothing of the vault is stored (the state may
+// be half changed), Run returns the panic whatever ended the loop, and the
+// zeroize does not wait for OnPanic (whose log may wait for a full channel).
+func TestAGoroutinePanicStoresNothingAndIsWhatRunReturns(t *testing.T) {
+	pe := &PanicError{Type: "runtime.plainError"}
+	m := &Manager{st: &State{}}
+	m.panicErr.Store(pe)
+	if err := m.persist(context.Background(), false); !errors.Is(err, ErrLocked) {
+		t.Fatalf("persist after a panic: %v", err)
 	}
-	deadline := time.Now().Add(5 * time.Second)
-	for !m.Locked() && time.Now().Before(deadline) {
+	if err := m.writeHeaderWith(context.Background(), true); !errors.Is(err, ErrLocked) {
+		t.Fatalf("header after a panic: %v", err)
+	}
+	var got *PanicError
+	if err := (&Manager{locked: true, panicErr: m.panicErr}).Run(context.Background()); !errors.As(err, &got) || got != pe {
+		t.Fatalf("Run returned %v", err)
+	}
+	if err := (&Manager{locked: true}).Run(context.Background()); !errors.Is(err, ErrLocked) {
+		t.Fatalf("no panic: Run returned %v", err)
+	}
+
+	release := make(chan struct{})
+	defer close(release)
+	told := make(chan struct{})
+	b := &Manager{opt: Options{OnPanic: func(*PanicError) { close(told); <-release }}}
+	b.Go(func() { _ = indexPanic(2) })
+	<-told
+	deadline := time.Now().Add(crashLockWait)
+	for !b.Locked() && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)
 	}
-	if !m.Locked() {
-		t.Fatal("not zeroized after")
-	}
-	var pe *PanicError
-	if err := m.withPanic(ErrLocked); !errors.As(err, &pe) {
-		t.Fatalf("Run would return %v", err)
-	}
-	if err := (&Manager{}).withPanic(ErrLocked); err != ErrLocked {
-		t.Fatalf("no panic: %v", err)
+	if !b.Locked() || !b.Panicked() {
+		t.Fatal("not zeroized while OnPanic was still running")
 	}
 }

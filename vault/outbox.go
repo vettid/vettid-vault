@@ -612,8 +612,8 @@ func (m *Manager) retryPeer(peer string) {
 // token of its own: the reconnect's hs.init that brings the fresh token
 // (§6.6) must not wait behind it.
 func (m *Manager) drainOutbox(ctx context.Context) {
-	if m.st == nil {
-		return // zeroized (a split brain at the settled write below): nothing is sent
+	if m.st == nil || m.Panicked() {
+		return // zeroized (a split brain at the settled write below), or a panic: nothing is sent
 	}
 	if m.holdForMark() {
 		return

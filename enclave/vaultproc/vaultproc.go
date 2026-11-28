@@ -360,6 +360,14 @@ func (pr *proc) lock(ctx context.Context, reason string) [][]byte {
 		defer lcancel()
 	}
 	err := m.LockReason(ctx, reason)
+	if m.Panicked() {
+		// A goroutine panicked while the lock ran: zeroized without its
+		// flush, so not answered as done.
+		if reason == vault.LockDelete {
+			return hostproto.Strings(vaultipc.StatusNotDeleted)
+		}
+		return hostproto.Strings(hostproto.StatusError)
+	}
 	switch {
 	case errors.Is(err, vault.ErrSplitBrain):
 		return hostproto.Strings(vaultipc.StatusSplitBrain)
@@ -440,9 +448,10 @@ func (pr *proc) vaultOptions(cfg enclave.Config) vault.Options {
 // goroutines, the vault already zeroized; logged, and the process ends as
 // an error (Serve takes the first exit).
 func (pr *proc) goroutinePanicked(pe *vault.PanicError) {
-	pr.logPanic(pe)
+	// The end first: the log can wait for a channel that is full.
 	select {
 	case pr.exit <- ExitError:
 	default:
 	}
+	pr.logPanic(pe)
 }

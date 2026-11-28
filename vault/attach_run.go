@@ -486,7 +486,7 @@ func (m *Manager) fetchBlob(ctx context.Context, b AttBlob, maxBlob int) ([]byte
 // locked, and a deletion waits for a write under way (attWaitWrites).
 func (m *Manager) putObject(r *attRunner, key string, data []byte) (store.Version, error) {
 	m.mu.Lock()
-	if m.locked || m.att != r {
+	if m.locked || m.att != r || m.Panicked() {
 		m.mu.Unlock()
 		return "", ErrLocked
 	}

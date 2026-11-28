@@ -579,8 +579,12 @@ func TestCapacityCodesSamplesMemory(t *testing.T) {
 		mu.Lock()
 		dip = true
 		mu.Unlock()
-		<-seenAvail
-		<-seenFree
+		for _, c := range []chan struct{}{seenAvail, seenFree} {
+			select {
+			case <-c:
+			case <-time.After(time.Minute): // the test fails below rather than hang
+			}
+		}
 		mu.Lock()
 		dip = false
 		mu.Unlock()

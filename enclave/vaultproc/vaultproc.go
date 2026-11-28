@@ -88,6 +88,9 @@ type proc struct {
 	mgr     *vault.Manager
 	cancel  context.CancelFunc
 	runDone chan error
+	// locking is the manager a lock() is locking (pr.mgr is nil by then),
+	// for a panic in it (requestPanicked).
+	locking *vault.Manager
 	exit    chan int
 	// panicLogged: the vault's panic is logged once (OnPanic and the run
 	// loop's end both see it).
@@ -176,7 +179,17 @@ func channelEndedExit(running bool) int {
 	return ExitLocked
 }
 
-func (pr *proc) handle(ctx context.Context, f *hostproto.Frame) [][]byte {
+func (pr *proc) handle(ctx context.Context, f *hostproto.Frame) (reply [][]byte) {
+	// A request runs vault code (an open runs the unlock and every
+	// feature's Load): a panic in it ends the process as an error, logged,
+	// the vault zeroized, and the request answered as failed, as a panic
+	// in one of the vault's own goroutines does.
+	defer func() {
+		if r := recover(); r != nil {
+			pe := vault.DescribePanic(r)
+			reply = pr.requestPanicked(pe, f)
+		}
+	}()
 	switch f.Kind {
 	case vaultipc.KindOpen:
 		return pr.open(ctx, f.Fields)
@@ -338,7 +351,7 @@ func (pr *proc) runEnded(err error, locked bool) (code int, lockFirst bool) {
 func (pr *proc) lock(ctx context.Context, reason string) [][]byte {
 	pr.mu.Lock()
 	m, cancel, done := pr.mgr, pr.cancel, pr.runDone
-	pr.mgr = nil
+	pr.mgr, pr.locking = nil, m
 	pr.mu.Unlock()
 	if m == nil {
 		return hostproto.Strings(hostproto.StatusOK)
@@ -442,6 +455,33 @@ func (pr *proc) vaultOptions(cfg enclave.Config) vault.Options {
 		PollWait: pr.p.PollWait, Push: pushGateway(cfg.PushURL, pr.ch), Calls: callsIssuer(cfg.CallsURL, pr.ch), Transfers: chanGate{ch: pr.ch},
 		Counter: chanCounter{ch: pr.ch}, HeavyPermit: heavyPermit(pr.ch), CodePermit: codePermit(pr.ch), MarkDeleting: pr.ch.markDeleting,
 		ConfirmAppKey: pr.ch.confirmAppKey, OnPanic: pr.goroutinePanicked}
+}
+
+// requestPanicked ends a request whose handling panicked: the running
+// vault, or the one being locked, is zeroized as after a goroutine's panic
+// (Manager.Fail: recorded, zeroized within its bound), and the process's
+// end is decided as an error. The request is answered as
+// failed: not_deleted for a deletion's lock, else error.
+func (pr *proc) requestPanicked(pe *vault.PanicError, f *hostproto.Frame) [][]byte {
+	pr.mu.Lock()
+	m := pr.mgr
+	if m == nil {
+		m = pr.locking
+	}
+	pr.mu.Unlock()
+	if m != nil {
+		if rec := m.RecordedPanic(); rec != nil {
+			pe = rec // described where it happened, under the manager's lock
+		}
+		m.Fail(pe)
+	}
+	// The process's end is decided here too, whatever the manager's options
+	// (logged once; the exit send does not wait).
+	pr.goroutinePanicked(pe)
+	if f.Kind == vaultipc.KindLock && len(f.Fields) == 1 && string(f.Fields[0]) == vault.LockDelete {
+		return hostproto.Strings(vaultipc.StatusNotDeleted)
+	}
+	return hostproto.Strings(hostproto.StatusError)
 }
 
 // goroutinePanicked is Options.OnPanic: a panic in one of the vault's own

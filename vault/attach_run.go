@@ -202,7 +202,7 @@ func (m *Manager) attLoop(r *attRunner) {
 // deferred cleanup, which takes it again (the recover would never run).
 func (m *Manager) attPassLocked(r *attRunner) (starts []attJob, mt *attWork, ok bool) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	defer m.unlockOnPanic()
 	if m.locked || m.st == nil || m.att != r || m.Panicked() {
 		// After a panic the in-memory state may be half changed: no pass
 		// erases, discards or uploads on its word.

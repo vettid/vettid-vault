@@ -180,3 +180,51 @@ func TestAfterAPanicTheAttachmentsRunnerDoesNothing(t *testing.T) {
 		t.Fatalf("an object written after a panic: %v", err)
 	}
 }
+
+// A panic under the manager's lock is recorded before the lock goes to a
+// waiter (unlockOnPanic), so the waiter (another batch, the attachments
+// pass) stores and sends nothing of the half-changed state; it is
+// described where it happened.
+func TestAPanicUnderTheLockIsRecordedBeforeAWaiterGetsIt(t *testing.T) {
+	m := &Manager{}
+	waiting := make(chan struct{})
+	sawPanic := make(chan bool, 1)
+	func() {
+		defer func() { _ = recover() }()
+		m.mu.Lock()
+		defer m.unlockOnPanic()
+		go func() {
+			close(waiting)
+			m.mu.Lock()
+			sawPanic <- m.Panicked()
+			m.mu.Unlock()
+		}()
+		<-waiting
+		time.Sleep(20 * time.Millisecond) // the waiter is blocked on the lock
+		_ = indexPanic(4)
+	}()
+	if !<-sawPanic {
+		t.Fatal("the waiter got the lock before the panic was recorded")
+	}
+	if pe := m.RecordedPanic(); pe == nil || len(pe.Frames) == 0 || !strings.HasPrefix(pe.Frames[0], "vault.indexPanic") {
+		t.Fatalf("recorded %+v", pe)
+	}
+	// A panic seen but not described yet already stops writes and is what Run returns.
+	n := &Manager{}
+	n.MarkPanicking()
+	if !n.Panicked() || !errors.Is(n.withPanic(ErrLocked), ErrPanic) {
+		t.Fatal("a panic marked is not yet in force")
+	}
+}
+
+// Crash with the manager's lock held elsewhere returns within its bound.
+func TestCrashWithTheLockHeldReturnsWithinItsBound(t *testing.T) {
+	m := &Manager{}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	began := time.Now()
+	m.Crash()
+	if d := time.Since(began); d < crashLockWait || d > crashLockWait+2*time.Second {
+		t.Fatalf("returned after %v", d)
+	}
+}

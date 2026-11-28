@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"log/slog"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/vettid/vettid-vault/enclave"
 	"github.com/vettid/vettid-vault/internal/hostproto"
@@ -114,5 +116,48 @@ func TestAGoroutinePanicEndsTheProcessAsAnError(t *testing.T) {
 	}
 	if n := strings.Count(buf.String(), "vault panicked"); n != 1 {
 		t.Fatalf("logged %d times: %q", n, buf.String())
+	}
+}
+
+// A supervisor request whose handling panics (here a lock that finds no run
+// loop to stop): answered as failed, the manager being locked zeroized,
+// the panic logged, and the process's end an error, never a silent exit.
+func TestARequestThatPanicsEndsTheProcessAsAnError(t *testing.T) {
+	var buf bytes.Buffer
+	m := &vault.Manager{}
+	pr := &proc{log: slog.New(slog.NewTextHandler(&buf, nil)), exit: make(chan int, 2), mgr: m}
+	r := pr.handle(context.Background(), &hostproto.Frame{Kind: vaultipc.KindLock, Fields: hostproto.Strings("")})
+	if len(r) == 0 || string(r[0]) != hostproto.StatusError {
+		t.Fatalf("answered %q", r)
+	}
+	select {
+	case code := <-pr.exit:
+		if code != ExitError {
+			t.Fatalf("exit %d", code)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("no exit")
+	}
+	if !m.Panicked() || !strings.Contains(buf.String(), "vault panicked") {
+		t.Fatalf("panicked %v, log %q", m.Panicked(), buf.String())
+	}
+	// A deletion's lock that panics is answered not-deleted.
+	if r := (&proc{log: slog.New(slog.NewTextHandler(&buf, nil)), exit: make(chan int, 2)}).requestPanicked(
+		&vault.PanicError{}, &hostproto.Frame{Kind: vaultipc.KindLock, Fields: hostproto.Strings(vault.LockDelete)}); string(r[0]) != vaultipc.StatusNotDeleted {
+		t.Fatalf("delete lock answered %q", r)
+	}
+}
+
+// The vault process's options carry OnPanic, which ends the process as an
+// error.
+func TestTheVaultOptionsEndTheProcessOnAPanic(t *testing.T) {
+	pr := &proc{log: slog.New(slog.NewTextHandler(io.Discard, nil)), exit: make(chan int, 2)}
+	o := pr.vaultOptions(enclave.Config{})
+	if o.OnPanic == nil {
+		t.Fatal("no OnPanic")
+	}
+	o.OnPanic(&vault.PanicError{Type: "runtime.plainError"})
+	if code := <-pr.exit; code != ExitError {
+		t.Fatalf("exit %d", code)
 	}
 }

@@ -44,7 +44,7 @@ const (
 // collector. Run calls it; tests that drive Step call it once.
 func (m *Manager) Start(ctx context.Context) error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	defer m.unlockOnPanic()
 	if m.locked {
 		return ErrLocked
 	}
@@ -245,7 +245,7 @@ const HeldAnswerHoldBound = 60 * time.Second
 // then ack; then deposit the outbox.
 func (m *Manager) ProcessBatch(ctx context.Context, c Collector, msgs []Message) error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	defer m.unlockOnPanic()
 	if m.locked {
 		return ErrLocked
 	}

@@ -83,6 +83,45 @@ func fromRuntime(r any) bool {
 	return t.PkgPath() == "runtime"
 }
 
+// RecordPanic records pe as the vault's panic (the first one stands), so
+// that nothing more is stored or sent (Panicked) and Run returns it; the
+// run loop's recover (enclave.RunRecovered) calls it before its Crash.
+func (m *Manager) RecordPanic(pe *PanicError) {
+	m.panicking.Store(true)
+	m.panicErr.CompareAndSwap(nil, pe)
+}
+
+// MarkPanicking marks a panic seen and not described yet: Panicked is
+// true from here.
+func (m *Manager) MarkPanicking() { m.panicking.Store(true) }
+
+// RecordedPanic is the panic recorded where it happened (unlockOnPanic), if
+// any: a recover further up describes a re-panic, whose frames are not the
+// panic's own.
+func (m *Manager) RecordedPanic() *PanicError { return m.panicErr.Load() }
+
+// unlockOnPanic is the deferred unlock of the manager's main lock sites
+// (ProcessBatch, Start, the attachments pass): a panic under the lock is
+// recorded before the lock goes to a waiter, which would otherwise store or
+// send the half-changed state, then panics on to the goroutine's recover.
+func (m *Manager) unlockOnPanic() {
+	if r := recover(); r != nil {
+		m.panicking.Store(true)
+		m.panicErr.CompareAndSwap(nil, DescribePanic(r))
+		m.mu.Unlock()
+		panic(r)
+	}
+	m.mu.Unlock()
+}
+
+// Fail ends the vault after a panic outside its own goroutines (a request
+// the vault process handles for the supervisor): as panicked, so recorded,
+// zeroized within its bound, and told to Options.OnPanic.
+func (m *Manager) Fail(pe *PanicError) {
+	m.panicking.Store(true)
+	m.panicked(pe)
+}
+
 // Go runs f in a goroutine of the vault's own. A panic in it zeroizes the
 // vault (as Crash) and is handed to Options.OnPanic, which in a vault
 // process logs it and ends the process as an error: never a silent end,
@@ -91,7 +130,12 @@ func (m *Manager) Go(f func()) {
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
-				m.panicked(DescribePanic(r))
+				m.panicking.Store(true) // before the description, which takes a moment
+				pe := DescribePanic(r)
+				if rec := m.panicErr.Load(); rec != nil {
+					pe = rec // described where it happened, under the lock
+				}
+				m.panicked(pe)
 			}
 		}()
 		f()
@@ -127,7 +171,7 @@ func (m *Manager) panicked(pe *PanicError) {
 
 // Panicked reports whether one of the vault's goroutines panicked: the
 // vault is (being) zeroized, and nothing more of it is stored or sent.
-func (m *Manager) Panicked() bool { return m.panicErr.Load() != nil }
+func (m *Manager) Panicked() bool { return m.panicking.Load() || m.panicErr.Load() != nil }
 
 // withPanic is what Run returns: a goroutine's panic over err (the loop
 // then ended because the panic zeroized the vault).
@@ -135,11 +179,17 @@ func (m *Manager) withPanic(err error) error {
 	if pe := m.panicErr.Load(); pe != nil {
 		return pe
 	}
+	if m.panicking.Load() {
+		return ErrPanic // seen, not described yet
+	}
 	return err
 }
 
 // crashLockWait bounds Crash's wait for the manager's lock: a panic while
-// it was held without a deferred unlock leaves it held for ever.
+// it was held without a deferred unlock leaves it held for ever. It also
+// gives up on a lock that is only busy (a network call under it): the
+// guarantee after a panic is the vault process's end (OnPanic), which
+// wipes its memory; the zeroize here is the best effort before it.
 const crashLockWait = 2 * time.Second
 
 // tryLockFor takes m.mu within d; false if it could not.

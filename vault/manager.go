@@ -85,8 +85,9 @@ type Options struct {
 	// Lifecycle receives lifecycle events for the parent (§11.5).
 	Lifecycle func(LifecycleEvent)
 	// OnPanic, if set, is told of a panic in one of the vault's own
-	// goroutines (Manager.Go), after the vault was zeroized; a vault
-	// process logs it and ends as an error.
+	// goroutines (Manager.Go) or in a request (Manager.Fail), once it is
+	// recorded and while the zeroize runs; a vault process logs it and ends
+	// as an error.
 	OnPanic func(*PanicError)
 	// OwnerCheckClock, if set, is the clock the daily owner check compares
 	// (§3.6; tests move it past a deadline while messages keep the real
@@ -297,6 +298,9 @@ type Manager struct {
 	// panicErr is the first panic of one of the vault's goroutines
 	// (Manager.Go): Run returns it, whatever else ended the loop.
 	panicErr atomic.Pointer[PanicError]
+	// panicking is set the moment a panic is seen, before it is described
+	// and before any deferred unlock lets another goroutine in.
+	panicking atomic.Bool
 	// removingOwn: removeConnection is applying the member's own removal
 	// (card GC #6875, NoticeOwnRemoval).
 	removingOwn bool
@@ -1759,7 +1763,9 @@ func (m *Manager) lockLocked(ctx context.Context) error {
 	// stored header (storedView).
 	vid := m.st.VaultID
 	m.zeroize()
-	m.report("locked", vid, m.opt.Release.PCR0)
+	if !m.Panicked() { // a panic's end is an error, never a lock (the process says so)
+		m.report("locked", vid, m.opt.Release.PCR0)
+	}
 	return err
 }
 
@@ -1800,7 +1806,9 @@ func (m *Manager) lockDeleting(ctx context.Context) error {
 	}
 	vid := m.st.VaultID
 	m.zeroize()
-	m.report("locked", vid, m.opt.Release.PCR0)
+	if !m.Panicked() { // a panic's end is an error, never a lock (the process says so)
+		m.report("locked", vid, m.opt.Release.PCR0)
+	}
 	return err
 }
 

@@ -95,7 +95,12 @@ type PanicError = vault.PanicError
 func RunRecovered(ctx context.Context, m *vault.Manager) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
+			m.MarkPanicking() // nothing more is stored or sent from here
 			pe := vault.DescribePanic(r)
+			if rec := m.RecordedPanic(); rec != nil {
+				pe = rec // described where it happened, under the lock
+			}
+			m.RecordPanic(pe)
 			m.Crash()
 			err = pe
 		}

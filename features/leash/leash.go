@@ -627,8 +627,14 @@ func (f *Feature) agent(s *vault.Session, id string) *AgentState {
 		st.Counts, st.Unlogged = map[string]uint64{}, map[string]uint64{}
 		st.Referred, st.RefLimited = 0, false
 	}
+	// Each map on its own: an empty one is not stored (omitempty), so a
+	// state read back after a lock has counts and no unlogged when the
+	// window's only events were written singly.
 	if st.Counts == nil {
-		st.Counts, st.Unlogged = map[string]uint64{}, map[string]uint64{}
+		st.Counts = map[string]uint64{}
+	}
+	if st.Unlogged == nil {
+		st.Unlogged = map[string]uint64{}
 	}
 	for sc, c := range st.Cool {
 		if now.Sub(c.Last) >= CooldownReset {

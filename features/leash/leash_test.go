@@ -1040,3 +1040,32 @@ func TestAgentRuleRefusedWhileRotationHeld(t *testing.T) {
 		t.Fatalf("after the move: %v", err)
 	}
 }
+
+// An agent's state read back after a lock (VAULT-MESSAGING §12.3): a
+// window whose only refusal was written singly is stored with counts and
+// no unlogged (omitempty), and the next refusal in that window is counted,
+// not a panic on a nil map that ends the vault (staging, release 33).
+func TestAgentStateReadBackMidWindow(t *testing.T) {
+	r := newRig(t)
+	if d := r.decide(t0, "settings.get", `{}`); d != vault.AgentDeny {
+		t.Fatalf("first: %v", d)
+	}
+	b, err := json.Marshal(r.f.d.Agents[agent])
+	if err != nil {
+		t.Fatal(err)
+	}
+	var back AgentState
+	if err := json.Unmarshal(b, &back); err != nil {
+		t.Fatal(err)
+	}
+	if back.Counts == nil || back.Unlogged != nil {
+		t.Fatalf("not the stored shape this is about: %s", b)
+	}
+	r.f.d.Agents[agent] = &back
+	if d := r.decide(t0.Add(time.Second), "settings.get", `{}`); d != vault.AgentDeny {
+		t.Fatalf("after the read-back: %v", d)
+	}
+	if st := r.f.d.Agents[agent]; st.Counts[KindThrottled]+st.Counts[KindRefused] != 2 || st.Unlogged[KindThrottled]+st.Unlogged[KindRefused] != 1 {
+		t.Fatalf("counted: %+v %+v", st.Counts, st.Unlogged)
+	}
+}

@@ -19,6 +19,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strconv"
 	"sync"
 	"time"
 
@@ -127,9 +128,39 @@ func Serve(c net.Conn, p Platform) int {
 		case code := <-pr.exit:
 			return code
 		default:
-			return ExitLocked
 		}
+		return channelEndedExit(m != nil)
 	}
+}
+
+// logPanic logs a run loop's panic, one attribute per frame, innermost
+// first: the supervisor cuts each value it forwards to 120 bytes and takes
+// at most eight.
+func (pr *proc) logPanic(pe *enclave.PanicError) {
+	args := []any{"type", pe.Type, "runtime", pe.Runtime}
+	for i, fr := range pe.Frames {
+		if i == logFrames {
+			break
+		}
+		args = append(args, "at"+strconv.Itoa(i), fr)
+	}
+	pr.log.Warn("vault run loop panicked; zeroized without flushing", args...)
+}
+
+// logFrames is how many frames of a panic the vault process logs: with
+// type and runtime, the eight attributes the supervisor forwards (KindLog).
+const logFrames = 6
+
+// channelEndedExit is the exit code when the supervisor's channel ended
+// with no exit decided: ExitLocked after the supervisor's lock (which
+// takes the manager first) or a refused open; ExitChannel when a vault was
+// still running, which the crash zeroized without a flush, lifecycle
+// "locked" or vault.locking.
+func channelEndedExit(running bool) int {
+	if running {
+		return ExitChannel
+	}
+	return ExitLocked
 }
 
 func (pr *proc) handle(ctx context.Context, f *hostproto.Frame) [][]byte {
@@ -243,20 +274,42 @@ func (pr *proc) run(ctx context.Context, m *vault.Manager) {
 	err := enclave.RunRecovered(ctx, m)
 	pr.runDone <- err
 	if ctx.Err() != nil {
-		return // locked by the supervisor
+		// Locked by the supervisor, which lock() answers. A panic in that
+		// window is logged all the same, and lock() answers it as an error.
+		var pe *enclave.PanicError
+		if errors.As(err, &pe) {
+			pr.logPanic(pe)
+		}
+		return
 	}
-	switch {
-	case errors.Is(err, vault.ErrSplitBrain):
-		pr.log.Warn("split brain: newer state written elsewhere; zeroized without flushing")
-		pr.exit <- ExitSplitBrain
-	case m.Locked():
-		pr.exit <- ExitLocked
-	default:
-		pr.log.Warn("vault run loop ended", "error", errText(err))
+	code, lockFirst := pr.runEnded(err, m.Locked())
+	if lockFirst {
 		lctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		_ = m.Lock(lctx)
 		cancel()
-		pr.exit <- ExitError
+	}
+	pr.exit <- code
+}
+
+// runEnded decides how the process ends after a run loop that ended on its
+// own with err, the manager locked or not: the exit code, and whether the
+// vault is to be locked first (a loop that ended with an error, unlocked).
+// Only a vault that locked itself (and so reported "locked" and sent
+// vault.locking) exits ExitLocked: a panic zeroized it without either.
+func (pr *proc) runEnded(err error, locked bool) (code int, lockFirst bool) {
+	var pe *enclave.PanicError
+	switch {
+	case errors.Is(err, vault.ErrSplitBrain):
+		pr.log.Warn("split brain: newer state written elsewhere; zeroized without flushing")
+		return ExitSplitBrain, false
+	case errors.As(err, &pe):
+		pr.logPanic(pe)
+		return ExitError, false
+	case locked:
+		return ExitLocked, false
+	default:
+		pr.log.Warn("vault run loop ended", "error", errText(err))
+		return ExitError, true
 	}
 }
 
@@ -272,7 +325,16 @@ func (pr *proc) lock(ctx context.Context, reason string) [][]byte {
 		return hostproto.Strings(hostproto.StatusOK)
 	}
 	cancel()
-	<-done
+	var pe *enclave.PanicError
+	if errors.As(<-done, &pe) {
+		// The loop panicked as the lock began: the vault is zeroized
+		// without the lock's flush, lifecycle "locked" or vault.locking, so
+		// the lock is not answered as done (logged by run).
+		if reason == vault.LockDelete {
+			return hostproto.Strings(vaultipc.StatusNotDeleted)
+		}
+		return hostproto.Strings(hostproto.StatusError)
+	}
 	if reason == vault.LockDelete {
 		var lcancel context.CancelFunc
 		ctx, lcancel = context.WithTimeout(ctx, vaultipc.DeleteLockTimeout-vaultipc.DeadlineMargin)

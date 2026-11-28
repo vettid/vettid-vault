@@ -629,6 +629,10 @@ func (h *procHost) LockReason(ctx context.Context, id, reason string) (bool, err
 	if len(r) > 0 && string(r[0]) == vaultipc.StatusSplitBrain {
 		return true, vault.ErrSplitBrain
 	}
+	if len(r) > 0 && string(r[0]) == hostproto.StatusError {
+		h.endedInLock(id)
+		return true, errEndedInLock
+	}
 	if len(r) > 0 && string(r[0]) == vaultipc.StatusNotDeleted && reason == vault.LockDelete {
 		return true, errNotDeleted
 	}
@@ -675,6 +679,9 @@ func (h *procHost) LockRequest(ctx context.Context, id, unlockID string, enqueue
 		// No clear answer: the process is ended without its flush, as a
 		// lock that does not answer in time (§12.3); the vault is locked.
 		h.kill(p)
+		if err == nil && len(r) > 0 && string(r[0]) == hostproto.StatusError {
+			h.endedInLock(id)
+		}
 		if err == nil {
 			err = errSpawn
 		}
@@ -682,6 +689,22 @@ func (h *procHost) LockRequest(ctx context.Context, id, unlockID string, enqueue
 	}
 	h.stop(p)
 	return enclave.CodeLocked, nil
+}
+
+// errEndedInLock is a lock that a vault process answered with an error:
+// its run loop panicked as the lock began.
+var errEndedInLock = errors.New("supervisor: the vault ended while it was being locked")
+
+// endedInLock tells the parent of a vault that ended without its lock's
+// flush and without a lifecycle "locked" (its run loop panicked as the
+// lock began): stopped, as an error, so that its lease is let go.
+func (h *procHost) endedInLock(id string) {
+	if h.s.log != nil { // nil only in tests that build a bare Supervisor
+		h.s.log.Warn("vault ended while being locked, without its final flush", "vault_id", id)
+	}
+	if h.s.link != nil {
+		h.s.link.notify(hostproto.KindStopped, hostproto.Strings(id, hostproto.StopError)...)
+	}
 }
 
 // RecoveryRefusal implements enclave.Host: the running vault's process
@@ -1416,7 +1439,13 @@ func (p *vproc) notify(f *hostproto.Frame) {
 		for i := 2; i+1 < len(f.Fields) && i < 2+16; i += 2 {
 			kv = append(kv, string(f.Fields[i]), truncate(string(f.Fields[i+1]), 120))
 		}
-		s.log.Info("vault: "+truncate(string(f.Fields[1]), 120), kv...)
+		// At the level the vault process logged it: a Warn (a panic, a run
+		// loop that ended) is not to read as routine.
+		lvl := slog.LevelInfo
+		if l := string(f.Fields[0]); l == slog.LevelWarn.String() || l == slog.LevelError.String() {
+			lvl = slog.LevelWarn
+		}
+		s.log.Log(context.Background(), lvl, "vault: "+truncate(string(f.Fields[1]), 120), kv...)
 	}
 }
 

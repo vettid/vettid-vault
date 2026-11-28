@@ -84,6 +84,10 @@ type Options struct {
 	DeviceAttest func(d *altchan.DeviceAttest, challenge [32]byte, now time.Time) (json.RawMessage, error)
 	// Lifecycle receives lifecycle events for the parent (§11.5).
 	Lifecycle func(LifecycleEvent)
+	// OnPanic, if set, is told of a panic in one of the vault's own
+	// goroutines (Manager.Go), after the vault was zeroized; a vault
+	// process logs it and ends as an error.
+	OnPanic func(*PanicError)
 	// OwnerCheckClock, if set, is the clock the daily owner check compares
 	// (§3.6; tests move it past a deadline while messages keep the real
 	// time). Nil: Now.
@@ -1540,6 +1544,9 @@ func (m *Manager) track(r Relay) Relay {
 	if r != nil {
 		m.relays = append(m.relays, r)
 	}
+	if c, ok := r.(*ClientRelay); ok {
+		c.goFn = m.Go // its stream reader is one of the vault's goroutines
+	}
 	return r
 }
 
@@ -1913,9 +1920,13 @@ const MessagingRelease = 29
 func stateSupported(st *State) bool { return st.MessagingRelease >= MessagingRelease }
 
 // Crash discards the in-memory vault without flushing (tests: process
-// death).
+// death; a panic). It waits at most crashLockWait for the manager's lock: a
+// panic that left it held (no deferred unlock) must not hang the end, and
+// the vault process then ends (Options.OnPanic), which wipes its memory.
 func (m *Manager) Crash() {
-	m.mu.Lock()
+	if !m.tryLockFor(crashLockWait) {
+		return
+	}
 	defer m.mu.Unlock()
 	m.zeroize()
 }

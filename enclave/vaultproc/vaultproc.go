@@ -116,20 +116,7 @@ func Serve(c net.Conn, p Platform) int {
 		pr.conn.Close()
 		return code
 	case <-pr.conn.Done():
-		// The supervisor closed the channel (after a lock or a refused
-		// open) or died: whatever runs here ends with the process.
-		pr.mu.Lock()
-		m := pr.mgr
-		pr.mu.Unlock()
-		if m != nil {
-			m.Crash()
-		}
-		select {
-		case code := <-pr.exit:
-			return code
-		default:
-		}
-		return channelEndedExit(m != nil)
+		return pr.channelEnded()
 	}
 }
 
@@ -144,12 +131,31 @@ func (pr *proc) logPanic(pe *enclave.PanicError) {
 		}
 		args = append(args, "at"+strconv.Itoa(i), fr)
 	}
-	pr.log.Warn("vault run loop panicked; zeroized without flushing", args...)
+	pr.log.Warn("vault panicked; zeroized without flushing", args...)
 }
 
 // logFrames is how many frames of a panic the vault process logs: with
 // type and runtime, the eight attributes the supervisor forwards (KindLog).
 const logFrames = 6
+
+// channelEnded is the end of a process whose channel ended: the supervisor
+// closed it (after a lock or a refused open) or died. A vault still running
+// is zeroized (Crash) and the process ends as an error; an exit already
+// decided stands.
+func (pr *proc) channelEnded() int {
+	pr.mu.Lock()
+	m := pr.mgr
+	pr.mu.Unlock()
+	if m != nil {
+		m.Crash()
+	}
+	select {
+	case code := <-pr.exit:
+		return code
+	default:
+	}
+	return channelEndedExit(m != nil)
+}
 
 // channelEndedExit is the exit code when the supervisor's channel ended
 // with no exit decided: ExitLocked after the supervisor's lock (which
@@ -282,7 +288,13 @@ func (pr *proc) run(ctx context.Context, m *vault.Manager) {
 		}
 		return
 	}
-	code, lockFirst := pr.runEnded(err, m.Locked())
+	// Not m.Locked() after a panic: it waits for the manager's lock, which
+	// a panic may have left held.
+	locked := false
+	if !errors.Is(err, vault.ErrPanic) {
+		locked = m.Locked()
+	}
+	code, lockFirst := pr.runEnded(err, locked)
 	if lockFirst {
 		lctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		_ = m.Lock(lctx)
@@ -414,5 +426,16 @@ func (pr *proc) vaultOptions(cfg enclave.Config) vault.Options {
 	return vault.Options{HTTP: &http.Client{Transport: chanTransport{ch: pr.ch}, Timeout: 75 * time.Second}, WebSocket: false,
 		PollWait: pr.p.PollWait, Push: pushGateway(cfg.PushURL, pr.ch), Calls: callsIssuer(cfg.CallsURL, pr.ch), Transfers: chanGate{ch: pr.ch},
 		Counter: chanCounter{ch: pr.ch}, HeavyPermit: heavyPermit(pr.ch), CodePermit: codePermit(pr.ch), MarkDeleting: pr.ch.markDeleting,
-		ConfirmAppKey: pr.ch.confirmAppKey}
+		ConfirmAppKey: pr.ch.confirmAppKey, OnPanic: pr.goroutinePanicked}
+}
+
+// goroutinePanicked is Options.OnPanic: a panic in one of the vault's own
+// goroutines, the vault already zeroized; logged, and the process ends as
+// an error (Serve takes the first exit).
+func (pr *proc) goroutinePanicked(pe *vault.PanicError) {
+	pr.logPanic(pe)
+	select {
+	case pr.exit <- ExitError:
+	default:
+	}
 }

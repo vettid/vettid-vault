@@ -98,7 +98,8 @@ func (h managerHost) DeferBlob(s *Session, id string, key, sum []byte, size int,
 	var want [32]byte
 	copy(want[:], sum)
 	maxBlob := m.attMaxBlob()
-	go m.runBlobCall(r, p.ID, req, rkey, id, m.blobMailbox(), key, want, size, maxBlob, call)
+	pid, mbx := p.ID, m.blobMailbox() // read now, as the go statement's arguments were
+	m.Go(func() { m.runBlobCall(r, pid, req, rkey, id, mbx, key, want, size, maxBlob, call) })
 	return nil
 }
 

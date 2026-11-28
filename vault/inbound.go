@@ -112,7 +112,7 @@ func (m *Manager) Run(ctx context.Context) error {
 	// a collect that blocks); its own timer locks the vault.
 	wctx, stopWatch := context.WithCancel(ctx)
 	defer stopWatch()
-	go m.idleWatch(wctx)
+	m.Go(func() { m.idleWatch(wctx) })
 	refused := 0
 	for {
 		_, err := m.Step(ctx)

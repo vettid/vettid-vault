@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/vettid/vettid-vault/enclave"
 	"github.com/vettid/vettid-vault/internal/hostproto"
 	"github.com/vettid/vettid-vault/internal/vaultipc"
 )
@@ -71,5 +72,37 @@ func TestALockAnsweredWithAnErrorTellsTheParent(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("the parent was not told")
+	}
+}
+
+// Both lock paths of a member's lock request, the vault process answering
+// with an error (its loop panicked as the lock began): the vault counts as
+// locked, and the parent is told it stopped as an error.
+func TestALockRequestAnsweredWithAnErrorTellsTheParent(t *testing.T) {
+	opened := time.Date(2026, 10, 23, 12, 0, 0, 0, time.UTC)
+	for _, unlockID := range []string{"", "0123456789abcdef0123456789abcdef"} {
+		pa, pb := net.Pipe()
+		got := make(chan *hostproto.Frame, 8)
+		parent := hostproto.NewConn(pb, nil, func(f *hostproto.Frame) { got <- f })
+		c := hostproto.NewConn(pa, nil, nil)
+		l := &link{}
+		l.set(c)
+		s := &Supervisor{log: slog.New(slog.NewTextHandler(io.Discard, nil)), link: l, now: time.Now, activity: map[string]time.Time{}}
+		h := &procHost{s: s, cfg: ProcConfig{LockTimeout: 5 * time.Second}, procs: map[string]*vproc{}}
+		newReqProc(t, h, "aaaa", opened, func(*hostproto.Frame) [][]byte { return hostproto.Strings(hostproto.StatusError) })
+		code, _ := h.LockRequest(context.Background(), "aaaa", unlockID, opened.Add(time.Second))
+		if code != enclave.CodeLocked {
+			t.Fatalf("%q: code %s", unlockID, code)
+		}
+		select {
+		case f := <-got:
+			if f.Kind != hostproto.KindStopped || string(f.Fields[1]) != hostproto.StopError {
+				t.Fatalf("%q: parent got %v %q", unlockID, f.Kind, f.Fields)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("%q: the parent was not told", unlockID)
+		}
+		c.Close()
+		parent.Close()
 	}
 }

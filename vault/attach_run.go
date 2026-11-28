@@ -147,7 +147,8 @@ func (m *Manager) attStart(parent context.Context) {
 	}
 	ctx, cancel := context.WithCancel(parent)
 	m.att = &attRunner{ctx: ctx, cancel: cancel, wake: make(chan struct{}, 1), running: map[string]bool{}, fetching: map[string]int{}, lastRun: map[string]time.Time{}}
-	go m.attLoop(m.att)
+	r := m.att
+	m.Go(func() { m.attLoop(r) })
 }
 
 // attStop ends the runner (zeroize): transfers in flight are abandoned,
@@ -216,7 +217,7 @@ func (m *Manager) attPass(r *attRunner) bool {
 	m.attFlushThenDrain(r.ctx)
 	m.mu.Unlock()
 	for _, j := range starts {
-		go j()
+		m.Go(j)
 	}
 	m.attMaintain(r, mt)
 	return true

@@ -6,6 +6,7 @@ import (
 	"crypto/cipher"
 	"crypto/rand"
 	"encoding/json"
+	"os"
 	"strconv"
 	"sync"
 	"time"
@@ -68,7 +69,16 @@ func (cv *capacityVault) handle(ch channel, done <-chan struct{}, f [][]byte) []
 				return hostproto.Strings(hostproto.StatusError)
 			}
 			cv.state = s
-			go idleLoop(ch, done, s, vault.LongPollWait)
+			go func() {
+				// A panic ends the capacity process as an error (it holds no
+				// vault): never a silent end with GOTRACEBACK=none.
+				defer func() {
+					if r := recover(); r != nil {
+						os.Exit(ExitError)
+					}
+				}()
+				idleLoop(ch, done, s, vault.LongPollWait)
+			}()
 		}
 		suite.Wipe(k)
 	case "code":

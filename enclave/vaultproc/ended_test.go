@@ -29,7 +29,7 @@ func TestRunEndedTellsAPanicFromALock(t *testing.T) {
 		lockFirst bool
 		log       string
 	}{
-		{pe, true, ExitError, false, "vault run loop panicked"},
+		{pe, true, ExitError, false, "vault panicked"},
 		{vault.ErrSplitBrain, true, ExitSplitBrain, false, "split brain"},
 		{vault.ErrLocked, true, ExitLocked, false, ""},
 		{errors.New("relay"), false, ExitError, true, "vault run loop ended"},
@@ -69,12 +69,31 @@ func TestALockMetByAPanicIsAnError(t *testing.T) {
 		pr.mgr, pr.cancel, pr.runDone = m, cancel, make(chan error, 1)
 		cancel() // the lock's cancel came first
 		pr.run(ctx, m)
-		if !strings.Contains(buf.String(), "vault run loop panicked") || len(pr.exit) != 0 {
+		if !strings.Contains(buf.String(), "vault panicked") || len(pr.exit) != 0 {
 			t.Fatalf("%q: log %q, exits %d", c.reason, buf.String(), len(pr.exit))
 		}
 		// The lock that cancelled it reads the loop's end, which run left.
 		if r := pr.lock(context.Background(), c.reason); string(r[0]) != c.want {
 			t.Fatalf("%q: answered %q", c.reason, r[0])
 		}
+	}
+}
+
+// A channel that ended under a running vault zeroizes it and ends the
+// process as an error; with no vault running (the supervisor's lock took
+// it first), as a lock; an exit already decided stands.
+func TestAChannelEndZeroizesARunningVault(t *testing.T) {
+	m := &vault.Manager{}
+	pr := &proc{mgr: m, exit: make(chan int, 2)}
+	if code := pr.channelEnded(); code != ExitChannel || !m.Locked() {
+		t.Fatalf("running: %d, locked %v", code, m.Locked())
+	}
+	if code := (&proc{exit: make(chan int, 2)}).channelEnded(); code != ExitLocked {
+		t.Fatalf("none running: %d", code)
+	}
+	decided := &proc{mgr: &vault.Manager{}, exit: make(chan int, 2)}
+	decided.exit <- ExitSplitBrain
+	if code := decided.channelEnded(); code != ExitSplitBrain {
+		t.Fatalf("decided: %d", code)
 	}
 }

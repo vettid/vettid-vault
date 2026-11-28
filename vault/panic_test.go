@@ -142,7 +142,9 @@ func TestAGoroutinePanicStoresNothingAndIsWhatRunReturns(t *testing.T) {
 		t.Fatalf("header after a panic: %v", err)
 	}
 	var got *PanicError
-	if err := (&Manager{locked: true, panicErr: m.panicErr}).Run(context.Background()); !errors.As(err, &got) || got != pe {
+	locked := &Manager{locked: true}
+	locked.panicErr.Store(pe)
+	if err := locked.Run(context.Background()); !errors.As(err, &got) || got != pe {
 		t.Fatalf("Run returned %v", err)
 	}
 	if err := (&Manager{locked: true}).Run(context.Background()); !errors.Is(err, ErrLocked) {

@@ -247,6 +247,7 @@ func TestAPanicInAnInlineLockedRegionIsReported(t *testing.T) {
 				panic(r)
 			}
 			m.mu.Lock()
+			m.dirty = false // the cleanup's work, under the lock
 			m.mu.Unlock()
 		}()
 		m.mu.Lock()

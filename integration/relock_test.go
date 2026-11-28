@@ -84,7 +84,7 @@ func TestUnlockAfterAnAgentsRequestsWhileLocked(t *testing.T) {
 	if _, err := app.SessionApprove(ctx, rid, 0); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := agent.AgentRequest(ctxT(t, 30*time.Second), "item.list", nil); err != nil {
+	if _, err := agent.AgentRequest(ctxT(t, 30*time.Second), "catalog", nil); err != nil {
 		t.Fatalf("before the lock: %v", err)
 	}
 
@@ -97,7 +97,7 @@ func TestUnlockAfterAnAgentsRequestsWhileLocked(t *testing.T) {
 		go func() {
 			short, cancel := context.WithTimeout(ctx, 5*time.Second)
 			defer cancel()
-			_, _ = agent.AgentRequest(short, "item.list", nil)
+			_, _ = agent.AgentRequest(short, "catalog", nil)
 		}()
 	}
 	time.Sleep(6 * time.Second)
@@ -109,7 +109,7 @@ func TestUnlockAfterAnAgentsRequestsWhileLocked(t *testing.T) {
 	if r := s.vaultRow(vid); r.State != "unlocked" {
 		t.Fatalf("the vault ended itself after the unlock: %+v", r)
 	}
-	if _, err := agent.AgentRequest(ctxT(t, 30*time.Second), "item.list", nil); err != nil {
+	if _, err := agent.AgentRequest(ctxT(t, 30*time.Second), "catalog", nil); err != nil {
 		t.Fatalf("after the unlock: %v", err)
 	}
 	mustOK(t, req(t, app, "vault.status", `{}`))

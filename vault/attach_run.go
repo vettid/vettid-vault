@@ -203,7 +203,9 @@ func (m *Manager) attLoop(r *attRunner) {
 func (m *Manager) attPassLocked(r *attRunner) (starts []attJob, mt *attWork, ok bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.locked || m.st == nil || m.att != r {
+	if m.locked || m.st == nil || m.att != r || m.Panicked() {
+		// After a panic the in-memory state may be half changed: no pass
+		// erases, discards or uploads on its word.
 		return nil, mt, false
 	}
 	now := m.attNow()

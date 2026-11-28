@@ -165,3 +165,18 @@ func TestAGoroutinePanicStoresNothingAndIsWhatRunReturns(t *testing.T) {
 		t.Fatal("not zeroized while OnPanic was still running")
 	}
 }
+
+// Nor does the attachments runner act on the vault's word after a panic:
+// no pass (erase, discard, upload) and no object written.
+func TestAfterAPanicTheAttachmentsRunnerDoesNothing(t *testing.T) {
+	m := &Manager{st: &State{}}
+	r := &attRunner{lastRun: map[string]time.Time{}}
+	m.att = r
+	m.panicErr.Store(&PanicError{Type: "runtime.plainError"})
+	if _, _, ok := m.attPassLocked(r); ok {
+		t.Fatal("a pass ran after a panic")
+	}
+	if _, err := m.putObject(r, "k", []byte("x")); !errors.Is(err, ErrLocked) {
+		t.Fatalf("an object written after a panic: %v", err)
+	}
+}

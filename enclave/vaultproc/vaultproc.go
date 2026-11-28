@@ -448,10 +448,22 @@ func (pr *proc) vaultOptions(cfg enclave.Config) vault.Options {
 // goroutines, the vault already zeroized; logged, and the process ends as
 // an error (Serve takes the first exit).
 func (pr *proc) goroutinePanicked(pe *vault.PanicError) {
-	// The end first: the log can wait for a channel that is full.
+	// The log first, so that Serve's flush at the exit carries it, but not
+	// waited for beyond panicLogWait: a full channel cannot hold the end.
+	logged := make(chan struct{})
+	go func() {
+		defer close(logged)
+		pr.logPanic(pe)
+	}()
+	select {
+	case <-logged:
+	case <-time.After(panicLogWait):
+	}
 	select {
 	case pr.exit <- ExitError:
 	default:
 	}
-	pr.logPanic(pe)
 }
+
+// panicLogWait bounds goroutinePanicked's wait for its log to be queued.
+const panicLogWait = time.Second

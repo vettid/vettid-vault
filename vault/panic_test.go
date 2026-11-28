@@ -104,8 +104,15 @@ func TestAGoroutinePanicEndsTheVault(t *testing.T) {
 		case <-time.After(crashLockWait + 3*time.Second):
 			t.Fatalf("held %v: not reported", held)
 		}
-		if !held && !m.Locked() {
-			t.Fatal("not zeroized")
+		if !held {
+			// Told first, zeroized right after.
+			deadline := time.Now().Add(5 * time.Second)
+			for !m.Locked() && time.Now().Before(deadline) {
+				time.Sleep(10 * time.Millisecond)
+			}
+			if !m.Locked() {
+				t.Fatal("not zeroized")
+			}
 		}
 	}
 }
@@ -117,5 +124,36 @@ func TestARuntimePointerErrorKeepsItsText(t *testing.T) {
 	pe := catch(func() { _ = x.(string) })
 	if pe.Type != "*runtime.TypeAssertionError" || !strings.Contains(pe.Runtime, "interface conversion") {
 		t.Fatalf("%+v", pe)
+	}
+}
+
+// The panic is told before the vault reads as locked, so that nothing ends
+// it as a lock meanwhile, and Run returns it whatever ended the loop.
+func TestAGoroutinePanicIsToldBeforeTheVaultLocks(t *testing.T) {
+	lockedWhenTold := make(chan bool, 1)
+	var m *Manager
+	m = &Manager{opt: Options{OnPanic: func(*PanicError) { lockedWhenTold <- m.Locked() }}}
+	m.Go(func() { _ = indexPanic(2) })
+	select {
+	case locked := <-lockedWhenTold:
+		if locked {
+			t.Fatal("the vault read as locked before the panic was told")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("not told")
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for !m.Locked() && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !m.Locked() {
+		t.Fatal("not zeroized after")
+	}
+	var pe *PanicError
+	if err := m.withPanic(ErrLocked); !errors.As(err, &pe) {
+		t.Fatalf("Run would return %v", err)
+	}
+	if err := (&Manager{}).withPanic(ErrLocked); err != ErrLocked {
+		t.Fatalf("no panic: %v", err)
 	}
 }

@@ -294,6 +294,9 @@ type Hooks struct {
 
 // Manager is one unlocked vault.
 type Manager struct {
+	// panicErr is the first panic of one of the vault's goroutines
+	// (Manager.Go): Run returns it, whatever else ended the loop.
+	panicErr atomic.Pointer[PanicError]
 	// removingOwn: removeConnection is applying the member's own removal
 	// (card GC #6875, NoticeOwnRemoval).
 	removingOwn bool

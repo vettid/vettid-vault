@@ -21,6 +21,7 @@ import (
 	"os"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/vettid/vettid-vault/enclave"
@@ -88,6 +89,9 @@ type proc struct {
 	cancel  context.CancelFunc
 	runDone chan error
 	exit    chan int
+	// panicLogged: the vault's panic is logged once (OnPanic and the run
+	// loop's end both see it).
+	panicLogged atomic.Bool
 }
 
 // Serve runs the vault process on conn until it locks; it returns the exit
@@ -124,6 +128,9 @@ func Serve(c net.Conn, p Platform) int {
 // first: the supervisor cuts each value it forwards to 120 bytes and takes
 // at most eight.
 func (pr *proc) logPanic(pe *enclave.PanicError) {
+	if !pr.panicLogged.CompareAndSwap(false, true) {
+		return // told already: OnPanic first, then the run loop's end
+	}
 	args := []any{"type", pe.Type, "runtime", pe.Runtime}
 	for i, fr := range pe.Frames {
 		if i == logFrames {

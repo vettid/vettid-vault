@@ -44,6 +44,7 @@ func TestRunEndedTellsAPanicFromALock(t *testing.T) {
 		}
 	}
 	buf.Reset()
+	pr = &proc{log: slog.New(slog.NewTextHandler(&buf, nil))} // a panic is logged once per process
 	pr.runEnded(pe, true)
 	if !strings.Contains(buf.String(), `at0="vault.f x.go:1" at1="vault.g y.go:2"`) || !strings.Contains(buf.String(), "index out of range") {
 		t.Fatalf("panic log: %q", buf.String())
@@ -95,5 +96,23 @@ func TestAChannelEndZeroizesARunningVault(t *testing.T) {
 	decided.exit <- ExitSplitBrain
 	if code := decided.channelEnded(); code != ExitSplitBrain {
 		t.Fatalf("decided: %d", code)
+	}
+}
+
+// A panic in one of the vault's goroutines (Options.OnPanic) ends the
+// process as an error, logged once though the run loop's end sees it too.
+func TestAGoroutinePanicEndsTheProcessAsAnError(t *testing.T) {
+	var buf bytes.Buffer
+	pr := &proc{log: slog.New(slog.NewTextHandler(&buf, nil)), exit: make(chan int, 2)}
+	pe := &vault.PanicError{Type: "runtime.plainError", Frames: []string{"vault.f x.go:1"}}
+	pr.goroutinePanicked(pe)
+	if code := <-pr.exit; code != ExitError {
+		t.Fatalf("exit %d", code)
+	}
+	if code, _ := pr.runEnded(pe, true); code != ExitError {
+		t.Fatalf("run end %d", code)
+	}
+	if n := strings.Count(buf.String(), "vault panicked"); n != 1 {
+		t.Fatalf("logged %d times: %q", n, buf.String())
 	}
 }

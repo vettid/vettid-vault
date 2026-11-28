@@ -197,12 +197,14 @@ func (m *Manager) attLoop(r *attRunner) {
 	}
 }
 
-// attPass is one pass of the runner; false once the vault is locked.
-func (m *Manager) attPass(r *attRunner) bool {
+// attPassLocked is the part of a pass under m.mu, released by a deferred
+// unlock: a panic in it must not leave the lock held for attLoop's own
+// deferred cleanup, which takes it again (the recover would never run).
+func (m *Manager) attPassLocked(r *attRunner) (starts []attJob, mt *attWork, ok bool) {
 	m.mu.Lock()
+	defer m.mu.Unlock()
 	if m.locked || m.st == nil || m.att != r {
-		m.mu.Unlock()
-		return false
+		return nil, mt, false
 	}
 	now := m.attNow()
 	for id, t := range r.lastRun {
@@ -212,10 +214,18 @@ func (m *Manager) attPass(r *attRunner) bool {
 	}
 	m.attHousekeeping(now)
 	m.attBusyFetches(m.now())
-	starts := m.attSchedule(now)
-	mt := m.attMaintenanceWork(now)
+	starts = m.attSchedule(now)
+	mt = m.attMaintenanceWork(now)
 	m.attFlushThenDrain(r.ctx)
-	m.mu.Unlock()
+	return starts, mt, true
+}
+
+// attPass is one pass of the runner; false once the vault is locked.
+func (m *Manager) attPass(r *attRunner) bool {
+	starts, mt, ok := m.attPassLocked(r)
+	if !ok {
+		return false
+	}
 	for _, j := range starts {
 		m.Go(j)
 	}

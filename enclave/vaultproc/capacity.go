@@ -70,8 +70,10 @@ func (cv *capacityVault) handle(ch channel, done <-chan struct{}, f [][]byte) []
 			}
 			cv.state = s
 			go func() {
-				// A panic ends the capacity process as an error (it holds no
-				// vault): never a silent end with GOTRACEBACK=none.
+				// A panic ends the capacity process as an error, not a crash
+				// with no code (GOTRACEBACK=none): it holds no vault and has
+				// no log of its own, so the supervisor's "ended, error" is
+				// all that is said of it.
 				defer func() {
 					if r := recover(); r != nil {
 						os.Exit(ExitError)

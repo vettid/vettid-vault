@@ -12,9 +12,9 @@ import (
 	"time"
 )
 
-// ErrPanic reports a vault goroutine that panicked: the vault was zeroized
-// without a flush.
-var ErrPanic = errors.New("vault: run loop panicked")
+// ErrPanic reports a vault goroutine (the run loop or one of Manager.Go's)
+// that panicked: the vault was zeroized without a flush.
+var ErrPanic = errors.New("vault: a goroutine of the vault panicked")
 
 // PanicError is ErrPanic with what may be logged of the panic: the
 // value's type, the text of one of the Go runtime's own errors with its
@@ -98,13 +98,37 @@ func (m *Manager) Go(f func()) {
 	}()
 }
 
-// panicked zeroizes the vault after a panic in one of its goroutines and
-// reports it.
+// panicked handles a panic in one of the vault's goroutines. It is told
+// first (Options.OnPanic: a vault process logs it and decides its end as an
+// error), before the vault reads as locked, so that nothing ends it as a
+// lock meanwhile; Run returns it too (withPanic). Then the vault is
+// zeroized, waited for at most crashLockWait: a lock the panic left held
+// (the manager's or another the zeroize takes) must not hang the end, and
+// a vault process ends anyway, which wipes its memory.
 func (m *Manager) panicked(pe *PanicError) {
-	m.Crash()
+	m.panicErr.CompareAndSwap(nil, pe)
 	if h := m.opt.OnPanic; h != nil {
 		h(pe)
 	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		defer func() { _ = recover() }() // a zeroize that panics in turn changes nothing
+		m.Crash()
+	}()
+	select {
+	case <-done:
+	case <-time.After(crashLockWait):
+	}
+}
+
+// withPanic is what Run returns: a goroutine's panic over err (the loop
+// then ended because the panic zeroized the vault).
+func (m *Manager) withPanic(err error) error {
+	if pe := m.panicErr.Load(); pe != nil {
+		return pe
+	}
+	return err
 }
 
 // crashLockWait bounds Crash's wait for the manager's lock: a panic while

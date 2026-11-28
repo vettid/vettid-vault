@@ -98,7 +98,8 @@ func (m *Manager) Start(ctx context.Context) error {
 }
 
 // Run collects and processes batches until ctx ends or the vault locks.
-func (m *Manager) Run(ctx context.Context) error {
+func (m *Manager) Run(ctx context.Context) (err error) {
+	defer func() { err = m.withPanic(err) }()
 	if err := m.Start(ctx); err != nil {
 		return err
 	}

@@ -416,7 +416,7 @@ func (m *Manager) pushSync() {
 		return
 	}
 	if m.push == nil {
-		m.push = newPusher(m.opt.Push, m.pushTiming(), m.now, m.pushOutcome, m.callRinging())
+		m.push = newPusher(m.opt.Push, m.pushTiming(), m.now, m.pushOutcome, m.callRinging(), m.Go)
 	}
 	m.push.setReg(&pushReg{gen: m.pushGen, key: ed25519.NewKeyFromSeed(cur.WakeSeed), blob: cur.WakeBlob})
 }
@@ -543,7 +543,7 @@ func (m *Manager) pushLockWake(deposited map[string]bool) {
 // push.token-needed{reason} deposited to the app, in one flush.
 func (m *Manager) pushOutcome(o pushOutcome) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	defer m.unlockOnPanic()
 	if m.locked || m.st == nil || m.st.Push == nil || o.gen != m.pushGen {
 		return
 	}
@@ -645,14 +645,17 @@ type pusher struct {
 	outcomes chan pushOutcome
 }
 
-func newPusher(gw PushGateway, t PushTiming, now func() time.Time, apply func(pushOutcome), ringing func(string, time.Time) bool) *pusher {
+func newPusher(gw PushGateway, t PushTiming, now func() time.Time, apply func(pushOutcome), ringing func(string, time.Time) bool, goFn func(func())) *pusher {
 	if ringing == nil {
 		ringing = func(string, time.Time) bool { return false }
 	}
 	p := &pusher{gw: gw, t: t, now: now, apply: apply, ringing: ringing, s: newWakeSched(t), kick: make(chan struct{}, 1),
 		stopCh: make(chan struct{}), outcomes: make(chan pushOutcome, 16)}
-	go p.run()
-	go p.applier()
+	if goFn == nil {
+		goFn = func(f func()) { go f() }
+	}
+	goFn(p.run) // the vault's own goroutines (Manager.Go): a panic ends the vault, never silently
+	goFn(p.applier)
 	return p
 }
 

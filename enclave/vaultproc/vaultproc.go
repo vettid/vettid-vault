@@ -21,6 +21,7 @@ import (
 	"os"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/vettid/vettid-vault/enclave"
@@ -87,7 +88,13 @@ type proc struct {
 	mgr     *vault.Manager
 	cancel  context.CancelFunc
 	runDone chan error
+	// locking is the manager a lock() is locking (pr.mgr is nil by then),
+	// for a panic in it (requestPanicked).
+	locking *vault.Manager
 	exit    chan int
+	// panicLogged: the vault's panic is logged once (OnPanic and the run
+	// loop's end both see it).
+	panicLogged atomic.Bool
 }
 
 // Serve runs the vault process on conn until it locks; it returns the exit
@@ -116,20 +123,7 @@ func Serve(c net.Conn, p Platform) int {
 		pr.conn.Close()
 		return code
 	case <-pr.conn.Done():
-		// The supervisor closed the channel (after a lock or a refused
-		// open) or died: whatever runs here ends with the process.
-		pr.mu.Lock()
-		m := pr.mgr
-		pr.mu.Unlock()
-		if m != nil {
-			m.Crash()
-		}
-		select {
-		case code := <-pr.exit:
-			return code
-		default:
-		}
-		return channelEndedExit(m != nil)
+		return pr.channelEnded()
 	}
 }
 
@@ -137,6 +131,9 @@ func Serve(c net.Conn, p Platform) int {
 // first: the supervisor cuts each value it forwards to 120 bytes and takes
 // at most eight.
 func (pr *proc) logPanic(pe *enclave.PanicError) {
+	if !pr.panicLogged.CompareAndSwap(false, true) {
+		return // told already: OnPanic first, then the run loop's end
+	}
 	args := []any{"type", pe.Type, "runtime", pe.Runtime}
 	for i, fr := range pe.Frames {
 		if i == logFrames {
@@ -144,12 +141,31 @@ func (pr *proc) logPanic(pe *enclave.PanicError) {
 		}
 		args = append(args, "at"+strconv.Itoa(i), fr)
 	}
-	pr.log.Warn("vault run loop panicked; zeroized without flushing", args...)
+	pr.log.Warn("vault panicked; zeroized without flushing", args...)
 }
 
 // logFrames is how many frames of a panic the vault process logs: with
 // type and runtime, the eight attributes the supervisor forwards (KindLog).
 const logFrames = 6
+
+// channelEnded is the end of a process whose channel ended: the supervisor
+// closed it (after a lock or a refused open) or died. A vault still running
+// is zeroized (Crash) and the process ends as an error; an exit already
+// decided stands.
+func (pr *proc) channelEnded() int {
+	pr.mu.Lock()
+	m := pr.mgr
+	pr.mu.Unlock()
+	if m != nil {
+		m.Crash()
+	}
+	select {
+	case code := <-pr.exit:
+		return code
+	default:
+	}
+	return channelEndedExit(m != nil)
+}
 
 // channelEndedExit is the exit code when the supervisor's channel ended
 // with no exit decided: ExitLocked after the supervisor's lock (which
@@ -163,7 +179,17 @@ func channelEndedExit(running bool) int {
 	return ExitLocked
 }
 
-func (pr *proc) handle(ctx context.Context, f *hostproto.Frame) [][]byte {
+func (pr *proc) handle(ctx context.Context, f *hostproto.Frame) (reply [][]byte) {
+	// A request runs vault code (an open runs the unlock and every
+	// feature's Load): a panic in it ends the process as an error, logged,
+	// the vault zeroized, and the request answered as failed, as a panic
+	// in one of the vault's own goroutines does.
+	defer func() {
+		if r := recover(); r != nil {
+			pe := vault.DescribePanic(r)
+			reply = pr.requestPanicked(pe, f)
+		}
+	}()
 	switch f.Kind {
 	case vaultipc.KindOpen:
 		return pr.open(ctx, f.Fields)
@@ -282,7 +308,13 @@ func (pr *proc) run(ctx context.Context, m *vault.Manager) {
 		}
 		return
 	}
-	code, lockFirst := pr.runEnded(err, m.Locked())
+	// Not m.Locked() after a panic: it waits for the manager's lock, which
+	// a panic may have left held.
+	locked := false
+	if !errors.Is(err, vault.ErrPanic) {
+		locked = m.Locked()
+	}
+	code, lockFirst := pr.runEnded(err, locked)
 	if lockFirst {
 		lctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		_ = m.Lock(lctx)
@@ -319,7 +351,7 @@ func (pr *proc) runEnded(err error, locked bool) (code int, lockFirst bool) {
 func (pr *proc) lock(ctx context.Context, reason string) [][]byte {
 	pr.mu.Lock()
 	m, cancel, done := pr.mgr, pr.cancel, pr.runDone
-	pr.mgr = nil
+	pr.mgr, pr.locking = nil, m
 	pr.mu.Unlock()
 	if m == nil {
 		return hostproto.Strings(hostproto.StatusOK)
@@ -341,6 +373,14 @@ func (pr *proc) lock(ctx context.Context, reason string) [][]byte {
 		defer lcancel()
 	}
 	err := m.LockReason(ctx, reason)
+	if m.Panicked() {
+		// A goroutine panicked while the lock ran: zeroized without its
+		// flush, so not answered as done.
+		if reason == vault.LockDelete {
+			return hostproto.Strings(vaultipc.StatusNotDeleted)
+		}
+		return hostproto.Strings(hostproto.StatusError)
+	}
 	switch {
 	case errors.Is(err, vault.ErrSplitBrain):
 		return hostproto.Strings(vaultipc.StatusSplitBrain)
@@ -414,5 +454,56 @@ func (pr *proc) vaultOptions(cfg enclave.Config) vault.Options {
 	return vault.Options{HTTP: &http.Client{Transport: chanTransport{ch: pr.ch}, Timeout: 75 * time.Second}, WebSocket: false,
 		PollWait: pr.p.PollWait, Push: pushGateway(cfg.PushURL, pr.ch), Calls: callsIssuer(cfg.CallsURL, pr.ch), Transfers: chanGate{ch: pr.ch},
 		Counter: chanCounter{ch: pr.ch}, HeavyPermit: heavyPermit(pr.ch), CodePermit: codePermit(pr.ch), MarkDeleting: pr.ch.markDeleting,
-		ConfirmAppKey: pr.ch.confirmAppKey}
+		ConfirmAppKey: pr.ch.confirmAppKey, OnPanic: pr.goroutinePanicked}
 }
+
+// requestPanicked ends a request whose handling panicked: the running
+// vault, or the one being locked, is zeroized as after a goroutine's panic
+// (Manager.Fail: recorded, zeroized within its bound), and the process's
+// end is decided as an error. The request is answered as
+// failed: not_deleted for a deletion's lock, else error.
+func (pr *proc) requestPanicked(pe *vault.PanicError, f *hostproto.Frame) [][]byte {
+	pr.mu.Lock()
+	m := pr.mgr
+	if m == nil {
+		m = pr.locking
+	}
+	pr.mu.Unlock()
+	if m != nil {
+		if rec := m.RecordedPanic(); rec != nil {
+			pe = rec // described where it happened, under the manager's lock
+		}
+		m.Fail(pe)
+	}
+	// The process's end is decided here too, whatever the manager's options
+	// (logged once; the exit send does not wait).
+	pr.goroutinePanicked(pe)
+	if f.Kind == vaultipc.KindLock && len(f.Fields) == 1 && string(f.Fields[0]) == vault.LockDelete {
+		return hostproto.Strings(vaultipc.StatusNotDeleted)
+	}
+	return hostproto.Strings(hostproto.StatusError)
+}
+
+// goroutinePanicked is Options.OnPanic: a panic in one of the vault's own
+// goroutines, the vault already zeroized; logged, and the process ends as
+// an error (Serve takes the first exit).
+func (pr *proc) goroutinePanicked(pe *vault.PanicError) {
+	// The log first, so that Serve's flush at the exit carries it, but not
+	// waited for beyond panicLogWait: a full channel cannot hold the end.
+	logged := make(chan struct{})
+	go func() {
+		defer close(logged)
+		pr.logPanic(pe)
+	}()
+	select {
+	case <-logged:
+	case <-time.After(panicLogWait):
+	}
+	select {
+	case pr.exit <- ExitError:
+	default:
+	}
+}
+
+// panicLogWait bounds goroutinePanicked's wait for its log to be queued.
+const panicLogWait = time.Second

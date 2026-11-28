@@ -84,6 +84,11 @@ type Options struct {
 	DeviceAttest func(d *altchan.DeviceAttest, challenge [32]byte, now time.Time) (json.RawMessage, error)
 	// Lifecycle receives lifecycle events for the parent (§11.5).
 	Lifecycle func(LifecycleEvent)
+	// OnPanic, if set, is told of a panic in one of the vault's own
+	// goroutines (Manager.Go) or in a request (Manager.Fail), once it is
+	// recorded and while the zeroize runs; a vault process logs it and ends
+	// as an error.
+	OnPanic func(*PanicError)
 	// OwnerCheckClock, if set, is the clock the daily owner check compares
 	// (§3.6; tests move it past a deadline while messages keep the real
 	// time). Nil: Now.
@@ -290,6 +295,12 @@ type Hooks struct {
 
 // Manager is one unlocked vault.
 type Manager struct {
+	// panicErr is the first panic of one of the vault's goroutines
+	// (Manager.Go): Run returns it, whatever else ended the loop.
+	panicErr atomic.Pointer[PanicError]
+	// panicking is set the moment a panic is seen, before it is described
+	// and before any deferred unlock lets another goroutine in.
+	panicking atomic.Bool
 	// removingOwn: removeConnection is applying the member's own removal
 	// (card GC #6875, NoticeOwnRemoval).
 	removingOwn bool
@@ -1118,6 +1129,11 @@ func (m *Manager) allPeers() []*Peer {
 
 // persist flushes state. create = the first write (create-only objects).
 func (m *Manager) persist(ctx context.Context, create bool) error {
+	if m.Panicked() {
+		// A goroutine panicked (Manager.Go): the state may be half changed,
+		// and nothing of it is stored before the zeroize takes it.
+		return ErrLocked
+	}
 	if m.st == nil {
 		// Zeroized (a split brain, a crash): nothing is written. A caller
 		// that goes on after the loss reaches here, not a nil state.
@@ -1229,6 +1245,9 @@ func (m *Manager) writeHeader(ctx context.Context) error { return m.writeHeaderW
 // feature's handler, which holds its lock), as does a Required feature
 // that did not load.
 func (m *Manager) writeHeaderWith(ctx context.Context, features bool) error {
+	if m.Panicked() {
+		return ErrLocked // as persist: nothing is stored after a panic
+	}
 	if err := m.confirmAppKey(ctx); err != nil {
 		return err
 	}
@@ -1540,6 +1559,9 @@ func (m *Manager) track(r Relay) Relay {
 	if r != nil {
 		m.relays = append(m.relays, r)
 	}
+	if c, ok := r.(*ClientRelay); ok {
+		c.goFn = m.Go // its stream reader is one of the vault's goroutines
+	}
 	return r
 }
 
@@ -1587,7 +1609,7 @@ func (m *Manager) release(r Relay) {
 // error).
 func (m *Manager) Locked() bool {
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	defer m.unlockOnPanic()
 	return m.locked
 }
 
@@ -1595,7 +1617,7 @@ func (m *Manager) Locked() bool {
 // holds no secrets.
 func (m *Manager) Audit() []AuditEntry {
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	defer m.unlockOnPanic()
 	if m.st == nil {
 		return nil
 	}
@@ -1608,7 +1630,7 @@ func (m *Manager) Audit() []AuditEntry {
 // meets unchanged).
 func (m *Manager) FeatureEntries() []string {
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	defer m.unlockOnPanic()
 	if m.st == nil {
 		return nil
 	}
@@ -1623,7 +1645,7 @@ func (m *Manager) FeatureEntries() []string {
 // VaultID returns the vault id.
 func (m *Manager) VaultID() string {
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	defer m.unlockOnPanic()
 	if m.st == nil {
 		return ""
 	}
@@ -1638,7 +1660,7 @@ func (m *Manager) Lock(ctx context.Context) error { return m.LockReason(ctx, "")
 // §11.11.1; "" for none).
 func (m *Manager) LockReason(ctx context.Context, reason string) error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	defer m.unlockOnPanic()
 	if reason == LockDelete {
 		return m.deleteLocked(ctx, "host")
 	}
@@ -1741,7 +1763,9 @@ func (m *Manager) lockLocked(ctx context.Context) error {
 	// stored header (storedView).
 	vid := m.st.VaultID
 	m.zeroize()
-	m.report("locked", vid, m.opt.Release.PCR0)
+	if !m.Panicked() { // a panic's end is an error, never a lock (the process says so)
+		m.report("locked", vid, m.opt.Release.PCR0)
+	}
 	return err
 }
 
@@ -1782,7 +1806,9 @@ func (m *Manager) lockDeleting(ctx context.Context) error {
 	}
 	vid := m.st.VaultID
 	m.zeroize()
-	m.report("locked", vid, m.opt.Release.PCR0)
+	if !m.Panicked() { // a panic's end is an error, never a lock (the process says so)
+		m.report("locked", vid, m.opt.Release.PCR0)
+	}
 	return err
 }
 
@@ -1845,7 +1871,7 @@ func (m *Manager) CredentialBackup() *bool {
 // its own state, before anything is locked.
 func (m *Manager) RecoveryRefusal() string {
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	defer m.unlockOnPanic()
 	if m.locked || m.st == nil {
 		return ""
 	}
@@ -1913,9 +1939,13 @@ const MessagingRelease = 29
 func stateSupported(st *State) bool { return st.MessagingRelease >= MessagingRelease }
 
 // Crash discards the in-memory vault without flushing (tests: process
-// death).
+// death; a panic). It waits at most crashLockWait for the manager's lock: a
+// panic that left it held (no deferred unlock) must not hang the end, and
+// the vault process then ends (Options.OnPanic), which wipes its memory.
 func (m *Manager) Crash() {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	if !m.tryLockFor(crashLockWait) {
+		return
+	}
+	defer m.unlockOnPanic()
 	m.zeroize()
 }

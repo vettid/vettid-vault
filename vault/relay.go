@@ -131,6 +131,9 @@ type ClientRelay struct {
 	now  func() time.Time
 	g    *relayGuard  // this relay's calls and its key copy
 	fam  *relayFamily // the relays WithKey derives share it: Close closes them all
+	// goFn starts its goroutines (the manager's Go, set by track); nil
+	// for a plain goroutine.
+	goFn func(func())
 
 	mu      sync.Mutex
 	clients map[string]*relayclient.Client
@@ -653,7 +656,7 @@ func (r *ClientRelay) Collector(ctx context.Context, websocket bool) (Collector,
 	if err != nil {
 		return nil, err
 	}
-	return &wsCollector{s: s}, nil
+	return &wsCollector{s: s, goFn: r.goFn}, nil
 }
 
 // NewPollCollector returns a long-poll collector with a custom wait (tests
@@ -692,6 +695,7 @@ func (p *pollCollector) Close() error { return nil }
 // first, then takes whatever else arrives within a short window.
 type wsCollector struct {
 	s    *relayclient.Stream
+	goFn func(func()) // nil: a plain goroutine
 	mu   sync.Mutex
 	next chan wsItem
 	once sync.Once
@@ -705,7 +709,7 @@ type wsItem struct {
 func (w *wsCollector) start(ctx context.Context) {
 	w.once.Do(func() {
 		w.next = make(chan wsItem, MaxBatch)
-		go func() {
+		read := func() {
 			for {
 				m, err := w.s.Next(context.Background())
 				w.next <- wsItem{m, err}
@@ -714,7 +718,12 @@ func (w *wsCollector) start(ctx context.Context) {
 					return
 				}
 			}
-		}()
+		}
+		if w.goFn != nil {
+			w.goFn(read)
+		} else {
+			go read()
+		}
 	})
 }
 

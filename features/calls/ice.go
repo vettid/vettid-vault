@@ -156,7 +156,13 @@ func (p *Pool) Prime(s *vault.Session, now time.Time) {
 	p.sent = append(p.sent, now)
 	ctx, cancel := context.WithTimeout(context.Background(), RequestTime)
 	p.cancel = cancel
-	go p.fetch(ctx, cancel, is, PoolSize-len(p.creds), now, p.done)
+	n, done := PoolSize-len(p.creds), p.done
+	run := func() { p.fetch(ctx, cancel, is, n, now, done) }
+	if s != nil {
+		s.Go(run) // one of the vault's goroutines (Manager.Go)
+	} else {
+		go run()
+	}
 }
 
 // fetch makes one attempt and takes its answer: the URLs, and the credentials up to PoolSize. A failure is not

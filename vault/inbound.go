@@ -44,7 +44,7 @@ const (
 // collector. Run calls it; tests that drive Step call it once.
 func (m *Manager) Start(ctx context.Context) error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	defer m.unlockOnPanic()
 	if m.locked {
 		return ErrLocked
 	}
@@ -98,7 +98,8 @@ func (m *Manager) Start(ctx context.Context) error {
 }
 
 // Run collects and processes batches until ctx ends or the vault locks.
-func (m *Manager) Run(ctx context.Context) error {
+func (m *Manager) Run(ctx context.Context) (err error) {
+	defer func() { err = m.withPanic(err) }()
 	if err := m.Start(ctx); err != nil {
 		return err
 	}
@@ -112,7 +113,7 @@ func (m *Manager) Run(ctx context.Context) error {
 	// a collect that blocks); its own timer locks the vault.
 	wctx, stopWatch := context.WithCancel(ctx)
 	defer stopWatch()
-	go m.idleWatch(wctx)
+	m.Go(func() { m.idleWatch(wctx) })
 	refused := 0
 	for {
 		_, err := m.Step(ctx)
@@ -207,7 +208,7 @@ func (m *Manager) Step(ctx context.Context) (int, error) {
 
 func (m *Manager) getCollector(ctx context.Context) (Collector, error) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	defer m.unlockOnPanic()
 	if m.locked {
 		return nil, ErrLocked
 	}
@@ -244,7 +245,7 @@ const HeldAnswerHoldBound = 60 * time.Second
 // then ack; then deposit the outbox.
 func (m *Manager) ProcessBatch(ctx context.Context, c Collector, msgs []Message) error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	defer m.unlockOnPanic()
 	if m.locked {
 		return ErrLocked
 	}

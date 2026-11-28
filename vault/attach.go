@@ -1155,7 +1155,7 @@ func (m *Manager) MailboxBlobs(ctx context.Context) (BlobList, error) {
 // thumbnails (tests and tools).
 func (m *Manager) AttachEntries() []AttEntry {
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	defer m.unlockOnPanic()
 	if m.st == nil || m.st.Attach == nil {
 		return nil
 	}
@@ -1212,7 +1212,7 @@ func (m *Manager) attNow() time.Time {
 // vault could send).
 func (m *Manager) SendRaw(ctx context.Context, conn, typ string, body []byte) (string, error) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	defer m.unlockOnPanic()
 	if m.locked {
 		return "", ErrLocked
 	}

@@ -283,7 +283,7 @@ var errBlobGone = &relayclient.Error{Status: 404, Code: CodeBlobUnknown}
 // collected: its key's), nil for any other. Takes the lock.
 func (m *Manager) blobRelay(mb string) Relay {
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	defer m.unlockOnPanic()
 	if m.st == nil || mb == "" || mb == m.st.Relay.Mailbox {
 		return m.relay
 	}
@@ -344,7 +344,7 @@ func (m *Manager) deleteBlobIn(ctx context.Context, mb, id string) {
 // called with the lock held.
 func (m *Manager) ownRelays() []Relay {
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	defer m.unlockOnPanic()
 	out := []Relay{m.relay}
 	if m.st == nil || !m.relayRotation() {
 		return out
@@ -1115,7 +1115,7 @@ func (m *Manager) relayKeyBeforeBundle(ctx context.Context) (code string, wait t
 // key").
 func (m *Manager) relayMailboxUnknown(ctx context.Context) error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	defer m.unlockOnPanic()
 	if m.locked {
 		return ErrLocked
 	}
@@ -1284,7 +1284,7 @@ type RelayKeyStatus struct {
 // RelayKeyStatus returns the relay-key rotation's state (§3.4).
 func (m *Manager) RelayKeyStatus() RelayKeyStatus {
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	defer m.unlockOnPanic()
 	if m.st == nil {
 		return RelayKeyStatus{}
 	}

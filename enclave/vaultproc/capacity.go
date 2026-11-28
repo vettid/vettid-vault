@@ -6,6 +6,7 @@ import (
 	"crypto/cipher"
 	"crypto/rand"
 	"encoding/json"
+	"os"
 	"strconv"
 	"sync"
 	"time"
@@ -68,7 +69,18 @@ func (cv *capacityVault) handle(ch channel, done <-chan struct{}, f [][]byte) []
 				return hostproto.Strings(hostproto.StatusError)
 			}
 			cv.state = s
-			go idleLoop(ch, done, s, vault.LongPollWait)
+			go func() {
+				// A panic ends the capacity process as an error, not a crash
+				// with no code (GOTRACEBACK=none): it holds no vault and has
+				// no log of its own, so the supervisor's "ended, error" is
+				// all that is said of it.
+				defer func() {
+					if r := recover(); r != nil {
+						os.Exit(ExitError)
+					}
+				}()
+				idleLoop(ch, done, s, vault.LongPollWait)
+			}()
 		}
 		suite.Wipe(k)
 	case "code":

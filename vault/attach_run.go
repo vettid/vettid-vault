@@ -147,7 +147,8 @@ func (m *Manager) attStart(parent context.Context) {
 	}
 	ctx, cancel := context.WithCancel(parent)
 	m.att = &attRunner{ctx: ctx, cancel: cancel, wake: make(chan struct{}, 1), running: map[string]bool{}, fetching: map[string]int{}, lastRun: map[string]time.Time{}}
-	go m.attLoop(m.att)
+	r := m.att
+	m.Go(func() { m.attLoop(r) })
 }
 
 // attStop ends the runner (zeroize): transfers in flight are abandoned,
@@ -170,6 +171,10 @@ func (m *Manager) attLoop(r *attRunner) {
 	t := time.NewTimer(0)
 	defer t.Stop()
 	defer func() {
+		if r := recover(); r != nil {
+			m.recordFromCleanup(r) // a panic may hold m.mu: no cleanup, the vault ends
+			panic(r)
+		}
 		m.mu.Lock()
 		if m.att == r {
 			m.att = nil // the run loop ended; a new one starts another runner
@@ -196,12 +201,16 @@ func (m *Manager) attLoop(r *attRunner) {
 	}
 }
 
-// attPass is one pass of the runner; false once the vault is locked.
-func (m *Manager) attPass(r *attRunner) bool {
+// attPassLocked is the part of a pass under m.mu, released by a deferred
+// unlock: a panic in it must not leave the lock held for attLoop's own
+// deferred cleanup, which takes it again (the recover would never run).
+func (m *Manager) attPassLocked(r *attRunner) (starts []attJob, mt *attWork, ok bool) {
 	m.mu.Lock()
-	if m.locked || m.st == nil || m.att != r {
-		m.mu.Unlock()
-		return false
+	defer m.unlockOnPanic()
+	if m.locked || m.st == nil || m.att != r || m.Panicked() {
+		// After a panic the in-memory state may be half changed: no pass
+		// erases, discards or uploads on its word.
+		return nil, mt, false
 	}
 	now := m.attNow()
 	for id, t := range r.lastRun {
@@ -211,12 +220,20 @@ func (m *Manager) attPass(r *attRunner) bool {
 	}
 	m.attHousekeeping(now)
 	m.attBusyFetches(m.now())
-	starts := m.attSchedule(now)
-	mt := m.attMaintenanceWork(now)
+	starts = m.attSchedule(now)
+	mt = m.attMaintenanceWork(now)
 	m.attFlushThenDrain(r.ctx)
-	m.mu.Unlock()
+	return starts, mt, true
+}
+
+// attPass is one pass of the runner; false once the vault is locked.
+func (m *Manager) attPass(r *attRunner) bool {
+	starts, mt, ok := m.attPassLocked(r)
+	if !ok {
+		return false
+	}
 	for _, j := range starts {
-		go j()
+		m.Go(j)
 	}
 	m.attMaintain(r, mt)
 	return true
@@ -366,6 +383,10 @@ func (m *Manager) attReuploadBudget(e *AttEntry, now time.Time) bool {
 // returned to the system after a transfer of more than 1 MiB.
 func (m *Manager) transfer(r *attRunner, prio int, id string, deadline time.Time, fn func(ctx context.Context) int) {
 	defer func() {
+		if r := recover(); r != nil {
+			m.recordFromCleanup(r) // a panic may hold m.mu: no cleanup, the vault ends
+			panic(r)
+		}
 		m.mu.Lock()
 		if m.att == r {
 			r.slots--
@@ -475,7 +496,7 @@ func (m *Manager) fetchBlob(ctx context.Context, b AttBlob, maxBlob int) ([]byte
 // locked, and a deletion waits for a write under way (attWaitWrites).
 func (m *Manager) putObject(r *attRunner, key string, data []byte) (store.Version, error) {
 	m.mu.Lock()
-	if m.locked || m.att != r {
+	if m.locked || m.att != r || m.Panicked() {
 		m.mu.Unlock()
 		return "", ErrLocked
 	}
@@ -584,7 +605,7 @@ func deleteStored(ctx context.Context, st store.Store, key string, ver store.Ver
 // entry that is gone. Then it flushes and delivers the outbox.
 func (m *Manager) attApply(r *attRunner, id string, fn func(e *AttEntry, now time.Time)) bool {
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	defer m.unlockOnPanic()
 	if m.locked || m.st == nil || m.att != r {
 		return false
 	}
@@ -601,7 +622,7 @@ func (m *Manager) attApply(r *attRunner, id string, fn func(e *AttEntry, now tim
 
 func (m *Manager) attDrain(r *attRunner) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	defer m.unlockOnPanic()
 	if m.locked || m.st == nil || m.att != r {
 		return
 	}
@@ -982,6 +1003,10 @@ func (m *Manager) inFetchJob(r *attRunner, e *AttEntry) attJob {
 func (m *Manager) ownerFetchJob(r *attRunner, f *attFetch) attJob {
 	return func() {
 		defer func() {
+			if r := recover(); r != nil {
+				m.recordFromCleanup(r) // a panic may hold m.mu: no cleanup, the vault ends
+				panic(r)
+			}
 			m.mu.Lock()
 			if m.att == r {
 				if r.fetching[f.device]--; r.fetching[f.device] <= 0 {
@@ -993,7 +1018,7 @@ func (m *Manager) ownerFetchJob(r *attRunner, f *attFetch) attJob {
 		m.transfer(r, PrioOwnerFetch, "fetch:"+f.req.ID, f.at.Add(OwnerFetchStart), func(ctx context.Context) int {
 			answer := func(body []byte, code string) {
 				m.mu.Lock()
-				defer m.mu.Unlock()
+				defer m.unlockOnPanic()
 				if m.locked || m.st == nil || m.att != r {
 					return
 				}
@@ -1300,29 +1325,7 @@ func (m *Manager) attMaintain(r *attRunner, w *attWork) {
 		}
 	}
 	if len(w.missing) > 0 {
-		m.mu.Lock()
-		if !m.locked && m.st != nil && m.att == r {
-			now := m.attNow()
-			for _, id := range w.missing {
-				e := m.st.Attach.Entries[id]
-				if e == nil || e.Erasing || e.State != AttFetching || e.Blob != nil {
-					continue
-				}
-				if listed && list.MaxBytes > 0 && list.MaxBytes-list.UsedBytes < int64(envelope.BlobLen(e.Size)) {
-					continue // no room for it yet (§10.5.1 step 3)
-				}
-				m.attSendStatus(e.Conn, strictjson.NewBuilder().String("message_id", e.Msg).String("status", StatusMissing), now)
-				e.Asked, e.AskedAt = true, now
-				if e.Backoff == 0 {
-					e.Backoff = attwire.MissingFirst
-				} else {
-					e.Backoff = min(2*e.Backoff, attwire.MissingMax)
-				}
-				m.dirty = true
-			}
-			m.attFlushThenDrain(ctx)
-		}
-		m.mu.Unlock()
+		m.attAskMissing(ctx, r, w.missing, listed, list)
 	}
 	if w.purge && listed {
 		m.attPurge(r, list, cur)
@@ -1332,13 +1335,56 @@ func (m *Manager) attMaintain(r *attRunner, w *attWork) {
 	}
 }
 
+// attAskMissing asks the senders of the waiting attachments whose blobs
+// are missing for them again (§10.5.1 step 3), under m.mu, released by a
+// deferred unlock: a panic in it must not leave the lock held for attLoop's
+// own deferred cleanup (the recover would never run).
+func (m *Manager) attAskMissing(ctx context.Context, r *attRunner, missing []string, listed bool, list BlobList) {
+	m.mu.Lock()
+	defer m.unlockOnPanic()
+	if m.locked || m.st == nil || m.att != r {
+		return
+	}
+	now := m.attNow()
+	for _, id := range missing {
+		e := m.st.Attach.Entries[id]
+		if e == nil || e.Erasing || e.State != AttFetching || e.Blob != nil {
+			continue
+		}
+		if listed && list.MaxBytes > 0 && list.MaxBytes-list.UsedBytes < int64(envelope.BlobLen(e.Size)) {
+			continue // no room for it yet (§10.5.1 step 3)
+		}
+		m.attSendStatus(e.Conn, strictjson.NewBuilder().String("message_id", e.Msg).String("status", StatusMissing), now)
+		e.Asked, e.AskedAt = true, now
+		if e.Backoff == 0 {
+			e.Backoff = attwire.MissingFirst
+		} else {
+			e.Backoff = min(2*e.Backoff, attwire.MissingMax)
+		}
+		m.dirty = true
+	}
+	m.attFlushThenDrain(ctx)
+}
+
 // attPurge deletes every blob of the own mailbox older than 24 hours that
 // no entry names (§10.5.1 "Orphan blobs").
 func (m *Manager) attPurge(r *attRunner, list BlobList, rel Relay) {
-	m.mu.Lock()
-	if m.locked || m.st == nil || m.att != r {
-		m.mu.Unlock()
+	del, ok := m.attPurgeList(r, list)
+	if !ok {
 		return
+	}
+	for _, id := range del {
+		_ = rel.DeleteBlob(r.ctx, id)
+	}
+}
+
+// attPurgeList is attPurge's part under m.mu (a deferred unlock, as
+// attAskMissing's): the orphan blobs to delete, the purge recorded.
+func (m *Manager) attPurgeList(r *attRunner, list BlobList) ([]string, bool) {
+	m.mu.Lock()
+	defer m.unlockOnPanic()
+	if m.locked || m.st == nil || m.att != r || m.Panicked() {
+		return nil, false
 	}
 	now := m.attNow()
 	var del []string
@@ -1353,10 +1399,7 @@ func (m *Manager) attPurge(r *attRunner, list BlobList, rel Relay) {
 	m.st.attach().PurgedAt = now
 	m.dirty = true
 	_ = m.flushIfDirty(context.Background())
-	m.mu.Unlock()
-	for _, id := range del {
-		_ = rel.DeleteBlob(r.ctx, id)
-	}
+	return del, true
 }
 
 // attDrained notes that a collect returned less than a full batch: the

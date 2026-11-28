@@ -544,30 +544,46 @@ func done() *selftest.CapacityStats {
 func TestCapacityCodesSamplesMemory(t *testing.T) {
 	e := newFakeEnclave(4096, 300)
 	env := e.env()
+	// The dip lasts until the sampler has read both MemAvailable and
+	// MemFree during it, however long that takes: no fixed wait it could
+	// miss under load (-race), and no sample half in it, half out.
 	var mu sync.Mutex
 	dip := false
-	seen := make(chan struct{}, 1)
+	seenAvail, seenFree := make(chan struct{}, 1), make(chan struct{}, 1)
+	signal := func(c chan struct{}) {
+		select {
+		case c <- struct{}{}:
+		default:
+		}
+	}
 	avail := env.available
 	env.available = func() uint64 {
 		mu.Lock()
 		defer mu.Unlock()
 		if dip {
-			select {
-			case seen <- struct{}{}:
-			default:
-			}
+			signal(seenAvail)
 			return 1 * fakeMiB
 		}
 		return avail()
 	}
-	env.free = func() uint64 { return env.available() / 2 } // MemFree, read with it
+	env.free = func() uint64 { // MemFree, read with it: half of it
+		mu.Lock()
+		defer mu.Unlock()
+		if dip {
+			signal(seenFree)
+			return fakeMiB / 2
+		}
+		return avail() / 2
+	}
 	held := []heldVault{{p: funcProc{func(context.Context) *selftest.CapacityStats {
 		mu.Lock()
 		dip = true
 		mu.Unlock()
-		select {
-		case <-seen:
-		case <-time.After(2 * time.Second):
+		for _, c := range []chan struct{}{seenAvail, seenFree} {
+			select {
+			case <-c:
+			case <-time.After(time.Minute): // the test fails below rather than hang
+			}
 		}
 		mu.Lock()
 		dip = false

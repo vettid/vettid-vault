@@ -584,24 +584,24 @@ func (m *Manager) rotationCollector(ctx context.Context, main Collector) Collect
 	return &multiCollector{parts: parts, from: map[string]*collectPart{}, now: m.now, idle: wait,
 		gone: func(mb string) {
 			m.mu.Lock()
-			defer m.mu.Unlock()
+			defer m.unlockOnPanic()
 			if m.mailboxGone(mb, m.now()) {
 				_ = m.persist(ctx, false) // at once (a copy could register it again)
 			}
 		},
 		drained: func(mb string, got, held map[string]bool, at time.Time) {
 			m.mu.Lock()
-			defer m.mu.Unlock()
+			defer m.unlockOnPanic()
 			m.noteDrained(mb, got, held, at)
 		},
 		given: func(mb string, ids []string) {
 			m.mu.Lock()
-			defer m.mu.Unlock()
+			defer m.unlockOnPanic()
 			m.noteGiven(mb, ids)
 		},
 		stopped: func(mb string) bool {
 			m.mu.Lock()
-			defer m.mu.Unlock()
+			defer m.unlockOnPanic()
 			if m.st == nil {
 				return true
 			}
@@ -622,7 +622,7 @@ func (m *Manager) rotationCollector(ctx context.Context, main Collector) Collect
 // which stops the collects of the old mailbox before any.
 func (m *Manager) beforeCollect(ctx context.Context) error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	defer m.unlockOnPanic()
 	if m.locked {
 		return ErrLocked
 	}
@@ -644,7 +644,7 @@ func (m *Manager) beforeCollect(ctx context.Context) error {
 // collectedCurrent notes a collect of the current mailbox.
 func (m *Manager) collectedCurrent() {
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	defer m.unlockOnPanic()
 	m.rk.noOK = false
 }
 

@@ -21,6 +21,12 @@ func catch(f func()) (pe *PanicError) {
 	return nil
 }
 
+// fakeRuntime implements runtime.Error without being the runtime's.
+type fakeRuntime string
+
+func (f fakeRuntime) Error() string { return string(f) }
+func (fakeRuntime) RuntimeError()   {}
+
 //go:noinline
 func indexPanic(i int) int {
 	var a []int
@@ -32,7 +38,7 @@ func indexPanic(i int) int {
 // hold vault data).
 func TestPanicErrorSaysWhereNotWhat(t *testing.T) {
 	pe := catch(func() { _ = indexPanic(3) })
-	if pe == nil || pe.Type != "runtime.boundsError" || !strings.Contains(pe.Runtime, "index out of range [3]") {
+	if pe == nil || pe.Type != "runtime.boundsError" || !strings.Contains(pe.Runtime, "index out of range [N]") {
 		t.Fatalf("bounds: %+v", pe)
 	}
 	if len(pe.Frames) == 0 || !strings.HasPrefix(pe.Frames[0], "enclave.indexPanic panic_test.go:") {
@@ -40,6 +46,20 @@ func TestPanicErrorSaysWhereNotWhat(t *testing.T) {
 	}
 	if !errors.Is(pe, ErrPanic) {
 		t.Fatal("not ErrPanic")
+	}
+	// A runtime error's numbers may come from vault data: only its words.
+	if pe.Runtime != "runtime error: index out of range [N] with length N" {
+		t.Fatalf("bounds text: %q", pe.Runtime)
+	}
+	s := make([]byte, 7, 9)
+	n := 12
+	if pe := catch(func() { _ = s[:n] }); pe.Runtime != "runtime error: slice bounds out of range [:N] with capacity N" {
+		t.Fatalf("slice text: %q", pe.Runtime)
+	}
+	// Only the runtime's own errors: a type that merely implements
+	// runtime.Error keeps nothing of its text.
+	if pe := catch(func() { panic(fakeRuntime("pin 424242")) }); pe.Runtime != "" || pe.Type != "enclave.fakeRuntime" {
+		t.Fatalf("fake runtime error: %+v", pe)
 	}
 	for _, v := range []any{"pin 424242", fmt.Errorf("key %x", []byte{0xde, 0xad}), struct{ Secret string }{"424242"}} {
 		pe := catch(func() { panic(v) })

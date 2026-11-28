@@ -133,6 +133,20 @@ func Serve(c net.Conn, p Platform) int {
 	}
 }
 
+// logPanic logs a run loop's panic, one attribute per frame, innermost
+// first: the supervisor cuts each value it forwards to 120 bytes and takes
+// at most eight.
+func (pr *proc) logPanic(pe *enclave.PanicError) {
+	args := []any{"type", pe.Type, "runtime", pe.Runtime}
+	for i, fr := range pe.Frames {
+		if i == logFrames {
+			break
+		}
+		args = append(args, "at"+strconv.Itoa(i), fr)
+	}
+	pr.log.Warn("vault run loop panicked; zeroized without flushing", args...)
+}
+
 // logFrames is how many frames of a panic the vault process logs: with
 // type and runtime, the eight attributes the supervisor forwards (KindLog).
 const logFrames = 6
@@ -260,7 +274,13 @@ func (pr *proc) run(ctx context.Context, m *vault.Manager) {
 	err := enclave.RunRecovered(ctx, m)
 	pr.runDone <- err
 	if ctx.Err() != nil {
-		return // locked by the supervisor
+		// Locked by the supervisor, which lock() answers. A panic in that
+		// window is logged all the same, and lock() answers it as an error.
+		var pe *enclave.PanicError
+		if errors.As(err, &pe) {
+			pr.logPanic(pe)
+		}
+		return
 	}
 	code, lockFirst := pr.runEnded(err, m.Locked())
 	if lockFirst {
@@ -283,16 +303,7 @@ func (pr *proc) runEnded(err error, locked bool) (code int, lockFirst bool) {
 		pr.log.Warn("split brain: newer state written elsewhere; zeroized without flushing")
 		return ExitSplitBrain, false
 	case errors.As(err, &pe):
-		// One attribute per frame, innermost first: the supervisor cuts each
-		// value it forwards to 120 bytes and takes at most eight.
-		args := []any{"type", pe.Type, "runtime", pe.Runtime}
-		for i, fr := range pe.Frames {
-			if i == logFrames {
-				break
-			}
-			args = append(args, "at"+strconv.Itoa(i), fr)
-		}
-		pr.log.Warn("vault run loop panicked; zeroized without flushing", args...)
+		pr.logPanic(pe)
 		return ExitError, false
 	case locked:
 		return ExitLocked, false
@@ -314,7 +325,16 @@ func (pr *proc) lock(ctx context.Context, reason string) [][]byte {
 		return hostproto.Strings(hostproto.StatusOK)
 	}
 	cancel()
-	<-done
+	var pe *enclave.PanicError
+	if errors.As(<-done, &pe) {
+		// The loop panicked as the lock began: the vault is zeroized
+		// without the lock's flush, lifecycle "locked" or vault.locking, so
+		// the lock is not answered as done (logged by run).
+		if reason == vault.LockDelete {
+			return hostproto.Strings(vaultipc.StatusNotDeleted)
+		}
+		return hostproto.Strings(hostproto.StatusError)
+	}
 	if reason == vault.LockDelete {
 		var lcancel context.CancelFunc
 		ctx, lcancel = context.WithTimeout(ctx, vaultipc.DeleteLockTimeout-vaultipc.DeadlineMargin)

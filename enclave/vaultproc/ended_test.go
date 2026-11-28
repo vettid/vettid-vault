@@ -2,12 +2,15 @@ package vaultproc
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"log/slog"
 	"strings"
 	"testing"
 
 	"github.com/vettid/vettid-vault/enclave"
+	"github.com/vettid/vettid-vault/internal/hostproto"
+	"github.com/vettid/vettid-vault/internal/vaultipc"
 	"github.com/vettid/vettid-vault/vault"
 )
 
@@ -51,5 +54,27 @@ func TestRunEndedTellsAPanicFromALock(t *testing.T) {
 func TestAChannelEndedUnderARunningVaultIsNoLock(t *testing.T) {
 	if channelEndedExit(true) != ExitChannel || channelEndedExit(false) != ExitLocked {
 		t.Fatal("channel end exit codes")
+	}
+}
+
+// A run loop that panicked as the supervisor's lock began: the panic is
+// logged and the lock is answered as an error (not-deleted for a
+// deletion), never as a lock done.
+func TestALockMetByAPanicIsAnError(t *testing.T) {
+	for _, c := range []struct{ reason, want string }{{"", hostproto.StatusError}, {vault.LockDelete, vaultipc.StatusNotDeleted}} {
+		var buf bytes.Buffer
+		pr := &proc{log: slog.New(slog.NewTextHandler(&buf, nil)), exit: make(chan int, 2)}
+		ctx, cancel := context.WithCancel(context.Background())
+		m := &vault.Manager{} // never opened: its loop panics at its start
+		pr.mgr, pr.cancel, pr.runDone = m, cancel, make(chan error, 1)
+		cancel() // the lock's cancel came first
+		pr.run(ctx, m)
+		if !strings.Contains(buf.String(), "vault run loop panicked") || len(pr.exit) != 0 {
+			t.Fatalf("%q: log %q, exits %d", c.reason, buf.String(), len(pr.exit))
+		}
+		// The lock that cancelled it reads the loop's end, which run left.
+		if r := pr.lock(context.Background(), c.reason); string(r[0]) != c.want {
+			t.Fatalf("%q: answered %q", c.reason, r[0])
+		}
 	}
 }

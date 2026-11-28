@@ -189,8 +189,9 @@ func TestAPanicUnderTheLockIsRecordedBeforeAWaiterGetsIt(t *testing.T) {
 	m := &Manager{}
 	waiting := make(chan struct{})
 	sawPanic := make(chan bool, 1)
+	repanicked := false
 	func() {
-		defer func() { _ = recover() }()
+		defer func() { repanicked = recover() != nil }()
 		m.mu.Lock()
 		defer m.unlockOnPanic()
 		go func() {
@@ -205,6 +206,9 @@ func TestAPanicUnderTheLockIsRecordedBeforeAWaiterGetsIt(t *testing.T) {
 	}()
 	if !<-sawPanic {
 		t.Fatal("the waiter got the lock before the panic was recorded")
+	}
+	if !repanicked {
+		t.Fatal("unlockOnPanic stopped the panic instead of passing it on")
 	}
 	if pe := m.RecordedPanic(); pe == nil || len(pe.Frames) == 0 || !strings.HasPrefix(pe.Frames[0], "vault.indexPanic") {
 		t.Fatalf("recorded %+v", pe)
@@ -226,5 +230,35 @@ func TestCrashWithTheLockHeldReturnsWithinItsBound(t *testing.T) {
 	m.Crash()
 	if d := time.Since(began); d < crashLockWait || d > crashLockWait+2*time.Second {
 		t.Fatalf("returned after %v", d)
+	}
+}
+
+// The attachments runner's shape (Fable's probe): a region locked inline
+// that panics, under a deferred cleanup that takes the lock. The cleanup
+// does not take it (the panic holds it), so the goroutine's recover runs
+// and the panic is reported, described where it happened.
+func TestAPanicInAnInlineLockedRegionIsReported(t *testing.T) {
+	got := make(chan *PanicError, 1)
+	m := &Manager{opt: Options{OnPanic: func(pe *PanicError) { got <- pe }}}
+	m.Go(func() {
+		defer func() {
+			if r := recover(); r != nil {
+				m.recordFromCleanup(r)
+				panic(r)
+			}
+			m.mu.Lock()
+			m.mu.Unlock()
+		}()
+		m.mu.Lock()
+		_ = indexPanic(3) // no deferred unlock: the lock stays held
+		m.mu.Unlock()
+	})
+	select {
+	case pe := <-got:
+		if len(pe.Frames) == 0 || !strings.HasPrefix(pe.Frames[0], "vault.indexPanic") {
+			t.Fatalf("frames %q", pe.Frames)
+		}
+	case <-time.After(crashLockWait + 3*time.Second):
+		t.Fatal("a panic under an inline lock hung before its recover")
 	}
 }

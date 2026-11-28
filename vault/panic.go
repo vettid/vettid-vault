@@ -43,13 +43,17 @@ var digits = regexp.MustCompile(`[0-9]+`)
 // DescribePanic describes r, the value recovered by the deferred function
 // that calls it (directly: the frames skipped are its own, runtime.Callers'
 // and that function's).
-func DescribePanic(r any) *PanicError {
+func DescribePanic(r any) *PanicError { return describePanic(r, 1) }
+
+// describePanic is DescribePanic for a caller extra frames further from the
+// deferred function (recordFromCleanup: one).
+func describePanic(r any, extra int) *PanicError {
 	e := &PanicError{Type: fmt.Sprintf("%T", r)}
 	if re, ok := r.(runtime.Error); ok && fromRuntime(r) {
 		e.Runtime = digits.ReplaceAllString(re.Error(), "N")
 	}
 	pcs := make([]uintptr, 64)
-	n := runtime.Callers(3, pcs) // past runtime.Callers, DescribePanic and the deferred function
+	n := runtime.Callers(3+extra, pcs) // past runtime.Callers, describePanic, its callers and the deferred function
 	frames := runtime.CallersFrames(pcs[:n])
 	for {
 		f, more := frames.Next()
@@ -120,6 +124,17 @@ func (m *Manager) unlockOnPanic() {
 func (m *Manager) Fail(pe *PanicError) {
 	m.panicking.Store(true)
 	m.panicked(pe)
+}
+
+// recordFromCleanup records r, recovered by a deferred cleanup that takes
+// m.mu (the attachments runner's), which then panics on instead of
+// cleaning up: the panic may have left m.mu held by this very goroutine (an
+// inline-locked region), and taking it again would hang before the
+// goroutine's recover; the vault ends, so the cleanup is moot. The panic is
+// described without the cleanup's own frame.
+func (m *Manager) recordFromCleanup(r any) {
+	m.panicking.Store(true)
+	m.panicErr.CompareAndSwap(nil, describePanic(r, 1))
 }
 
 // Go runs f in a goroutine of the vault's own. A panic in it zeroizes the
